@@ -2,25 +2,33 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    
+
     function isAuthenticated() {
       return request.auth != null;
     }
-    
+
     function isOwner(userId) {
       return isAuthenticated() && request.auth.uid == userId;
     }
 
+    // Email is compared in both stored casings because Firestore rules cannot lowercase.
+    // Role-based admin (roleIds) is the primary, robust path.
+    function isAdminEmail() {
+      return isAuthenticated() &&
+        (request.auth.token.email == "daruingmejia@gmail.com" ||
+         request.auth.token.email == "Daruingmejia@gmail.com");
+    }
+
     function isAdmin() {
-      return isAuthenticated() && 
+      return isAuthenticated() &&
         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['admin']) ||
-        request.auth.token.email == "Daruingmejia@gmail.com");
+        isAdminEmail());
     }
 
     function isRecruiter() {
-      return isAuthenticated() && 
+      return isAuthenticated() &&
         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['recruiter', 'admin']) ||
-        request.auth.token.email == "Daruingmejia@gmail.com");
+        isAdminEmail());
     }
 
     match /users/{userId} {
@@ -31,50 +39,52 @@ service cloud.firestore {
     }
 
     match /vacancies/{vacancyId} {
-      allow read: if true; // Public can read active vacancies
+      allow read: if true; // Public can read active vacancies (careers portal)
       allow create, update, delete: if isRecruiter();
     }
 
     match /candidates/{candidateId} {
       allow read: if isRecruiter() || isOwner(candidateId);
-      allow create: if isAuthenticated(); // Anonymous users can create their profile
+      allow create: if isAuthenticated(); // Anonymous applicants create their profile
       allow update: if isRecruiter() || isOwner(candidateId);
     }
 
     match /applications/{applicationId} {
-      allow read: if true; // Permitir lectura pública para los formularios de evaluación (el ID es secreto)
+      // Public read is required so the candidate can open their evaluation/test link
+      // by its (secret, random) document id without logging in.
+      allow read: if true;
       allow create: if isAuthenticated();
-      allow update: if isRecruiter() || 
+      allow update: if isRecruiter() ||
         (!isRecruiter() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stage2Answers', 'stage', 'stage2SubmittedAt', 'stage2Scoring', 'testResults', 'lastStageUpdate']));
     }
 
     match /whatsapp_messages/{messageId} {
       allow read: if isRecruiter();
-      allow create: if isRecruiter() || (
-        !isAuthenticated() && 
-        request.resource.data.direction == 'inbound'
-      );
-      allow update, delete: if false; // Messages should be immutable
+      // Inbound messages are now written by the server via the Admin SDK (which
+      // bypasses these rules), so no unauthenticated client write is needed.
+      allow create: if isRecruiter();
+      allow update, delete: if false; // Messages are immutable
     }
 
+    // WhatsApp session credentials. These are read/written ONLY by the server via
+    // the Firebase Admin SDK, which bypasses security rules. No client may touch them.
+    // (Closing these is the whole point of the Admin SDK migration — they used to be
+    // world read/write, which let anyone hijack the company WhatsApp session.)
     match /whatsapp_auth_session_secret_8f73b2a1/{docId} {
-      allow read, write: if true; // Legacy
+      allow read, write: if false;
     }
-
     match /whatsapp_auth_session_v2/{docId} {
-      allow read, write: if true; // Current session store
+      allow read, write: if false;
     }
-
     match /whatsapp_auth_dev/{docId} {
-      allow read, write: if true; // Dev session store
+      allow read, write: if false;
     }
-
     match /whatsapp_auth_prod/{docId} {
-      allow read, write: if true; // Prod session store
+      allow read, write: if false;
     }
 
     match /settings/{document} {
-      allow read: if true; // Public can read settings (like form questions)
+      allow read: if true; // Public can read settings (form questions, company branding)
       allow write: if isRecruiter(); // Only recruiters/admins can modify
     }
 
