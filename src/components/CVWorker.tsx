@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
 export default function CVWorker() {
@@ -10,6 +11,9 @@ export default function CVWorker() {
   useEffect(() => {
     // Only run the worker if the logged-in user is a recruiter
     if (!isRecruiter) return;
+
+    let cancelled = false;
+    let intervalId: any;
 
     const runWorker = async () => {
       if (isRunning.current) return;
@@ -32,7 +36,7 @@ export default function CVWorker() {
 
           try {
             // Call the backend securely, the backend will fetch and parse the PDF without needing Firebase auth
-            const response = await fetch('/api/parse-cv', {
+            const response = await apiFetch('/api/parse-cv', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -116,11 +120,21 @@ export default function CVWorker() {
       }
     };
 
-    // Run once immediately, then every 60 seconds
-    runWorker();
-    const intervalId = setInterval(runWorker, 60 * 1000);
+    const start = async () => {
+      // If the backend processes CVs (admin mode), the browser worker stands down
+      // to avoid duplicate processing across multiple recruiters.
+      try {
+        const health = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+        if (cancelled || health?.serverCvWorker) return;
+      } catch { /* fall through and run in the browser */ }
+      if (cancelled) return;
+      // Run once immediately, then every 60 seconds
+      runWorker();
+      intervalId = setInterval(runWorker, 60 * 1000);
+    };
 
-    return () => clearInterval(intervalId);
+    start();
+    return () => { cancelled = true; if (intervalId) clearInterval(intervalId); };
   }, [isRecruiter]);
 
   // This is a headless component, it renders nothing

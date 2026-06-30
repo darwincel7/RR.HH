@@ -22,9 +22,9 @@ export default function Ranking() {
     async function fetchData() {
       if (!vacancyId) return;
       
-      // Fetch vacancy
-      const vacSnap = await getDocs(query(collection(db, 'vacancies'), where('id', '==', vacancyId)));
-      if (!vacSnap.empty) setVacancy(vacSnap.docs[0].data());
+      // Fetch vacancy by document id (robust regardless of whether docs carry an `id` field)
+      const vacDoc = await getDoc(doc(db, 'vacancies', vacancyId));
+      if (vacDoc.exists()) setVacancy(vacDoc.data());
 
       // Fetch applications
       const q = query(collection(db, 'applications'), where('vacancyId', '==', vacancyId));

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
+import { apiFetch } from '../lib/api';
 import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload } from 'lucide-react';
 
 export default function WhatsAppSettings() {
@@ -26,7 +27,7 @@ export default function WhatsAppSettings() {
 
   const fetchStatus = async () => {
     try {
-      const res = await fetch('/api/whatsapp/status');
+      const res = await apiFetch('/api/whatsapp/status');
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -69,7 +70,7 @@ export default function WhatsAppSettings() {
   const handleReconnect = async () => {
     try {
       setStatus({ status: 'disconnected', qr: null });
-      await fetch('/api/whatsapp/reconnect', { method: 'POST' });
+      await apiFetch('/api/whatsapp/reconnect', { method: 'POST' });
       fetchStatus();
     } catch (error) {
       console.error("Error reconnecting:", error);
@@ -80,7 +81,7 @@ export default function WhatsAppSettings() {
     if (!window.confirm("¿Seguro que deseas cerrar la sesión de WhatsApp? Tendrás que volver a escanear el código QR.")) return;
     try {
       setStatus({ status: 'disconnected', qr: null });
-      await fetch('/api/whatsapp/logout', { method: 'POST' });
+      await apiFetch('/api/whatsapp/logout', { method: 'POST' });
       fetchStatus();
     } catch (error) {
       console.error("Error logging out:", error);

@@ -21,8 +21,8 @@ import pino from "pino";
 import fs from "fs";
 import mammoth from "mammoth";
 
-import { initializeApp } from 'firebase/app';
-import { initializeFirestore, collection, query, where, getDocs, addDoc, serverTimestamp, doc, getDoc, setDoc, deleteDoc, setLogLevel } from 'firebase/firestore';
+import { setLogLevel } from 'firebase/firestore';
+import { getServerDb, type ServerDb } from './serverDb';
 
 import nodemailer from "nodemailer";
 
@@ -39,10 +39,9 @@ process.on('unhandledRejection', (reason: any, promise) => {
   console.error('[Unhandled Rejection]', reason);
 });
 
-// Read Firebase config
-const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf-8'));
-const firebaseApp = initializeApp(firebaseConfig);
-const db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true }, firebaseConfig.firestoreDatabaseId);
+// Server-side Firestore access (Admin SDK preferred, client SDK fallback).
+// Assigned in bootstrap() before the server and WhatsApp client start.
+let db: ServerDb;
 
 dotenv.config({ override: true });
 
@@ -55,7 +54,6 @@ function getAI(): GoogleGenAI | null {
 
   return new GoogleGenAI({ apiKey });
 }
-console.log("GEMINI_API_KEY is present on load:", !!process.env.GEMINI_API_KEY);
 const logger = pino({ level: 'silent' });
 
 // WhatsApp State
@@ -67,9 +65,8 @@ let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disc
 const useFirestoreAuthState = async (collectionName: string) => {
   const writeData = async (data: any, id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
       const str = JSON.stringify(data, BufferJSON.replacer);
-      await setDoc(docRef, { data: str });
+      await db.setDocData(collectionName, id, { data: str });
     } catch (error) {
       console.error("Error saving WhatsApp auth state to Firestore:", error);
     }
@@ -77,10 +74,9 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const readData = async (id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists() && docSnap.data().data) {
-        return JSON.parse(docSnap.data().data, BufferJSON.reviver);
+      const docData = await db.getDocData(collectionName, id);
+      if (docData && docData.data) {
+        return JSON.parse(docData.data, BufferJSON.reviver);
       }
     } catch (error) {
       console.error("Error reading WhatsApp auth state from Firestore:", error);
@@ -90,8 +86,7 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const removeData = async (id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
-      await deleteDoc(docRef);
+      await db.deleteDocData(collectionName, id);
     } catch (error) {
       console.error("Error deleting WhatsApp auth state from Firestore:", error);
     }
@@ -202,24 +197,17 @@ async function connectToWhatsApp() {
             try {
               // Extract phone number from JID (e.g., "18091234567@s.whatsapp.net" -> "18091234567")
               const phone = from.split('@')[0];
-              
-              // Find candidate by phone
-              const candidatesRef = collection(db, 'candidates');
-              const q = query(candidatesRef, where('phone', '==', phone));
-              const querySnapshot = await getDocs(q);
-              
-              if (!querySnapshot.empty) {
-                const candidateDoc = querySnapshot.docs[0];
-                
-                // Save message to whatsapp_messages collection
-                await addDoc(collection(db, 'whatsapp_messages'), {
-                  candidateId: candidateDoc.id,
+
+              // Find candidate by phone, then persist the inbound message.
+              const candidateId = await db.findCandidateIdByPhone(phone);
+              if (candidateId) {
+                await db.addWhatsappMessage({
+                  candidateId,
                   direction: 'inbound',
                   text: text,
                   status: 'received',
-                  sentAt: serverTimestamp()
                 });
-                console.log(`Saved incoming message from ${phone} for candidate ${candidateDoc.id}`);
+                console.log(`Saved incoming message from ${phone} for candidate ${candidateId}`);
               }
             } catch (error) {
               console.error("Error saving incoming WhatsApp message:", error);
@@ -231,15 +219,189 @@ async function connectToWhatsApp() {
   });
 }
 
-// Initialize WhatsApp
-connectToWhatsApp();
+// Initialize the data layer first, then the WhatsApp client and HTTP server.
+async function bootstrap() {
+  db = await getServerDb();
+  connectToWhatsApp().catch(err => console.error('Failed to initialize WhatsApp:', err));
+  startServer();
+
+  // In admin mode the backend owns CV processing (centralized, no per-browser duplication).
+  if (db.canEnforceAuth) {
+    console.log('[server CV worker] Admin mode — backend CV processor enabled (browser worker stands down).');
+    processPendingCVs();
+    setInterval(() => { processPendingCVs().catch(e => console.error('[server CV worker]', e)); }, 60_000);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CV parsing used by the backend CV worker. Mirrors the /api/parse-cv endpoint
+// logic; kept as a function so the worker can score CVs without an HTTP round-trip.
+// ---------------------------------------------------------------------------
+class CvParseError extends Error {
+  status: number;
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
+async function runCvParse(input: { pdfBase64?: string; mimeType?: string; fileUrl?: string }): Promise<any> {
+  const { pdfBase64, fileUrl } = input;
+  const mimeType = input.mimeType || 'application/pdf';
+  let base64Data = pdfBase64;
+
+  if (fileUrl) {
+    let fileRes: Response;
+    try {
+      fileRes = await fetch(fileUrl);
+    } catch (fetchErr) {
+      console.error("Error fetching file from URL:", fetchErr);
+      throw new CvParseError(400, "Failed to fetch file from URL");
+    }
+    if (!fileRes.ok) {
+      console.error(`[parse-cv] Error fetching file from URL. Status: ${fileRes.status}`);
+      throw new CvParseError(400, `No se pudo descargar el archivo del candidato. Código de error de Storage: ${fileRes.status}`);
+    }
+    const arrayBuffer = await fileRes.arrayBuffer();
+    base64Data = Buffer.from(arrayBuffer).toString('base64');
+  }
+
+  if (!base64Data) {
+    throw new CvParseError(400, "No PDF provided");
+  }
+
+  const cvSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      full_name: { type: Type.STRING, nullable: true },
+      phone: { type: Type.STRING, nullable: true },
+      email: { type: Type.STRING, nullable: true },
+      city: { type: Type.STRING, nullable: true },
+      experience_total_years: { type: Type.NUMBER, nullable: true },
+      relevant_experience_summary: { type: Type.STRING },
+      education_summary: { type: Type.STRING },
+      strengths_detected: { type: Type.ARRAY, items: { type: Type.STRING } },
+      risk_flags: { type: Type.ARRAY, items: { type: Type.STRING } },
+      initial_score_1_to_5: { type: Type.NUMBER },
+      recommendation: { type: Type.STRING, enum: ["advance", "review", "low_priority"] },
+      justification: { type: Type.STRING }
+    },
+    required: ["relevant_experience_summary", "education_summary", "strengths_detected", "risk_flags", "initial_score_1_to_5", "recommendation", "justification"]
+  };
+
+  const prompt = `
+  Eres un analista de reclutamiento asistido por IA dentro de un ATS.
+  Tu rol es extraer, resumir y puntuar información de candidatos de forma estructurada a partir de su CV.
+  El archivo adjunto puede ser un documento PDF, de Word o directamente una imagen/foto del currículum. Debes extraer el texto y analizarlo sin importar su formato de origen.
+  No decides contrataciones finales.
+  No afirmas diagnósticos psicológicos ni criminales.
+
+  MUY IMPORTANTE:
+  No extraigas ni asumas habilidades (skills) basadas únicamente en lo que el candidato escribe en su CV, ya que esto se evaluará posteriormente en la práctica mediante tests y entrevistas. Tu análisis debe centrarse en la experiencia demostrable, la educación, y las fortalezas o riesgos que se puedan deducir de su trayectoria.
+
+  PUNTUACIÓN (ESTRELLAS):
+  Califica el CV con una puntuación de estrellas desde 0.1 hasta 5.0 (ej. 3.5, 4.2, 4.8) en el campo 'initial_score_1_to_5'.
+  Esta es una calificación preliminar basada únicamente en la estructura, experiencia demostrable y presentación del CV.
+
+  Siempre devuelves JSON válido según el esquema entregado.
+  Si faltan datos, lo indicas explícitamente en lugar de inventar.
+
+  IMPORTANTE PARA EL TELÉFONO: Extrae el número de teléfono e incluye siempre el código de país. Si no lo tiene, asume +52. El formato ideal es solo números con el código de país (ej. +525551234567).
+
+  Analiza el siguiente CV (que puede ser documento o imagen) y extrae la información solicitada.
+  `;
+
+  let contentsPart: any;
+  if (mimeType.includes('wordprocessingml.document') || mimeType.includes('msword')) {
+    contentsPart = { text: "Texto extraído del CV:\n" + (await mammoth.extractRawText({ buffer: Buffer.from(base64Data, 'base64') })).value };
+  } else {
+    contentsPart = { inlineData: { data: base64Data, mimeType } };
+  }
+
+  console.log(`[parse-cv] Sending request to Gemini... MimeType: ${mimeType}, Size: ${base64Data.length}`);
+
+  const ai = getAI();
+  if (!ai) {
+    throw new CvParseError(400, "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente.");
+  }
+
+  const response = await ai.models.generateContent({
+    model: 'gemini-3.1-pro-preview',
+    contents: [prompt, contentsPart],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: cvSchema,
+      temperature: 0.2
+    }
+  });
+
+  const resultText = response.text;
+  if (!resultText) throw new Error("Empty response from Gemini");
+  const cleanJson = resultText.replace(/```json\n?|```/g, '').trim();
+  return JSON.parse(cleanJson);
+}
+
+// Backend CV worker: in admin mode the server (not each recruiter's browser) processes
+// pending CVs. Candidates are claimed atomically so concurrent runs never double-process.
+let cvWorkerRunning = false;
+async function processPendingCVs() {
+  if (cvWorkerRunning || !db?.canEnforceAuth) return;
+  cvWorkerRunning = true;
+  try {
+    const pending = await db.listPendingCandidates(10);
+    for (const cand of pending) {
+      const claimed = await db.claimCandidate(cand.id);
+      if (!claimed) continue;
+
+      const isBulk = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
+      try {
+        const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
+
+        const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
+        if (isBulk) {
+          if (parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
+          if (parsedData.email) candidateUpdate.email = parsedData.email;
+          if (parsedData.phone) candidateUpdate.phone = parsedData.phone;
+          if (parsedData.city) candidateUpdate.city = parsedData.city;
+        }
+        await db.setDocData('candidates', cand.id, candidateUpdate);
+
+        const appIds = await db.getApplicationIdsByCandidate(cand.id);
+        for (const appId of appIds) {
+          const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
+          if (isBulk && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
+          await db.setDocData('applications', appId, appUpdate);
+        }
+        console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
+      } catch (err: any) {
+        console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
+        await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
+        if (isBulk) {
+          const appIds = await db.getApplicationIdsByCandidate(cand.id);
+          for (const appId of appIds) {
+            await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[server CV worker] loop error:', err);
+  } finally {
+    cvWorkerRunning = false;
+  }
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Trust exactly ONE proxy hop (Cloud Run's front end). Using `true` would trust the
+  // entire X-Forwarded-For chain, letting a client spoof req.ip and bypass per-IP limits.
+  // Per-IP limiting is therefore best-effort; the global cap below is the real budget guard.
+  app.set('trust proxy', 1);
+
   app.use(express.json({ limit: '20mb' }));
-  
+
   // Custom error handler for JSON parsing issues
   app.use((err: any, req: any, res: any, next: any) => {
     if (err instanceof SyntaxError && (err as any).status === 400 && 'body' in err) {
@@ -251,17 +413,88 @@ async function startServer() {
     next(err);
   });
 
+  // ---------------------------------------------------------------------------
+  // Security middleware
+  // ---------------------------------------------------------------------------
+  // Requires a valid recruiter/admin Firebase ID token. Enforcement is active only
+  // when the Admin SDK is available (db.canEnforceAuth); in client fallback mode it
+  // fails open so the app keeps working until admin credentials are configured.
+  let warnedNoEnforce = false;
+  const requireRecruiter = async (req: any, res: any, next: any) => {
+    if (!db?.canEnforceAuth) {
+      if (!warnedNoEnforce) {
+        console.warn('[auth] API auth NOT enforced (no admin credentials). Configure GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_JSON to enable.');
+        warnedNoEnforce = true;
+      }
+      return next();
+    }
+    try {
+      const header = req.headers.authorization || '';
+      const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+      if (!token) return res.status(401).json({ error: 'No autenticado' });
+      const identity = await db.verifyRecruiter(token);
+      if (!identity || !identity.isRecruiter) {
+        return res.status(403).json({ error: 'Acceso restringido a reclutadores' });
+      }
+      req.user = identity;
+      return next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Token inválido o expirado' });
+    }
+  };
+
+  // Lightweight in-memory fixed-window rate limiter (per client IP, per minute).
+  // Best-effort only: req.ip can be partially spoofed via X-Forwarded-For, so this adds
+  // fairness between callers but is NOT the budget guard — see globalRateLimit below.
+  // Single-instance only — a shared store (Redis) is needed when scaling horizontally.
+  const rateLimit = (maxPerMinute: number) => {
+    const hits = new Map<string, { count: number; resetAt: number }>();
+    return (req: any, res: any, next: any) => {
+      const now = Date.now();
+      if (hits.size > 10000) hits.clear(); // crude unbounded-growth guard
+      const key = req.ip || 'unknown';
+      let entry = hits.get(key);
+      if (!entry || now > entry.resetAt) {
+        entry = { count: 0, resetAt: now + 60_000 };
+        hits.set(key, entry);
+      }
+      entry.count++;
+      if (entry.count > maxPerMinute) {
+        return res.status(429).json({ error: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' });
+      }
+      return next();
+    };
+  };
+
+  // Global (all-callers) fixed-window cap. This is the real protection for the AI/email
+  // budget: it bounds total calls per minute regardless of source IP, so it CANNOT be
+  // bypassed by spoofing/rotating X-Forwarded-For. Set generously above legitimate volume.
+  const globalRateLimit = (maxPerMinute: number) => {
+    let count = 0;
+    let resetAt = 0;
+    return (req: any, res: any, next: any) => {
+      const now = Date.now();
+      if (now > resetAt) {
+        count = 0;
+        resetAt = now + 60_000;
+      }
+      count++;
+      if (count > maxPerMinute) {
+        return res.status(429).json({ error: 'Servicio con alta demanda en este momento. Intenta de nuevo en un minuto.' });
+      }
+      return next();
+    };
+  };
+
   // API routes
   app.get("/api/health", (req, res) => {
-    res.json({ 
-      status: "ok", 
-      apiKeyPresent: !!process.env.GEMINI_API_KEY,
-      apiKeyLength: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0
-    });
+    // Do not leak secret metadata (presence/length of API keys) to unauthenticated callers.
+    // serverCvWorker tells the browser CV worker to stand down when the backend handles it.
+    res.json({ status: "ok", serverCvWorker: !!db?.canEnforceAuth });
   });
 
-  // Email Endpoint
-  app.post("/api/email/send", async (req, res) => {
+  // Email Endpoint (public: also used by the candidate application flow). Rate limited.
+  app.post("/api/email/send", globalRateLimit(60), rateLimit(30), async (req, res) => {
     try {
       const { to, subject, html } = req.body;
       
@@ -307,11 +540,11 @@ async function startServer() {
     return cleaned + '@s.whatsapp.net';
   };
 
-  app.get("/api/whatsapp/status", (req, res) => {
+  app.get("/api/whatsapp/status", requireRecruiter, (req, res) => {
     res.json({ status: connectionStatus, qr: qrCode, session: "v2" });
   });
 
-  app.post("/api/whatsapp/reconnect", async (req, res) => {
+  app.post("/api/whatsapp/reconnect", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp reconnect requested...");
       // Optional: clean up the old socket if it still exists somehow
@@ -329,7 +562,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/whatsapp/logout", async (req, res) => {
+  app.post("/api/whatsapp/logout", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp logout requested...");
       if (sock) {
@@ -338,10 +571,7 @@ async function startServer() {
       }
       
       const collectionName = process.env.NODE_ENV === 'production' ? 'whatsapp_auth_prod' : 'whatsapp_auth_dev';
-      const authRef = collection(db, collectionName);
-      const snapshot = await getDocs(authRef);
-      const tasks = snapshot.docs.map(docSnap => deleteDoc(docSnap.ref));
-      await Promise.all(tasks);
+      await db.deleteCollection(collectionName);
 
       qrCode = null;
       connectionStatus = 'disconnected';
@@ -354,7 +584,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/whatsapp/send", async (req, res) => {
+  app.post("/api/whatsapp/send", requireRecruiter, async (req, res) => {
     try {
       const { phone, message } = req.body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
@@ -371,7 +601,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/automations/stage-change", async (req, res) => {
+  app.post("/api/automations/stage-change", requireRecruiter, async (req, res) => {
     try {
       const { phone, message } = req.body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
@@ -389,15 +619,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/check-key", (req, res) => {
-    res.json({ 
-      present: !!process.env.GEMINI_API_KEY, 
-      length: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0,
-      start: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 5) : null
-    });
-  });
-
-  app.post("/api/score-stage2", async (req, res) => {
+  app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { answers } = req.body;
       
@@ -491,20 +713,8 @@ async function startServer() {
     }
   });
 
-  app.get("/api/test-key", (req, res) => {
-    res.json({
-      keyLength: process.env.GEMINI_API_KEY?.length,
-      keyPreview: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 5) : "none"
-    });
-  });
-
-  app.get("/api/test-ai", async (req, res) => {
+  app.get("/api/test-ai", requireRecruiter, async (req, res) => {
     try {
-      const rawKey = process.env.GEMINI_API_KEY;
-      const parsedKey = rawKey ? rawKey.replace(/['"]/g, '').trim() : undefined;
-      console.log("[test-ai] Raw key length:", rawKey?.length, "Parsed key length:", parsedKey?.length);
-      console.log("[test-ai] Parsed Key matches raw key?", rawKey === parsedKey);
-      
       const ai = getAI();
       if (!ai) {
         return res.status(400).json({ success: false, error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
@@ -521,7 +731,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/parse-cv", async (req, res) => {
+  app.post("/api/parse-cv", requireRecruiter, async (req, res) => {
     try {
       const { pdfBase64, mimeType, fileUrl } = req.body;
       
@@ -636,7 +846,7 @@ async function startServer() {
   // ============================================================================
   // AI Test Evaluation Endpoint
   // ============================================================================
-  app.post("/api/evaluate-test", async (req, res) => {
+  app.post("/api/evaluate-test", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { questions, answers } = req.body;
 
@@ -801,7 +1011,6 @@ async function startServer() {
 
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`[TEST] Env var starts as:`, process.env.GEMINI_API_KEY?.substring(0, 10), "Length:", process.env.GEMINI_API_KEY?.length);
   });
   
   server.on('error', (e: any) => {
@@ -815,4 +1024,4 @@ async function startServer() {
   });
 }
 
-startServer();
+bootstrap();

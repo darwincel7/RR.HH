@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, getDocs, doc, deleteDoc, writeBatch, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, doc, writeBatch, setDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage } from '../lib/firebase';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
@@ -86,19 +86,16 @@ export default function CandidatesList() {
     if (!candidateToDelete) return;
     
     try {
-      // 1. Delete candidate document
-      await deleteDoc(doc(db, 'candidates', candidateToDelete.id));
-      
-      // 2. Delete all applications for this candidate
-      const appSnap = await getDocs(collection(db, 'applications'));
+      // Delete the candidate AND all of its applications atomically in a single batch.
+      // Query only the candidate's own applications instead of scanning the whole collection.
+      const appSnap = await getDocs(
+        query(collection(db, 'applications'), where('candidateId', '==', candidateToDelete.id))
+      );
       const batch = writeBatch(db);
-      appSnap.docs.forEach(d => {
-        if (d.data().candidateId === candidateToDelete.id) {
-          batch.delete(d.ref);
-        }
-      });
+      batch.delete(doc(db, 'candidates', candidateToDelete.id));
+      appSnap.docs.forEach(d => batch.delete(d.ref));
       await batch.commit();
-      
+
       setCandidateToDelete(null);
       fetchCandidates(); // Refresh list
     } catch (error) {
@@ -113,24 +110,34 @@ export default function CandidatesList() {
     try {
       const batch = writeBatch(db);
       const appsToMove = candidates.filter(c => selectedApps.includes(c.id));
-      
+
       for (const app of appsToMove) {
         const appRef = doc(db, 'applications', app.id);
         batch.update(appRef, { stage: newStage, lastStageUpdate: serverTimestamp() });
       }
-      
+
       await batch.commit();
 
-      // Trigger whatsapp for each moved app
+      // Trigger automation per candidate. Build the link that matches the target stage
+      // (the eval form for stage 2, the test for presential tests) and keep each send
+      // best-effort so one failure does not block the rest.
       for (const app of appsToMove) {
-        if (app.phone) {
-          const link = `${window.location.origin}/test/${app.id}`;
+        if (!app.phone) continue;
+        try {
+          let link = '';
+          if (newStage === 'Tests presenciales' || newStage === 'Pruebas técnicas') {
+            link = `${window.location.origin}/test/${app.id}`;
+          } else if (newStage === 'Formulario etapa 2 enviado') {
+            link = `${window.location.origin}/eval/${app.id}`;
+          }
           await sendWhatsAppAutomation(app.phone, newStage, {
             nombre: app.candidateName,
             vacante: app.vacancyTitle,
             link,
             email: app.email
           });
+        } catch (autoErr) {
+          console.error(`Automation failed for ${app.id} (stage saved anyway):`, autoErr);
         }
       }
 
@@ -168,8 +175,10 @@ export default function CandidatesList() {
           await uploadBytes(storageRef, file);
           const cvUrl = await getDownloadURL(storageRef);
 
-          // 3. Save Candidate Shell
-          await setDoc(doc(db, 'candidates', candidateId), {
+          // 3 & 4. Save candidate shell + application atomically (no orphans on failure).
+          const applicationId = `${candidateId}_bulk`;
+          const batch = writeBatch(db);
+          batch.set(doc(db, 'candidates', candidateId), {
             fullName: `Procesando: ${file.name}`,
             email: '',
             phone: '',
@@ -179,12 +188,9 @@ export default function CandidatesList() {
             aiStatus: 'pending', // Triggers cron job
             createdAt: serverTimestamp()
           });
-
-          // 4. Create App (Assume general 'Candidatos Generales' or similar, we will just use a generic vacancyId)
-          const applicationId = `${candidateId}_bulk`;
-          await setDoc(doc(db, 'applications', applicationId), {
+          batch.set(doc(db, 'applications', applicationId), {
             candidateId,
-            vacancyId: 'bulk_upload', 
+            vacancyId: 'bulk_upload',
             candidateName: `Procesando: ${file.name}`,
             stage: 'Nuevo',
             cvUrl,
@@ -192,6 +198,7 @@ export default function CandidatesList() {
             submittedAt: serverTimestamp(),
             lastStageUpdate: serverTimestamp()
           });
+          await batch.commit();
 
           completed++;
         }));

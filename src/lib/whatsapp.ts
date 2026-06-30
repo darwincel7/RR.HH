@@ -1,6 +1,7 @@
 import { doc, getDoc, addDoc, collection, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
 import { sendEmail, getEmailTemplate } from './email';
+import { apiFetch } from './api';
 
 export async function sendWhatsAppAutomation(
   phone: string,
@@ -27,8 +28,14 @@ export async function sendWhatsAppAutomation(
         case "Entrevista presencial":
           template = "🎉 ¡Felicidades, {{nombre}}!\n\nHas sido seleccionado/a para avanzar a la etapa final del proceso para el puesto de {{vacante}} 👏\n\nNos encantaría coordinar una entrevista presencial contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Presencial ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.";
           break;
+        case "Recordatorio de entrevista":
+          template = "⏰ Recordatorio de entrevista\n\nHola {{nombre}} 👋\n\nTe recordamos tu entrevista para el puesto de {{vacante}}.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅. ¡Te esperamos!";
+          break;
         case "Oferta":
           template = "🎉 ¡Felicitaciones, {{nombre}}!\n\nHas sido seleccionado/a para incorporarte a nuestro equipo en el puesto de {{vacante}} 👏✨\n\nQueremos coordinar una reunión presencial para revisar detalles y formalizar el acuerdo de inicio laboral.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅\n\n¡Estamos muy emocionados por tenerte en nuestro equipo! 🚀";
+          break;
+        case "Contratado":
+          template = "🎉 ¡Bienvenido(a) al equipo, {{nombre}}!\n\nNos complace confirmarte que has sido seleccionado(a) para el puesto de {{vacante}} 👏✨\n\nEn breve nos pondremos en contacto contigo para coordinar los detalles de tu incorporación (documentación, fecha de inicio y proceso de inducción).\n\nPor favor, responde a este mensaje para confirmar que recibiste esta notificación ✅\n\n¡Estamos muy felices de tenerte con nosotros! 🚀";
           break;
         case "Descartado":
           template = "Hola {{nombre}} 👋,\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. 🙏\n\nTras revisar todos los perfiles, hemos decidido continuar con otros candidatos en esta etapa. Agradecemos tu tiempo y el interés que mostraste. 🌟\n\n¡Te deseamos muchos éxitos!";
@@ -69,7 +76,7 @@ export async function sendWhatsAppAutomation(
     }
 
     // Send message via API
-    const res = await fetch('/api/automations/stage-change', {
+    const res = await apiFetch('/api/automations/stage-change', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone, message })

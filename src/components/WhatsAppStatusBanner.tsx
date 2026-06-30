@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import { apiFetch } from '../lib/api';
 
 export default function WhatsAppStatusBanner() {
   const [status, setStatus] = useState<any>(null);
@@ -8,7 +9,7 @@ export default function WhatsAppStatusBanner() {
   useEffect(() => {
     const checkStatus = async () => {
       try {
-        const res = await fetch('/api/whatsapp/status');
+        const res = await apiFetch('/api/whatsapp/status');
         if (res.ok) {
           const contentType = res.headers.get("content-type");
           if (contentType && contentType.indexOf("application/json") !== -1) {
