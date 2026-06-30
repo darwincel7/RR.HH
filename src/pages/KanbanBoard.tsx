@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage } from '../lib/firebase';
@@ -81,46 +81,58 @@ export default function KanbanBoard() {
   const handleBulkMove = async (targetStage: string) => {
     if (!targetStage || selectedApps.size === 0) return;
     setBulkActionLoading(true);
-    try {
-      const appsToMove = applications.filter(a => selectedApps.has(a.id));
-      
-      for (const movedApp of appsToMove) {
-        if (movedApp.stage === targetStage) continue; // Skip if already there
 
-        // 1. Update in Firestore
+    const appsToMove = applications.filter(a => selectedApps.has(a.id) && a.stage !== targetStage);
+    let movedCount = 0;
+    const failed: string[] = [];
+
+    // Process each candidate independently so one failure doesn't abort the whole batch.
+    for (const movedApp of appsToMove) {
+      try {
+        // 1. Update the stage in Firestore (this is the source of truth for the move).
         const appRef = doc(db, 'applications', movedApp.id);
-        await updateDoc(appRef, { 
+        await updateDoc(appRef, {
           stage: targetStage,
           lastStageUpdate: serverTimestamp()
         });
+        movedCount++;
 
-        // 2. Trigger Automation
-        const candSnap = await getDoc(doc(db, 'candidates', movedApp.candidateId));
-        if (candSnap.exists()) {
-          const phone = candSnap.data().phone;
-          
-          let link = '';
-          if (targetStage === 'Pruebas técnicas' || targetStage === 'Tests presenciales') {
-            link = `${window.location.origin}/test/${movedApp.id}`;
-          } else if (targetStage === 'Formulario etapa 2 enviado') {
-            link = `${window.location.origin}/eval/${movedApp.id}`;
+        // 2. Trigger automation as best-effort: a failed WhatsApp/email must NOT undo the move.
+        try {
+          const candSnap = await getDoc(doc(db, 'candidates', movedApp.candidateId));
+          if (candSnap.exists()) {
+            const phone = candSnap.data().phone;
+
+            let link = '';
+            if (targetStage === 'Pruebas técnicas' || targetStage === 'Tests presenciales') {
+              link = `${window.location.origin}/test/${movedApp.id}`;
+            } else if (targetStage === 'Formulario etapa 2 enviado') {
+              link = `${window.location.origin}/eval/${movedApp.id}`;
+            }
+
+            await sendWhatsAppAutomation(phone, targetStage, {
+              nombre: movedApp.candidateName,
+              vacante: vacancy?.title,
+              link,
+              email: candSnap.data().email
+            });
           }
-
-          await sendWhatsAppAutomation(phone, targetStage, {
-            nombre: movedApp.candidateName,
-            vacante: vacancy?.title,
-            link,
-            email: candSnap.data().email
-          });
+        } catch (autoErr) {
+          console.error(`Automation failed for ${movedApp.id} (stage saved anyway):`, autoErr);
         }
+      } catch (err) {
+        console.error(`Error moving application ${movedApp.id}:`, err);
+        failed.push(movedApp.candidateName || movedApp.id);
       }
-      setSelectedApps(new Set()); // Clear selection
-      alert(`✅ ${appsToMove.length} candidato(s) movidos exitosamente a "${targetStage}".`);
-    } catch (error) {
-      console.error("Error bulk updating stage:", error);
-      alert("Error al mover candidatos. Revisa la consola o tus permisos.");
-    } finally {
-      setBulkActionLoading(false);
+    }
+
+    setSelectedApps(new Set()); // Clear selection
+    setBulkActionLoading(false);
+
+    if (failed.length === 0) {
+      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".`);
+    } else {
+      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
     }
   };
 
@@ -161,8 +173,11 @@ export default function KanbanBoard() {
           await uploadBytes(storageRef, file);
           const cvUrl = await getDownloadURL(storageRef);
 
-          // 3. Save Candidate Shell
-          await setDoc(doc(db, 'candidates', candidateId), {
+          // 3 & 4. Save candidate shell + application atomically so a failure never
+          // leaves an orphaned candidate without its application (or vice versa).
+          const applicationId = `${candidateId}_${vacancyId}`;
+          const batch = writeBatch(db);
+          batch.set(doc(db, 'candidates', candidateId), {
             fullName: `Procesando: ${file.name}`,
             email: '',
             phone: '',
@@ -172,10 +187,7 @@ export default function KanbanBoard() {
             aiStatus: 'pending', // This triggers our background CV processor cron
             createdAt: serverTimestamp()
           });
-
-          // 4. Create an Application in "Nuevo" associating the candidate with this vacancy
-          const applicationId = `${candidateId}_${vacancyId}`;
-          await setDoc(doc(db, 'applications', applicationId), {
+          batch.set(doc(db, 'applications', applicationId), {
             candidateId,
             vacancyId: vacancyId,
             vacancyTitle: vacancy?.title || '',
@@ -186,6 +198,7 @@ export default function KanbanBoard() {
             submittedAt: serverTimestamp(),
             lastStageUpdate: serverTimestamp()
           });
+          await batch.commit();
 
           completed++;
         }));

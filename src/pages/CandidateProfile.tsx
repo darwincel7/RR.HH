@@ -42,6 +42,7 @@ export default function CandidateProfile() {
   const [scorecardTemplate, setScorecardTemplate] = useState<any>(null);
 
   useEffect(() => {
+    let unsubscribeMessages: (() => void) | undefined;
     async function fetchCandidate() {
       if (!candidateId) return;
       try {
@@ -85,7 +86,7 @@ export default function CandidateProfile() {
         const msgRef = collection(db, 'whatsapp_messages');
         const msgQ = query(msgRef, where('candidateId', '==', candidateId));
         
-        const unsubscribe = onSnapshot(msgQ, (snapshot) => {
+        unsubscribeMessages = onSnapshot(msgQ, (snapshot) => {
           const msgs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
           msgs.sort((a: any, b: any) => {
             const timeA = a.sentAt?.toMillis() || 0;
@@ -94,10 +95,6 @@ export default function CandidateProfile() {
           });
           setChatMessages(msgs);
         });
-
-        // Store unsubscribe function if needed, but for now we'll just let it run
-        // since the component lifecycle is simple enough.
-
       } catch (error) {
         console.error("Error fetching candidate:", error);
       } finally {
@@ -117,6 +114,12 @@ export default function CandidateProfile() {
       })
       .then(setWsStatus)
       .catch(err => console.error("Error fetching WhatsApp status:", err));
+
+    // Clean up the real-time WhatsApp messages listener on unmount / candidate change
+    // to avoid leaking Firestore listeners across navigation.
+    return () => {
+      if (unsubscribeMessages) unsubscribeMessages();
+    };
   }, [candidateId]);
 
   const analyzeCVWithAI = async () => {
@@ -203,6 +206,7 @@ export default function CandidateProfile() {
       }
     } catch (error) {
       console.error("Error sending WhatsApp:", error);
+      alert('No se pudo enviar el mensaje (error de red). Tu texto se mantiene; intenta de nuevo.');
     } finally {
       setSendingMsg(false);
     }
