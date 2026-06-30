@@ -395,8 +395,10 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Trust the Cloud Run / proxy hop so req.ip reflects the real client for rate limiting.
-  app.set('trust proxy', true);
+  // Trust exactly ONE proxy hop (Cloud Run's front end). Using `true` would trust the
+  // entire X-Forwarded-For chain, letting a client spoof req.ip and bypass per-IP limits.
+  // Per-IP limiting is therefore best-effort; the global cap below is the real budget guard.
+  app.set('trust proxy', 1);
 
   app.use(express.json({ limit: '20mb' }));
 
@@ -442,6 +444,8 @@ async function startServer() {
   };
 
   // Lightweight in-memory fixed-window rate limiter (per client IP, per minute).
+  // Best-effort only: req.ip can be partially spoofed via X-Forwarded-For, so this adds
+  // fairness between callers but is NOT the budget guard — see globalRateLimit below.
   // Single-instance only — a shared store (Redis) is needed when scaling horizontally.
   const rateLimit = (maxPerMinute: number) => {
     const hits = new Map<string, { count: number; resetAt: number }>();
@@ -462,6 +466,26 @@ async function startServer() {
     };
   };
 
+  // Global (all-callers) fixed-window cap. This is the real protection for the AI/email
+  // budget: it bounds total calls per minute regardless of source IP, so it CANNOT be
+  // bypassed by spoofing/rotating X-Forwarded-For. Set generously above legitimate volume.
+  const globalRateLimit = (maxPerMinute: number) => {
+    let count = 0;
+    let resetAt = 0;
+    return (req: any, res: any, next: any) => {
+      const now = Date.now();
+      if (now > resetAt) {
+        count = 0;
+        resetAt = now + 60_000;
+      }
+      count++;
+      if (count > maxPerMinute) {
+        return res.status(429).json({ error: 'Servicio con alta demanda en este momento. Intenta de nuevo en un minuto.' });
+      }
+      return next();
+    };
+  };
+
   // API routes
   app.get("/api/health", (req, res) => {
     // Do not leak secret metadata (presence/length of API keys) to unauthenticated callers.
@@ -470,7 +494,7 @@ async function startServer() {
   });
 
   // Email Endpoint (public: also used by the candidate application flow). Rate limited.
-  app.post("/api/email/send", rateLimit(30), async (req, res) => {
+  app.post("/api/email/send", globalRateLimit(60), rateLimit(30), async (req, res) => {
     try {
       const { to, subject, html } = req.body;
       
@@ -595,7 +619,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/score-stage2", rateLimit(20), async (req, res) => {
+  app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { answers } = req.body;
       
@@ -822,7 +846,7 @@ async function startServer() {
   // ============================================================================
   // AI Test Evaluation Endpoint
   // ============================================================================
-  app.post("/api/evaluate-test", rateLimit(20), async (req, res) => {
+  app.post("/api/evaluate-test", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { questions, answers } = req.body;
 
