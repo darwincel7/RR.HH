@@ -12,6 +12,9 @@ export default function CVWorker() {
     // Only run the worker if the logged-in user is a recruiter
     if (!isRecruiter) return;
 
+    let cancelled = false;
+    let intervalId: any;
+
     const runWorker = async () => {
       if (isRunning.current) return;
       isRunning.current = true;
@@ -117,11 +120,21 @@ export default function CVWorker() {
       }
     };
 
-    // Run once immediately, then every 60 seconds
-    runWorker();
-    const intervalId = setInterval(runWorker, 60 * 1000);
+    const start = async () => {
+      // If the backend processes CVs (admin mode), the browser worker stands down
+      // to avoid duplicate processing across multiple recruiters.
+      try {
+        const health = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
+        if (cancelled || health?.serverCvWorker) return;
+      } catch { /* fall through and run in the browser */ }
+      if (cancelled) return;
+      // Run once immediately, then every 60 seconds
+      runWorker();
+      intervalId = setInterval(runWorker, 60 * 1000);
+    };
 
-    return () => clearInterval(intervalId);
+    start();
+    return () => { cancelled = true; if (intervalId) clearInterval(intervalId); };
   }, [isRecruiter]);
 
   // This is a headless component, it renders nothing

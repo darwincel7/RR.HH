@@ -40,6 +40,12 @@ export interface ServerDb {
   addWhatsappMessage(data: Record<string, any>): Promise<void>;
   /** Verifies a Firebase ID token and resolves the caller's recruiter/admin status. Admin mode only. */
   verifyRecruiter(idToken: string): Promise<RecruiterIdentity | null>;
+  /** Candidates awaiting AI CV analysis (aiStatus == 'pending'). */
+  listPendingCandidates(max: number): Promise<Array<{ id: string; cvUrl?: string; cvFileType?: string; fullName?: string }>>;
+  /** Atomically claims a candidate for processing (pending -> processing). Returns false if already claimed. */
+  claimCandidate(id: string): Promise<boolean>;
+  /** Ids of all applications for a candidate. */
+  getApplicationIdsByCandidate(candidateId: string): Promise<string[]>;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -103,6 +109,23 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       async addWhatsappMessage(data) {
         await adb.collection('whatsapp_messages').add({ ...data, sentAt: FieldValue.serverTimestamp() });
       },
+      async listPendingCandidates(max) {
+        const snap = await adb.collection('candidates').where('aiStatus', '==', 'pending').limit(max).get();
+        return snap.docs.map((d: any) => ({ id: d.id, cvUrl: d.data().cvUrl, cvFileType: d.data().cvFileType, fullName: d.data().fullName }));
+      },
+      async claimCandidate(id) {
+        const ref = adb.collection('candidates').doc(id);
+        return await adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists || snap.data()?.aiStatus !== 'pending') return false;
+          tx.update(ref, { aiStatus: 'processing' });
+          return true;
+        });
+      },
+      async getApplicationIdsByCandidate(candidateId) {
+        const snap = await adb.collection('applications').where('candidateId', '==', candidateId).get();
+        return snap.docs.map((d: any) => d.id);
+      },
       async verifyRecruiter(idToken) {
         const decoded = await auth.verifyIdToken(idToken);
         const email = decoded.email || null;
@@ -156,6 +179,21 @@ async function initClient(): Promise<ServerDb> {
     },
     async addWhatsappMessage(data) {
       await addDoc(collection(cdb, 'whatsapp_messages'), { ...data, sentAt: serverTimestamp() });
+    },
+    async listPendingCandidates(max) {
+      const snap = await getDocs(query(collection(cdb, 'candidates'), where('aiStatus', '==', 'pending'), limit(max)));
+      return snap.docs.map(d => ({ id: d.id, cvUrl: d.data().cvUrl, cvFileType: d.data().cvFileType, fullName: d.data().fullName }));
+    },
+    async claimCandidate(id) {
+      const ref = doc(cdb, 'candidates', id);
+      const snap = await getDoc(ref);
+      if (!snap.exists() || snap.data()?.aiStatus !== 'pending') return false;
+      await setDoc(ref, { aiStatus: 'processing' }, { merge: true });
+      return true;
+    },
+    async getApplicationIdsByCandidate(candidateId) {
+      const snap = await getDocs(query(collection(cdb, 'applications'), where('candidateId', '==', candidateId)));
+      return snap.docs.map(d => d.id);
     },
     async verifyRecruiter() {
       // The client SDK cannot verify ID tokens. Auth enforcement is disabled in this mode.
