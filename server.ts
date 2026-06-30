@@ -21,8 +21,8 @@ import pino from "pino";
 import fs from "fs";
 import mammoth from "mammoth";
 
-import { initializeApp } from 'firebase/app';
-import { initializeFirestore, collection, query, where, getDocs, addDoc, serverTimestamp, doc, getDoc, setDoc, deleteDoc, setLogLevel } from 'firebase/firestore';
+import { setLogLevel } from 'firebase/firestore';
+import { getServerDb, type ServerDb } from './serverDb';
 
 import nodemailer from "nodemailer";
 
@@ -39,10 +39,9 @@ process.on('unhandledRejection', (reason: any, promise) => {
   console.error('[Unhandled Rejection]', reason);
 });
 
-// Read Firebase config
-const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf-8'));
-const firebaseApp = initializeApp(firebaseConfig);
-const db = initializeFirestore(firebaseApp, { experimentalForceLongPolling: true }, firebaseConfig.firestoreDatabaseId);
+// Server-side Firestore access (Admin SDK preferred, client SDK fallback).
+// Assigned in bootstrap() before the server and WhatsApp client start.
+let db: ServerDb;
 
 dotenv.config({ override: true });
 
@@ -66,9 +65,8 @@ let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disc
 const useFirestoreAuthState = async (collectionName: string) => {
   const writeData = async (data: any, id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
       const str = JSON.stringify(data, BufferJSON.replacer);
-      await setDoc(docRef, { data: str });
+      await db.setDocData(collectionName, id, { data: str });
     } catch (error) {
       console.error("Error saving WhatsApp auth state to Firestore:", error);
     }
@@ -76,10 +74,9 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const readData = async (id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
-      const docSnap = await getDoc(docRef);
-      if (docSnap.exists() && docSnap.data().data) {
-        return JSON.parse(docSnap.data().data, BufferJSON.reviver);
+      const docData = await db.getDocData(collectionName, id);
+      if (docData && docData.data) {
+        return JSON.parse(docData.data, BufferJSON.reviver);
       }
     } catch (error) {
       console.error("Error reading WhatsApp auth state from Firestore:", error);
@@ -89,8 +86,7 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const removeData = async (id: string) => {
     try {
-      const docRef = doc(db, collectionName, id);
-      await deleteDoc(docRef);
+      await db.deleteDocData(collectionName, id);
     } catch (error) {
       console.error("Error deleting WhatsApp auth state from Firestore:", error);
     }
@@ -201,24 +197,17 @@ async function connectToWhatsApp() {
             try {
               // Extract phone number from JID (e.g., "18091234567@s.whatsapp.net" -> "18091234567")
               const phone = from.split('@')[0];
-              
-              // Find candidate by phone
-              const candidatesRef = collection(db, 'candidates');
-              const q = query(candidatesRef, where('phone', '==', phone));
-              const querySnapshot = await getDocs(q);
-              
-              if (!querySnapshot.empty) {
-                const candidateDoc = querySnapshot.docs[0];
-                
-                // Save message to whatsapp_messages collection
-                await addDoc(collection(db, 'whatsapp_messages'), {
-                  candidateId: candidateDoc.id,
+
+              // Find candidate by phone, then persist the inbound message.
+              const candidateId = await db.findCandidateIdByPhone(phone);
+              if (candidateId) {
+                await db.addWhatsappMessage({
+                  candidateId,
                   direction: 'inbound',
                   text: text,
                   status: 'received',
-                  sentAt: serverTimestamp()
                 });
-                console.log(`Saved incoming message from ${phone} for candidate ${candidateDoc.id}`);
+                console.log(`Saved incoming message from ${phone} for candidate ${candidateId}`);
               }
             } catch (error) {
               console.error("Error saving incoming WhatsApp message:", error);
@@ -230,8 +219,12 @@ async function connectToWhatsApp() {
   });
 }
 
-// Initialize WhatsApp
-connectToWhatsApp();
+// Initialize the data layer first, then the WhatsApp client and HTTP server.
+async function bootstrap() {
+  db = await getServerDb();
+  connectToWhatsApp().catch(err => console.error('Failed to initialize WhatsApp:', err));
+  startServer();
+}
 
 async function startServer() {
   const app = express();
@@ -334,10 +327,7 @@ async function startServer() {
       }
       
       const collectionName = process.env.NODE_ENV === 'production' ? 'whatsapp_auth_prod' : 'whatsapp_auth_dev';
-      const authRef = collection(db, collectionName);
-      const snapshot = await getDocs(authRef);
-      const tasks = snapshot.docs.map(docSnap => deleteDoc(docSnap.ref));
-      await Promise.all(tasks);
+      await db.deleteCollection(collectionName);
 
       qrCode = null;
       connectionStatus = 'disconnected';
@@ -790,4 +780,4 @@ async function startServer() {
   });
 }
 
-startServer();
+bootstrap();
