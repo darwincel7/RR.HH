@@ -393,7 +393,8 @@ async function processPendingCVs() {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  // Cloud Run injects PORT (defaults to 8080); fall back to 3000 for local dev.
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   // Trust exactly ONE proxy hop (Cloud Run's front end). Using `true` would trust the
   // entire X-Forwarded-For chain, letting a client spoof req.ip and bypass per-IP limits.
