@@ -30,6 +30,9 @@ export async function sendWhatsAppAutomation(
         case "Oferta":
           template = "🎉 ¡Felicitaciones, {{nombre}}!\n\nHas sido seleccionado/a para incorporarte a nuestro equipo en el puesto de {{vacante}} 👏✨\n\nQueremos coordinar una reunión presencial para revisar detalles y formalizar el acuerdo de inicio laboral.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅\n\n¡Estamos muy emocionados por tenerte en nuestro equipo! 🚀";
           break;
+        case "Contratado":
+          template = "🎉 ¡Bienvenido(a) al equipo, {{nombre}}!\n\nNos complace confirmarte que has sido seleccionado(a) para el puesto de {{vacante}} 👏✨\n\nEn breve nos pondremos en contacto contigo para coordinar los detalles de tu incorporación (documentación, fecha de inicio y proceso de inducción).\n\nPor favor, responde a este mensaje para confirmar que recibiste esta notificación ✅\n\n¡Estamos muy felices de tenerte con nosotros! 🚀";
+          break;
         case "Descartado":
           template = "Hola {{nombre}} 👋,\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. 🙏\n\nTras revisar todos los perfiles, hemos decidido continuar con otros candidatos en esta etapa. Agradecemos tu tiempo y el interés que mostraste. 🌟\n\n¡Te deseamos muchos éxitos!";
           break;

@@ -7,9 +7,14 @@ interface AuthContextType {
   user: User | null;
   userData: any | null;
   loading: boolean;
+  isRecruiter: boolean;
+  isAdmin: boolean;
   loginWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
 }
+
+// Kept in sync with the hardcoded fallback admin in firestore.rules.
+const ADMIN_EMAILS = ['daruingmejia@gmail.com'];
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
@@ -65,8 +70,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const email = (user?.email || '').toLowerCase();
+  const roleIds: string[] = Array.isArray(userData?.roleIds) ? userData.roleIds : [];
+  const isAdmin = roleIds.includes('admin') || ADMIN_EMAILS.includes(email);
+  const isRecruiter = isAdmin || roleIds.includes('recruiter');
+
   return (
-    <AuthContext.Provider value={{ user, userData, loading, loginWithGoogle, logout }}>
+    <AuthContext.Provider value={{ user, userData, loading, isRecruiter, isAdmin, loginWithGoogle, logout }}>
       {children}
     </AuthContext.Provider>
   );

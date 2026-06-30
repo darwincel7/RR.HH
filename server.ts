@@ -55,7 +55,6 @@ function getAI(): GoogleGenAI | null {
 
   return new GoogleGenAI({ apiKey });
 }
-console.log("GEMINI_API_KEY is present on load:", !!process.env.GEMINI_API_KEY);
 const logger = pino({ level: 'silent' });
 
 // WhatsApp State
@@ -253,11 +252,8 @@ async function startServer() {
 
   // API routes
   app.get("/api/health", (req, res) => {
-    res.json({ 
-      status: "ok", 
-      apiKeyPresent: !!process.env.GEMINI_API_KEY,
-      apiKeyLength: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0
-    });
+    // Do not leak secret metadata (presence/length of API keys) to unauthenticated callers.
+    res.json({ status: "ok" });
   });
 
   // Email Endpoint
@@ -389,14 +385,6 @@ async function startServer() {
     }
   });
 
-  app.get("/api/check-key", (req, res) => {
-    res.json({ 
-      present: !!process.env.GEMINI_API_KEY, 
-      length: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.length : 0,
-      start: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 5) : null
-    });
-  });
-
   app.post("/api/score-stage2", async (req, res) => {
     try {
       const { answers } = req.body;
@@ -491,20 +479,8 @@ async function startServer() {
     }
   });
 
-  app.get("/api/test-key", (req, res) => {
-    res.json({
-      keyLength: process.env.GEMINI_API_KEY?.length,
-      keyPreview: process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.substring(0, 5) : "none"
-    });
-  });
-
   app.get("/api/test-ai", async (req, res) => {
     try {
-      const rawKey = process.env.GEMINI_API_KEY;
-      const parsedKey = rawKey ? rawKey.replace(/['"]/g, '').trim() : undefined;
-      console.log("[test-ai] Raw key length:", rawKey?.length, "Parsed key length:", parsedKey?.length);
-      console.log("[test-ai] Parsed Key matches raw key?", rawKey === parsedKey);
-      
       const ai = getAI();
       if (!ai) {
         return res.status(400).json({ success: false, error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
@@ -801,7 +777,6 @@ async function startServer() {
 
   const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`[TEST] Env var starts as:`, process.env.GEMINI_API_KEY?.substring(0, 10), "Length:", process.env.GEMINI_API_KEY?.length);
   });
   
   server.on('error', (e: any) => {

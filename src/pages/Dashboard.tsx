@@ -28,7 +28,7 @@ export default function Dashboard() {
       try {
         // Fetch Vacancies
         const vacSnap = await getDocs(collection(db, 'vacancies'));
-        const activeVacancies = vacSnap.docs.filter(d => d.data().status === 'active').length;
+        const activeVacancies = vacSnap.docs.filter(d => d.data().active === true).length;
         
         const vacMap = new Map();
         vacSnap.docs.forEach(d => {
