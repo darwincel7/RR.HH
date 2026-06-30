@@ -4,6 +4,7 @@ import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc, serv
 import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import { apiFetch } from '../lib/api';
 import { Loader2, ArrowLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink } from 'lucide-react';
 
 export default function CandidateProfile() {
@@ -104,7 +105,7 @@ export default function CandidateProfile() {
     fetchCandidate();
 
     // Check WhatsApp status
-    fetch('/api/whatsapp/status')
+    apiFetch('/api/whatsapp/status')
       .then(res => {
         const contentType = res.headers.get("content-type");
         if (contentType && contentType.indexOf("application/json") !== -1) {
@@ -127,12 +128,12 @@ export default function CandidateProfile() {
     setAnalyzingCV(true);
     try {
       // Call backend directly with the URL to bypass CORS issues
-      const response = await fetch('/api/parse-cv', {
+      const response = await apiFetch('/api/parse-cv', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          fileUrl: candidate.cvUrl, 
-          mimeType: candidate.cvFileType || 'application/pdf' 
+        body: JSON.stringify({
+          fileUrl: candidate.cvUrl,
+          mimeType: candidate.cvFileType || 'application/pdf'
         })
       });
 
@@ -186,7 +187,7 @@ export default function CandidateProfile() {
     if (!message || !candidate.phone) return;
     setSendingMsg(true);
     try {
-      const res = await fetch('/api/whatsapp/send', {
+      const res = await apiFetch('/api/whatsapp/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ phone: candidate.phone, message })

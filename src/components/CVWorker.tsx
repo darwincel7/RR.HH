@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 
 export default function CVWorker() {
@@ -32,7 +33,7 @@ export default function CVWorker() {
 
           try {
             // Call the backend securely, the backend will fetch and parse the PDF without needing Firebase auth
-            const response = await fetch('/api/parse-cv', {
+            const response = await apiFetch('/api/parse-cv', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({

@@ -1,6 +1,7 @@
 import { doc, getDoc, addDoc, collection, serverTimestamp, query, where, getDocs } from 'firebase/firestore';
 import { db } from './firebase';
 import { sendEmail, getEmailTemplate } from './email';
+import { apiFetch } from './api';
 
 export async function sendWhatsAppAutomation(
   phone: string,
@@ -75,7 +76,7 @@ export async function sendWhatsAppAutomation(
     }
 
     // Send message via API
-    const res = await fetch('/api/automations/stage-change', {
+    const res = await apiFetch('/api/automations/stage-change', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ phone, message })

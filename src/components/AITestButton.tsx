@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Bot, Check, AlertCircle, Loader2 } from 'lucide-react';
+import { apiFetch } from '../lib/api';
 
 export default function AITestButton({ isCollapsed }: { isCollapsed?: boolean }) {
   const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
@@ -9,7 +10,7 @@ export default function AITestButton({ isCollapsed }: { isCollapsed?: boolean })
     setStatus('loading');
     setMessage('');
     try {
-      const res = await fetch('/api/test-ai');
+      const res = await apiFetch('/api/test-ai');
       const data = await res.json();
       if (res.ok && data.success) {
         setStatus('success');

@@ -230,8 +230,11 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Trust the Cloud Run / proxy hop so req.ip reflects the real client for rate limiting.
+  app.set('trust proxy', true);
+
   app.use(express.json({ limit: '20mb' }));
-  
+
   // Custom error handler for JSON parsing issues
   app.use((err: any, req: any, res: any, next: any) => {
     if (err instanceof SyntaxError && (err as any).status === 400 && 'body' in err) {
@@ -243,14 +246,65 @@ async function startServer() {
     next(err);
   });
 
+  // ---------------------------------------------------------------------------
+  // Security middleware
+  // ---------------------------------------------------------------------------
+  // Requires a valid recruiter/admin Firebase ID token. Enforcement is active only
+  // when the Admin SDK is available (db.canEnforceAuth); in client fallback mode it
+  // fails open so the app keeps working until admin credentials are configured.
+  let warnedNoEnforce = false;
+  const requireRecruiter = async (req: any, res: any, next: any) => {
+    if (!db?.canEnforceAuth) {
+      if (!warnedNoEnforce) {
+        console.warn('[auth] API auth NOT enforced (no admin credentials). Configure GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_JSON to enable.');
+        warnedNoEnforce = true;
+      }
+      return next();
+    }
+    try {
+      const header = req.headers.authorization || '';
+      const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+      if (!token) return res.status(401).json({ error: 'No autenticado' });
+      const identity = await db.verifyRecruiter(token);
+      if (!identity || !identity.isRecruiter) {
+        return res.status(403).json({ error: 'Acceso restringido a reclutadores' });
+      }
+      req.user = identity;
+      return next();
+    } catch (err) {
+      return res.status(401).json({ error: 'Token inválido o expirado' });
+    }
+  };
+
+  // Lightweight in-memory fixed-window rate limiter (per client IP, per minute).
+  // Single-instance only — a shared store (Redis) is needed when scaling horizontally.
+  const rateLimit = (maxPerMinute: number) => {
+    const hits = new Map<string, { count: number; resetAt: number }>();
+    return (req: any, res: any, next: any) => {
+      const now = Date.now();
+      if (hits.size > 10000) hits.clear(); // crude unbounded-growth guard
+      const key = req.ip || 'unknown';
+      let entry = hits.get(key);
+      if (!entry || now > entry.resetAt) {
+        entry = { count: 0, resetAt: now + 60_000 };
+        hits.set(key, entry);
+      }
+      entry.count++;
+      if (entry.count > maxPerMinute) {
+        return res.status(429).json({ error: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' });
+      }
+      return next();
+    };
+  };
+
   // API routes
   app.get("/api/health", (req, res) => {
     // Do not leak secret metadata (presence/length of API keys) to unauthenticated callers.
     res.json({ status: "ok" });
   });
 
-  // Email Endpoint
-  app.post("/api/email/send", async (req, res) => {
+  // Email Endpoint (public: also used by the candidate application flow). Rate limited.
+  app.post("/api/email/send", rateLimit(30), async (req, res) => {
     try {
       const { to, subject, html } = req.body;
       
@@ -296,11 +350,11 @@ async function startServer() {
     return cleaned + '@s.whatsapp.net';
   };
 
-  app.get("/api/whatsapp/status", (req, res) => {
+  app.get("/api/whatsapp/status", requireRecruiter, (req, res) => {
     res.json({ status: connectionStatus, qr: qrCode, session: "v2" });
   });
 
-  app.post("/api/whatsapp/reconnect", async (req, res) => {
+  app.post("/api/whatsapp/reconnect", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp reconnect requested...");
       // Optional: clean up the old socket if it still exists somehow
@@ -318,7 +372,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/whatsapp/logout", async (req, res) => {
+  app.post("/api/whatsapp/logout", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp logout requested...");
       if (sock) {
@@ -340,7 +394,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/whatsapp/send", async (req, res) => {
+  app.post("/api/whatsapp/send", requireRecruiter, async (req, res) => {
     try {
       const { phone, message } = req.body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
@@ -357,7 +411,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/automations/stage-change", async (req, res) => {
+  app.post("/api/automations/stage-change", requireRecruiter, async (req, res) => {
     try {
       const { phone, message } = req.body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
@@ -375,7 +429,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/score-stage2", async (req, res) => {
+  app.post("/api/score-stage2", rateLimit(20), async (req, res) => {
     try {
       const { answers } = req.body;
       
@@ -469,7 +523,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/test-ai", async (req, res) => {
+  app.get("/api/test-ai", requireRecruiter, async (req, res) => {
     try {
       const ai = getAI();
       if (!ai) {
@@ -487,7 +541,7 @@ async function startServer() {
     }
   });
 
-  app.post("/api/parse-cv", async (req, res) => {
+  app.post("/api/parse-cv", requireRecruiter, async (req, res) => {
     try {
       const { pdfBase64, mimeType, fileUrl } = req.body;
       
@@ -602,7 +656,7 @@ async function startServer() {
   // ============================================================================
   // AI Test Evaluation Endpoint
   // ============================================================================
-  app.post("/api/evaluate-test", async (req, res) => {
+  app.post("/api/evaluate-test", rateLimit(20), async (req, res) => {
     try {
       const { questions, answers } = req.body;
 
