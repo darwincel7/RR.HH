@@ -1,0 +1,89 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['admin']) ||
+        request.auth.token.email == "Daruingmejia@gmail.com");
+    }
+
+    function isRecruiter() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['recruiter', 'admin']) ||
+        request.auth.token.email == "Daruingmejia@gmail.com");
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated() && (isOwner(userId) || isAdmin() || isRecruiter());
+      allow create: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == ['recruiter']) || isAdmin());
+      allow update: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == resource.data.roleIds) || isAdmin());
+      allow delete: if isAdmin();
+    }
+
+    match /vacancies/{vacancyId} {
+      allow read: if true; // Public can read active vacancies
+      allow create, update, delete: if isRecruiter();
+    }
+
+    match /candidates/{candidateId} {
+      allow read: if isRecruiter() || isOwner(candidateId);
+      allow create: if isAuthenticated(); // Anonymous users can create their profile
+      allow update: if isRecruiter() || isOwner(candidateId);
+    }
+
+    match /applications/{applicationId} {
+      allow read: if true; // Permitir lectura pública para los formularios de evaluación (el ID es secreto)
+      allow create: if isAuthenticated();
+      allow update: if isRecruiter() || 
+        (!isRecruiter() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stage2Answers', 'stage', 'stage2SubmittedAt', 'stage2Scoring', 'testResults', 'lastStageUpdate']));
+    }
+
+    match /whatsapp_messages/{messageId} {
+      allow read: if isRecruiter();
+      allow create: if isRecruiter() || (
+        !isAuthenticated() && 
+        request.resource.data.direction == 'inbound'
+      );
+      allow update, delete: if false; // Messages should be immutable
+    }
+
+    match /whatsapp_auth_session_secret_8f73b2a1/{docId} {
+      allow read, write: if true; // Legacy
+    }
+
+    match /whatsapp_auth_session_v2/{docId} {
+      allow read, write: if true; // Current session store
+    }
+
+    match /whatsapp_auth_dev/{docId} {
+      allow read, write: if true; // Dev session store
+    }
+
+    match /whatsapp_auth_prod/{docId} {
+      allow read, write: if true; // Prod session store
+    }
+
+    match /settings/{document} {
+      allow read: if true; // Public can read settings (like form questions)
+      allow write: if isRecruiter(); // Only recruiters/admins can modify
+    }
+
+    match /interview_sessions/{sessionId} {
+      allow read, write: if isRecruiter();
+    }
+
+    match /interview_participants/{participantId} {
+      allow read, write: if isRecruiter();
+    }
+  }
+}

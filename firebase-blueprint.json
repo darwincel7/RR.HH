@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A user of the ATS system (recruiter, admin, etc.)",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "Firebase Auth UID" },
+        "name": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "roleIds": { "type": "array", "items": { "type": "string" } },
+        "status": { "type": "string", "enum": ["active", "inactive"] }
+      },
+      "required": ["uid", "name", "email", "roleIds", "status"]
+    },
+    "Vacancy": {
+      "title": "Vacancy",
+      "description": "A job opening",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "code": { "type": "string" },
+        "active": { "type": "boolean" },
+        "stageConfigId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "title", "code", "active", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Internal users of the system"
+    },
+    "/vacancies/{vacancyId}": {
+      "schema": { "$ref": "#/entities/Vacancy" },
+      "description": "Job vacancies"
+    }
+  }
+}
