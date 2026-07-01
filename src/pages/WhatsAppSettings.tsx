@@ -16,6 +16,10 @@ export default function WhatsAppSettings() {
   const [companyLogoUrl, setCompanyLogoUrl] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const [careersImageUrl, setCareersImageUrl] = useState('');
+  const [uploadingCareersImage, setUploadingCareersImage] = useState(false);
+  const careersFileInputRef = useRef<HTMLInputElement>(null);
+
   const [templates, setTemplates] = useState({
     "Formulario etapa 2 enviado": "Hola {{nombre}} 👋\n\nRecientemente aplicaste para la vacante de {{vacante}} y hemos revisado tu perfil con mucho interés. ✅\n\nNos complace informarte que has sido preseleccionado(a) para avanzar a la siguiente etapa del proceso de entrevistas. 🎉\n\nSi deseas continuar, por favor completa el siguiente formulario:\n\n🔗 {{link}}\n\n🗓️ Fecha límite de respuesta: {{fecha}}\n\nAgradecemos tu interés y tu tiempo. ¡Estamos emocionados de conocerte mejor y descubrir si esta oportunidad es para ti! 🙌",
     "Convocado a entrevista": "🎉 ¡Felicitaciones {{nombre}}!\n\nHas sido preseleccionado(a) para avanzar a la siguiente etapa del proceso para el puesto de {{vacante}}.\n\nNos encantaría coordinar una entrevista virtual contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Virtual ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.",
@@ -59,6 +63,7 @@ export default function WhatsAppSettings() {
       if (companySnap.exists()) {
         setCompanyName(companySnap.data().name || '');
         setCompanyLogoUrl(companySnap.data().logoUrl || '');
+        setCareersImageUrl(companySnap.data().careersImageUrl || '');
       }
     } catch (error) {
       console.error("Error fetching settings:", error);
@@ -134,6 +139,33 @@ export default function WhatsAppSettings() {
     }
   };
 
+  const handleCareersImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    // Team photos can be large; upload to Firebase Storage (not Firestore) up to 5MB.
+    if (file.size > 5 * 1024 * 1024) {
+      alert("La imagen es demasiado grande. Por favor, sube una foto de menos de 5MB.");
+      if (careersFileInputRef.current) careersFileInputRef.current.value = '';
+      return;
+    }
+
+    try {
+      setUploadingCareersImage(true);
+      const ext = file.name.split('.').pop() || 'jpg';
+      const storageRef = ref(storage, `company/careers-hero.${ext}`);
+      await uploadBytes(storageRef, file);
+      const url = await getDownloadURL(storageRef);
+      setCareersImageUrl(url);
+    } catch (error) {
+      console.error("Error uploading careers image:", error);
+      alert("Error al subir la imagen. Por favor, inténtalo de nuevo.");
+    } finally {
+      setUploadingCareersImage(false);
+      if (careersFileInputRef.current) careersFileInputRef.current.value = '';
+    }
+  };
+
   const handleSaveSettings = async () => {
     setSaving(true);
     setSuccess(false);
@@ -142,9 +174,10 @@ export default function WhatsAppSettings() {
       await setDoc(doc(db, 'settings', 'whatsapp_templates'), { templates }, { merge: true });
       
       // Save company profile
-      await setDoc(doc(db, 'settings', 'company'), { 
+      await setDoc(doc(db, 'settings', 'company'), {
         name: companyName,
-        logoUrl: companyLogoUrl
+        logoUrl: companyLogoUrl,
+        careersImageUrl: careersImageUrl
       }, { merge: true });
       
       setSuccess(true);
@@ -245,6 +278,51 @@ export default function WhatsAppSettings() {
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+
+        {/* Foto del equipo (Portal público de empleo) */}
+        <div className="mt-6 pt-6 border-t border-slate-100">
+          <label className="block text-sm font-bold text-slate-700 mb-1">Foto del equipo (Portal público de empleo)</label>
+          <p className="text-xs text-slate-500 mb-3">
+            Se muestra como imagen principal en la página pública de vacantes (<span className="font-mono">/careers</span>). Recomendado: horizontal, mínimo 1200px de ancho. Máx 5MB.
+          </p>
+          <div className="flex flex-col sm:flex-row gap-4">
+            <div className="flex-1">
+              <div className="relative">
+                <ImageIcon className="w-5 h-5 text-slate-400 absolute left-3 top-3" />
+                <input
+                  type="text"
+                  value={careersImageUrl}
+                  onChange={(e) => setCareersImageUrl(e.target.value)}
+                  placeholder="https://ejemplo.com/equipo.jpg  (o sube un archivo)"
+                  className="w-full pl-10 pr-4 py-3 border border-slate-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-sm"
+                />
+              </div>
+              <div className="mt-3 flex items-center">
+                <span className="text-sm text-slate-500 mr-3">O sube una foto:</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={handleCareersImageUpload}
+                  ref={careersFileInputRef}
+                  className="hidden"
+                />
+                <button
+                  onClick={() => careersFileInputRef.current?.click()}
+                  disabled={uploadingCareersImage}
+                  className="flex items-center px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium rounded-lg transition-colors disabled:opacity-50"
+                >
+                  {uploadingCareersImage ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Upload className="w-4 h-4 mr-2" />}
+                  {uploadingCareersImage ? 'Subiendo...' : 'Subir Foto'}
+                </button>
+              </div>
+            </div>
+            {careersImageUrl && (
+              <div className="w-full sm:w-64 aspect-video rounded-xl border border-slate-200 overflow-hidden bg-slate-50 flex-shrink-0">
+                <img src={careersImageUrl} alt="Foto del equipo" className="w-full h-full object-cover" onError={(e) => (e.currentTarget.style.display = 'none')} />
+              </div>
+            )}
           </div>
         </div>
       </div>

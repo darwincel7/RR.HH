@@ -3,6 +3,7 @@ import { collection, query, where, onSnapshot, addDoc, updateDoc, doc, getDocs, 
 import { db } from '../lib/firebase';
 import { Calendar, Clock, User, MapPin, Plus, Loader2, CheckCircle, XCircle, Send, Users, Video } from 'lucide-react';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import Modal from '../components/ui/Modal';
 
 export default function Interviews() {
   const [sessions, setSessions] = useState<any[]>([]);
@@ -277,8 +278,7 @@ export default function Interviews() {
       )}
 
       {/* Create Session Modal */}
-      {showCreateModal && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={showCreateModal} onClose={() => setShowCreateModal(false)} overlayClassName="bg-slate-900/50 z-50">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex justify-between items-center">
               <h2 className="text-xl font-bold text-slate-800">Nueva Sesión de Entrevistas</h2>
@@ -326,12 +326,10 @@ export default function Interviews() {
               </button>
             </form>
           </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Add Participant Modal */}
-      {showAddModal && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={showAddModal} onClose={() => setShowAddModal(false)} overlayClassName="bg-slate-900/50 z-50">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col max-h-[80vh]">
             <div className="p-6 border-b border-slate-100 flex justify-between items-center">
               <h2 className="text-xl font-bold text-slate-800">Añadir Candidato</h2>
@@ -363,8 +361,7 @@ export default function Interviews() {
               )}
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }
