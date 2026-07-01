@@ -86,17 +86,6 @@ export default function Careers() {
             {/* Red accent line */}
             <div className="mt-6 h-1.5 w-20 rounded-full bg-red-600"></div>
 
-            {/* CTA */}
-            <div className="mt-8">
-              <a
-                href="#vacantes"
-                className="inline-flex items-center px-7 py-3.5 rounded-xl bg-violet-700 text-white font-bold shadow-lg shadow-violet-700/25 hover:bg-violet-800 transition-colors"
-              >
-                Ver vacantes disponibles
-                <ArrowRight className="w-5 h-5 ml-2" />
-              </a>
-            </div>
-
             {/* Perks panel */}
             <div className="mt-10 rounded-3xl bg-gradient-to-r from-indigo-950 via-indigo-900 to-violet-900 px-6 py-6 shadow-xl">
               <div className="grid grid-cols-3 gap-3 sm:gap-6">
@@ -134,21 +123,15 @@ export default function Careers() {
         </div>
       </section>
 
-      {/* ================= VACANCIES ================= */}
-      <div id="vacantes" className="max-w-5xl mx-auto px-4 sm:px-6 py-14 scroll-mt-6">
-        <div className="flex items-center justify-between mb-8">
-          <div>
-            <h2 className="text-2xl sm:text-3xl font-display font-black text-slate-900">Vacantes Disponibles</h2>
-            <p className="text-slate-500 mt-1">
-              {vacancies.length === 0
-                ? 'Vuelve pronto para nuevas oportunidades.'
-                : `${vacancies.length} ${vacancies.length === 1 ? 'oportunidad abierta' : 'oportunidades abiertas'} para ti.`}
-            </p>
-          </div>
-        </div>
-
+      {/* ============ VACANCIES — floating cards overlapping the hero ============ */}
+      <div
+        id="vacantes"
+        className={`relative z-30 max-w-6xl mx-auto px-4 sm:px-6 pb-16 scroll-mt-24 ${
+          vacancies.length > 0 ? '-mt-12 lg:-mt-16' : 'pt-14'
+        }`}
+      >
         {vacancies.length === 0 ? (
-          <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-sm">
+          <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-2xl max-w-xl mx-auto">
             <Briefcase className="w-16 h-16 text-slate-300 mx-auto mb-4" />
             <h3 className="text-xl font-bold text-slate-800 mb-2">No hay vacantes abiertas</h3>
             <p className="text-slate-500">Actualmente no tenemos posiciones abiertas. Vuelve a revisar pronto.</p>
@@ -158,7 +141,7 @@ export default function Careers() {
             {vacancies.map(vacancy => (
               <div
                 key={vacancy.id}
-                className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm hover:shadow-lg hover:border-violet-200 transition-all group flex flex-col"
+                className="bg-white rounded-3xl p-6 border border-slate-200 shadow-2xl hover:-translate-y-1 hover:border-violet-200 transition-all duration-200 group flex flex-col"
               >
                 <div className="flex-1">
                   <div className="flex justify-between items-start mb-4 gap-3">
