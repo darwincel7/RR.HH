@@ -2,12 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Link } from 'react-router-dom';
-import { Briefcase, MapPin, Clock, ArrowRight, Sparkles, Building2 } from 'lucide-react';
+import { Briefcase, MapPin, Clock, ArrowRight, Sparkles, Building2, Users, Star, TrendingUp } from 'lucide-react';
 
 export default function Careers() {
   const [vacancies, setVacancies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [company, setCompany] = useState({ name: 'AuraATS', logoUrl: '' });
+  const [company, setCompany] = useState({ name: 'AuraATS', logoUrl: '', careersImageUrl: '' });
 
   useEffect(() => {
     async function fetchData() {
@@ -23,7 +23,8 @@ export default function Careers() {
         if (companySnap.exists()) {
           setCompany({
             name: companySnap.data().name || 'AuraATS',
-            logoUrl: companySnap.data().logoUrl || ''
+            logoUrl: companySnap.data().logoUrl || '',
+            careersImageUrl: companySnap.data().careersImageUrl || ''
           });
         }
 
@@ -40,55 +41,114 @@ export default function Careers() {
   if (loading) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-violet-600"></div>
       </div>
     );
   }
 
+  const perks = [
+    { icon: Users, title: 'Crecimiento', subtitle: 'profesional' },
+    { icon: Star, title: 'Ambiente', subtitle: 'colaborativo' },
+    { icon: TrendingUp, title: 'Desarrollo', subtitle: 'continuo' },
+  ];
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans">
-      {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50">
-        <div className="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center">
-            {company.logoUrl ? (
-              <img src={company.logoUrl} alt={company.name} className="h-8 max-w-[150px] object-contain mr-3" />
+      {/* ================= HERO ================= */}
+      <section className="relative bg-white overflow-hidden">
+        <div className="grid lg:grid-cols-2 lg:min-h-[560px]">
+          {/* ---- Left: content ---- */}
+          <div className="relative z-20 order-2 lg:order-1 flex flex-col justify-center px-6 sm:px-10 lg:px-16 py-10 lg:py-16">
+            {/* Logo */}
+            <div className="flex items-center mb-10">
+              {company.logoUrl ? (
+                <img src={company.logoUrl} alt={company.name} className="h-11 max-w-[190px] object-contain" />
+              ) : (
+                <div className="flex items-center">
+                  <div className="w-10 h-10 bg-violet-100 text-violet-700 rounded-xl flex items-center justify-center mr-3">
+                    <Building2 className="w-6 h-6" />
+                  </div>
+                  <span className="text-xl font-display font-bold text-slate-800 tracking-tight">{company.name}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Heading */}
+            <h1 className="font-display font-black tracking-tight text-slate-900 leading-[1.05] text-4xl sm:text-5xl lg:text-6xl">
+              Únete a<br />
+              <span className="text-violet-700">nuestro equipo</span>
+            </h1>
+
+            <p className="mt-5 text-lg sm:text-xl text-slate-500 font-medium">
+              Aplica a nuestras vacantes
+            </p>
+
+            {/* Red accent line */}
+            <div className="mt-6 h-1.5 w-20 rounded-full bg-red-600"></div>
+
+            {/* CTA */}
+            <div className="mt-8">
+              <a
+                href="#vacantes"
+                className="inline-flex items-center px-7 py-3.5 rounded-xl bg-violet-700 text-white font-bold shadow-lg shadow-violet-700/25 hover:bg-violet-800 transition-colors"
+              >
+                Ver vacantes disponibles
+                <ArrowRight className="w-5 h-5 ml-2" />
+              </a>
+            </div>
+
+            {/* Perks panel */}
+            <div className="mt-10 rounded-3xl bg-gradient-to-r from-indigo-950 via-indigo-900 to-violet-900 px-6 py-6 shadow-xl">
+              <div className="grid grid-cols-3 gap-3 sm:gap-6">
+                {perks.map(({ icon: Icon, title, subtitle }) => (
+                  <div key={title} className="flex flex-col items-center text-center">
+                    <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-full border-2 border-violet-400/60 bg-white/5 flex items-center justify-center mb-2">
+                      <Icon className="w-5 h-5 sm:w-6 sm:h-6 text-violet-200" />
+                    </div>
+                    <span className="text-white font-bold text-xs sm:text-sm leading-tight">{title}</span>
+                    <span className="text-violet-300 text-xs sm:text-sm leading-tight">{subtitle}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* ---- Right: team photo ---- */}
+          <div className="relative order-1 lg:order-2 min-h-[280px] sm:min-h-[360px] lg:min-h-full">
+            {company.careersImageUrl ? (
+              <img
+                src={company.careersImageUrl}
+                alt="Nuestro equipo de trabajo"
+                className="absolute inset-0 w-full h-full object-cover object-center"
+              />
             ) : (
-              <div className="w-8 h-8 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center mr-3">
-                <Building2 className="w-5 h-5" />
+              <div className="absolute inset-0 bg-gradient-to-br from-violet-600 via-indigo-700 to-indigo-950 flex items-center justify-center">
+                <Users className="w-24 h-24 text-white/30" />
               </div>
             )}
-            <span className="text-xl font-display font-bold text-slate-800 tracking-tight">
-              {company.name}
-            </span>
-          </div>
-          <div className="text-sm font-medium text-slate-500">
-            Portal de Empleo
+            {/* Soft blend into the white content panel (desktop only) */}
+            <div className="hidden lg:block absolute inset-y-0 left-0 w-32 bg-gradient-to-r from-white to-transparent pointer-events-none"></div>
+            {/* Subtle darkening at the bottom for legibility on mobile stack */}
+            <div className="lg:hidden absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
           </div>
         </div>
-      </header>
+      </section>
 
-      {/* Hero */}
-      <div className="bg-slate-900 text-white py-20 px-4 relative overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-indigo-600/20 to-purple-600/20"></div>
-        <div className="max-w-3xl mx-auto text-center relative z-10">
-          <h1 className="text-4xl md:text-5xl font-display font-bold mb-6 tracking-tight">
-            Únete a nuestro equipo
-          </h1>
-          <p className="text-lg text-slate-300 mb-8">
-            Descubre las oportunidades que tenemos para ti y forma parte de nuestra misión.
-          </p>
-        </div>
-      </div>
-
-      {/* Vacancies List */}
-      <div className="max-w-5xl mx-auto px-4 py-12">
+      {/* ================= VACANCIES ================= */}
+      <div id="vacantes" className="max-w-5xl mx-auto px-4 sm:px-6 py-14 scroll-mt-6">
         <div className="flex items-center justify-between mb-8">
-          <h2 className="text-2xl font-bold text-slate-900">Vacantes Disponibles ({vacancies.length})</h2>
+          <div>
+            <h2 className="text-2xl sm:text-3xl font-display font-black text-slate-900">Vacantes Disponibles</h2>
+            <p className="text-slate-500 mt-1">
+              {vacancies.length === 0
+                ? 'Vuelve pronto para nuevas oportunidades.'
+                : `${vacancies.length} ${vacancies.length === 1 ? 'oportunidad abierta' : 'oportunidades abiertas'} para ti.`}
+            </p>
+          </div>
         </div>
 
         {vacancies.length === 0 ? (
-          <div className="bg-white rounded-2xl p-12 text-center border border-slate-200 shadow-sm">
+          <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-sm">
             <Briefcase className="w-16 h-16 text-slate-300 mx-auto mb-4" />
             <h3 className="text-xl font-bold text-slate-800 mb-2">No hay vacantes abiertas</h3>
             <p className="text-slate-500">Actualmente no tenemos posiciones abiertas. Vuelve a revisar pronto.</p>
@@ -96,40 +156,45 @@ export default function Careers() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {vacancies.map(vacancy => (
-              <div key={vacancy.id} className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm hover:shadow-md transition-all group flex flex-col">
+              <div
+                key={vacancy.id}
+                className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm hover:shadow-lg hover:border-violet-200 transition-all group flex flex-col"
+              >
                 <div className="flex-1">
-                  <div className="flex justify-between items-start mb-4">
-                    <h3 className="text-xl font-bold text-slate-900 group-hover:text-indigo-600 transition-colors">
+                  <div className="flex justify-between items-start mb-4 gap-3">
+                    <h3 className="text-xl font-bold text-slate-900 group-hover:text-violet-700 transition-colors">
                       {vacancy.title}
                     </h3>
-                    <span className="px-2.5 py-1 bg-indigo-50 text-indigo-700 text-xs font-bold rounded-lg">
-                      {vacancy.code}
-                    </span>
+                    {vacancy.code && (
+                      <span className="shrink-0 px-2.5 py-1 bg-violet-50 text-violet-700 text-xs font-bold rounded-lg">
+                        {vacancy.code}
+                      </span>
+                    )}
                   </div>
-                  
+
                   <div className="space-y-2 mb-6">
                     {vacancy.location && (
                       <div className="flex items-center text-sm text-slate-600">
-                        <MapPin className="w-4 h-4 mr-2 text-slate-400" />
+                        <MapPin className="w-4 h-4 mr-2 text-red-500" />
                         {vacancy.location}
                       </div>
                     )}
                     {vacancy.schedule && (
                       <div className="flex items-center text-sm text-slate-600">
-                        <Clock className="w-4 h-4 mr-2 text-slate-400" />
+                        <Clock className="w-4 h-4 mr-2 text-red-500" />
                         {vacancy.schedule}
                       </div>
                     )}
                   </div>
-                  
+
                   <p className="text-sm text-slate-500 line-clamp-4 mb-6 whitespace-pre-wrap">
                     {vacancy.functions}
                   </p>
                 </div>
-                
-                <Link 
+
+                <Link
                   to={`/apply/${vacancy.id}`}
-                  className="w-full py-3 bg-slate-50 text-indigo-600 font-bold rounded-xl text-center hover:bg-indigo-50 transition-colors flex items-center justify-center group-hover:bg-indigo-600 group-hover:text-white"
+                  className="w-full py-3 bg-slate-50 text-violet-700 font-bold rounded-xl text-center hover:bg-violet-50 transition-colors flex items-center justify-center group-hover:bg-violet-700 group-hover:text-white"
                 >
                   Ver Detalles y Aplicar <ArrowRight className="w-4 h-4 ml-2" />
                 </Link>
@@ -138,8 +203,8 @@ export default function Careers() {
           </div>
         )}
       </div>
-      
-      {/* Footer */}
+
+      {/* ================= FOOTER ================= */}
       <footer className="bg-white border-t border-slate-200 py-8 mt-12">
         <div className="max-w-5xl mx-auto px-4 text-center text-slate-500 text-sm">
           <p>&copy; {new Date().getFullYear()} {company.name}. Todos los derechos reservados.</p>
