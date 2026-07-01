@@ -345,8 +345,10 @@ export default function Ranking() {
             </div>
             <div className="p-6 space-y-4">
               <p className="text-sm text-slate-600">
-                Estás a punto de marcar a este candidato como <strong>{decisionModal.type}</strong>. 
-                Se enviará un mensaje automático de WhatsApp notificándole la decisión.
+                Estás a punto de marcar a este candidato como <strong>{decisionModal.type}</strong>.
+                {decisionModal.type === 'Descartado'
+                  ? ' Se enviará un mensaje automático de WhatsApp notificándole la decisión.'
+                  : ' No se enviará ningún mensaje automático; podrás contactarlo personalmente.'}
               </p>
               <div>
                 <label className="block text-sm font-bold text-slate-700 mb-2">
