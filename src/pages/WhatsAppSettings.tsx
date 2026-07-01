@@ -306,13 +306,22 @@ export default function WhatsAppSettings() {
         {status?.status === 'disconnected' && !status.qr && (
           <div className="text-center p-8">
             <Loader2 className="mx-auto h-8 w-8 animate-spin text-blue-600 mb-4" />
-            <p className="text-slate-600 font-medium mb-4">La conexión de WhatsApp está suspendida o en conflicto.</p>
-            <button 
-              onClick={handleReconnect}
-              className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
-            >
-              <RefreshCw className="w-4 h-4 mr-2" /> Forzar Reconexión
-            </button>
+            <p className="text-slate-600 font-medium mb-2">La conexión de WhatsApp está suspendida o en conflicto.</p>
+            <p className="text-slate-400 text-sm mb-5">Si "Forzar Reconexión" no muestra el QR, usa "Desvincular y generar QR nuevo" para empezar de cero.</p>
+            <div className="flex flex-col sm:flex-row items-center justify-center gap-3">
+              <button
+                onClick={handleReconnect}
+                className="inline-flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 font-medium transition-colors"
+              >
+                <RefreshCw className="w-4 h-4 mr-2" /> Forzar Reconexión
+              </button>
+              <button
+                onClick={handleLogout}
+                className="inline-flex items-center px-4 py-2 border border-red-200 text-red-600 bg-white rounded-lg hover:bg-red-50 font-medium transition-colors"
+              >
+                <XCircle className="w-4 h-4 mr-2" /> Desvincular y generar QR nuevo
+              </button>
+            </div>
           </div>
         )}
       </div>
