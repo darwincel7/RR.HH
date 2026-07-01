@@ -214,8 +214,9 @@ export default function Vacancies() {
 
       {/* Create/Edit Modal */}
       {(isCreating || isEditing) && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-start justify-center z-50 animate-fade-in p-4 overflow-y-auto pt-10 pb-10">
-          <div className="bg-white rounded-3xl p-8 w-full max-w-2xl shadow-2xl animate-slide-up my-auto">
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto">
+          <div className="flex min-h-full items-center justify-center p-4">
+            <div className="bg-white rounded-3xl p-8 w-full max-w-2xl shadow-2xl animate-slide-up">
             <div className="flex items-center mb-6">
               <div className="p-2 bg-violet-100 text-violet-600 rounded-xl mr-3">
                 {isEditing ? <Edit3 className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
@@ -329,6 +330,7 @@ export default function Vacancies() {
                 </button>
               </div>
             </form>
+            </div>
           </div>
         </div>
       )}
