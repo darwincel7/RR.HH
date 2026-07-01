@@ -52,15 +52,33 @@ export default function Careers() {
     { icon: TrendingUp, title: 'Desarrollo', subtitle: 'continuo' },
   ];
 
+  // Rendered twice: inside the left column on desktop, and glued right under
+  // the team photo on mobile.
+  const perksPanel = (
+    <div className="rounded-3xl bg-gradient-to-r from-indigo-950 via-indigo-900 to-violet-900 px-6 py-6 shadow-xl">
+      <div className="grid grid-cols-3 gap-3 sm:gap-6">
+        {perks.map(({ icon: Icon, title, subtitle }) => (
+          <div key={title} className="flex flex-col items-center text-center">
+            <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-full border-2 border-violet-400/60 bg-white/5 flex items-center justify-center mb-2">
+              <Icon className="w-5 h-5 sm:w-6 sm:h-6 text-violet-200" />
+            </div>
+            <span className="text-white font-bold text-xs sm:text-sm leading-tight">{title}</span>
+            <span className="text-violet-300 text-xs sm:text-sm leading-tight">{subtitle}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 font-sans">
       {/* ================= HERO ================= */}
       <section className="relative bg-white overflow-hidden">
         <div className="grid lg:grid-cols-2 lg:min-h-[560px]">
-          {/* ---- Left: content ---- */}
-          <div className="relative z-20 order-2 lg:order-1 flex flex-col justify-center px-6 sm:px-10 lg:px-16 py-10 lg:py-16">
-            {/* Logo */}
-            <div className="flex items-center mb-10">
+          {/* ---- Content (desktop: left column / mobile: header above the photo) ---- */}
+          <div className="relative z-20 flex flex-col lg:justify-center px-6 sm:px-10 lg:px-16 pt-5 pb-6 lg:py-16">
+            {/* Logo — anchored to the top corner on mobile */}
+            <div className="flex items-center mb-5 lg:mb-10">
               {company.logoUrl ? (
                 <img src={company.logoUrl} alt={company.name} className="h-11 max-w-[190px] object-contain" />
               ) : (
@@ -79,31 +97,19 @@ export default function Careers() {
               <span className="text-violet-700">nuestro equipo</span>
             </h1>
 
-            <p className="mt-5 text-lg sm:text-xl text-slate-500 font-medium">
+            <p className="mt-3 lg:mt-5 text-lg sm:text-xl text-slate-500 font-medium">
               Aplica a nuestras vacantes
             </p>
 
             {/* Red accent line */}
-            <div className="mt-6 h-1.5 w-20 rounded-full bg-red-600"></div>
+            <div className="mt-4 lg:mt-6 h-1.5 w-20 rounded-full bg-red-600"></div>
 
-            {/* Perks panel */}
-            <div className="mt-10 rounded-3xl bg-gradient-to-r from-indigo-950 via-indigo-900 to-violet-900 px-6 py-6 shadow-xl">
-              <div className="grid grid-cols-3 gap-3 sm:gap-6">
-                {perks.map(({ icon: Icon, title, subtitle }) => (
-                  <div key={title} className="flex flex-col items-center text-center">
-                    <div className="w-11 h-11 sm:w-12 sm:h-12 rounded-full border-2 border-violet-400/60 bg-white/5 flex items-center justify-center mb-2">
-                      <Icon className="w-5 h-5 sm:w-6 sm:h-6 text-violet-200" />
-                    </div>
-                    <span className="text-white font-bold text-xs sm:text-sm leading-tight">{title}</span>
-                    <span className="text-violet-300 text-xs sm:text-sm leading-tight">{subtitle}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+            {/* Perks panel — desktop only (mobile shows it glued under the photo) */}
+            <div className="hidden lg:block mt-10">{perksPanel}</div>
           </div>
 
-          {/* ---- Right: team photo ---- */}
-          <div className="relative order-1 lg:order-2 min-h-[280px] sm:min-h-[360px] lg:min-h-full">
+          {/* ---- Team photo (desktop: right column / mobile: right after the heading) ---- */}
+          <div className="relative min-h-[300px] sm:min-h-[400px] lg:min-h-full">
             {company.careersImageUrl ? (
               <img
                 src={company.careersImageUrl}
@@ -117,8 +123,11 @@ export default function Careers() {
             )}
             {/* Soft blend into the white content panel (desktop only) */}
             <div className="hidden lg:block absolute inset-y-0 left-0 w-32 bg-gradient-to-r from-white to-transparent pointer-events-none"></div>
-            {/* Subtle darkening at the bottom for legibility on mobile stack */}
-            <div className="lg:hidden absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white to-transparent pointer-events-none"></div>
+          </div>
+
+          {/* ---- Perks panel — mobile only, hugging the bottom of the team photo ---- */}
+          <div className="lg:hidden relative z-20 px-4 sm:px-6 -mt-6">
+            {perksPanel}
           </div>
         </div>
       </section>
@@ -127,7 +136,7 @@ export default function Careers() {
       <div
         id="vacantes"
         className={`relative z-30 max-w-6xl mx-auto px-4 sm:px-6 pb-16 scroll-mt-24 ${
-          vacancies.length > 0 ? '-mt-12 lg:-mt-16' : 'pt-14'
+          vacancies.length > 0 ? 'mt-8 lg:-mt-16' : 'pt-14'
         }`}
       >
         {vacancies.length === 0 ? (
