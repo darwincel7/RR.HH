@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { collection, query, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -213,7 +214,7 @@ export default function Vacancies() {
       </div>
 
       {/* Create/Edit Modal */}
-      {(isCreating || isEditing) && (
+      {(isCreating || isEditing) && createPortal(
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto">
           <div className="flex min-h-full items-center justify-center p-4">
             <div className="bg-white rounded-3xl p-8 w-full max-w-2xl shadow-2xl animate-slide-up">
@@ -333,11 +334,11 @@ export default function Vacancies() {
             </div>
           </div>
         </div>
-      )}
+      , document.body)}
 
       {/* Delete Confirmation Modal */}
-      {vacancyToDelete && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in">
+      {vacancyToDelete && createPortal(
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 animate-fade-in p-4">
           <div className="bg-white rounded-3xl p-8 w-full max-w-md shadow-2xl animate-slide-up">
             <div className="flex items-center mb-4">
               <div className="p-3 bg-red-100 text-red-600 rounded-2xl mr-4">
@@ -364,7 +365,7 @@ export default function Vacancies() {
             </div>
           </div>
         </div>
-      )}
+      , document.body)}
     </div>
   );
 }
