@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../lib/firebase';
+import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload } from 'lucide-react';
 
@@ -152,11 +151,24 @@ export default function WhatsAppSettings() {
 
     try {
       setUploadingCareersImage(true);
-      const ext = file.name.split('.').pop() || 'jpg';
-      const storageRef = ref(storage, `company/careers-hero.${ext}`);
-      await uploadBytes(storageRef, file);
-      const url = await getDownloadURL(storageRef);
-      setCareersImageUrl(url);
+      // Read as base64 and let the backend store it via the Admin SDK (bypasses
+      // Storage security rules — no public-write rule needed on the bucket).
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
+        reader.readAsDataURL(file);
+      });
+      const res = await apiFetch('/api/company/careers-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setCareersImageUrl(data.url);
     } catch (error) {
       console.error("Error uploading careers image:", error);
       alert("Error al subir la imagen. Por favor, inténtalo de nuevo.");

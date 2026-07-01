@@ -16,6 +16,7 @@
  *   - nothing on Cloud Run / GCP, where ADC is provided automatically.
  */
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 
 const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf-8'));
 const databaseId: string = firebaseConfig.firestoreDatabaseId;
@@ -46,6 +47,8 @@ export interface ServerDb {
   claimCandidate(id: string): Promise<boolean>;
   /** Ids of all applications for a candidate. */
   getApplicationIdsByCandidate(candidateId: string): Promise<string[]>;
+  /** Uploads a publicly-readable file to Cloud Storage and returns its download URL. Admin mode only. */
+  uploadPublicFile(path: string, buffer: Buffer, contentType: string): Promise<string>;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -66,6 +69,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
     const { initializeApp, getApps, cert, applicationDefault } = await import('firebase-admin/app');
     const { getFirestore, FieldValue } = await import('firebase-admin/firestore');
     const { getAuth } = await import('firebase-admin/auth');
+    const { getStorage } = await import('firebase-admin/storage');
 
     let credential: any;
     if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -125,6 +129,17 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       async getApplicationIdsByCandidate(candidateId) {
         const snap = await adb.collection('applications').where('candidateId', '==', candidateId).get();
         return snap.docs.map((d: any) => d.id);
+      },
+      async uploadPublicFile(path, buffer, contentType) {
+        const bucket = getStorage(app).bucket(firebaseConfig.storageBucket);
+        const token = randomUUID();
+        await bucket.file(path).save(buffer, {
+          contentType,
+          resumable: false,
+          metadata: { metadata: { firebaseStorageDownloadTokens: token } },
+        });
+        const encoded = encodeURIComponent(path);
+        return `https://firebasestorage.googleapis.com/v0/b/${firebaseConfig.storageBucket}/o/${encoded}?alt=media&token=${token}`;
       },
       async verifyRecruiter(idToken) {
         const decoded = await auth.verifyIdToken(idToken);
@@ -194,6 +209,9 @@ async function initClient(): Promise<ServerDb> {
     async getApplicationIdsByCandidate(candidateId) {
       const snap = await getDocs(query(collection(cdb, 'applications'), where('candidateId', '==', candidateId)));
       return snap.docs.map(d => d.id);
+    },
+    async uploadPublicFile() {
+      throw new Error('uploadPublicFile requires admin mode (no admin credentials configured).');
     },
     async verifyRecruiter() {
       // The client SDK cannot verify ID tokens. Auth enforcement is disabled in this mode.

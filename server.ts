@@ -620,6 +620,33 @@ async function startServer() {
     }
   });
 
+  // Upload the public "careers" hero image (team photo) via the Admin SDK, which
+  // bypasses Storage security rules — so recruiters can set it without the bucket
+  // needing a public-write rule. Returns a stable public download URL.
+  app.post("/api/company/careers-image", requireRecruiter, async (req, res) => {
+    try {
+      const { dataUrl } = req.body || {};
+      if (typeof dataUrl !== 'string') {
+        return res.status(400).json({ error: 'Falta la imagen (dataUrl).' });
+      }
+      const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) {
+        return res.status(400).json({ error: 'Formato de imagen inválido. Debe ser una imagen.' });
+      }
+      const contentType = match[1];
+      const buffer = Buffer.from(match[2], 'base64');
+      if (buffer.length > 5 * 1024 * 1024) {
+        return res.status(413).json({ error: 'La imagen supera 5MB.' });
+      }
+      const ext = contentType.split('/')[1].split('+')[0].replace('jpeg', 'jpg');
+      const url = await db.uploadPublicFile(`company/careers-hero-${Date.now()}.${ext}`, buffer, contentType);
+      return res.json({ url });
+    } catch (error) {
+      console.error("Careers image upload error:", error);
+      res.status(500).json({ error: "No se pudo subir la imagen." });
+    }
+  });
+
   app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { answers } = req.body;
