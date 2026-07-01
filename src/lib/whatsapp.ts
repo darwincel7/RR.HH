@@ -9,6 +9,13 @@ export async function sendWhatsAppAutomation(
   variables: { nombre: string; vacante?: string; link?: string; fecha?: string; hora?: string; ubicacion?: string; email?: string }
 ) {
   try {
+    // Stages handled in person NEVER trigger an automatic message, even if a
+    // custom template is configured in settings:
+    //  - "Tests presenciales" / "Pruebas técnicas": the exam is given in person.
+    //  - "Contratado": hiring is confirmed personally by the recruiter.
+    const NO_AUTOMATION_STAGES = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
+    if (NO_AUTOMATION_STAGES.includes(stage)) return false;
+
     // Fetch templates
     const docRef = doc(db, 'settings', 'whatsapp_templates');
     const docSnap = await getDoc(docRef);
