@@ -8,6 +8,7 @@ import { PIPELINE_STAGES } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload } from 'lucide-react';
 
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import Modal from '../components/ui/Modal';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -502,8 +503,7 @@ export default function KanbanBoard() {
       )}
 
       {/* Bulk Upload Modal */}
-      {isBulkUploadModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+      <Modal isOpen={isBulkUploadModalOpen} onClose={isUploading ? undefined : () => setIsBulkUploadModalOpen(false)} overlayClassName="bg-slate-900/40 z-[100]">
           <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl relative animate-scale-in">
             <button 
               onClick={() => setIsBulkUploadModalOpen(false)}
@@ -563,8 +563,7 @@ export default function KanbanBoard() {
             />
 
           </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

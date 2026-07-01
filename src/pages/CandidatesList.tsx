@@ -5,6 +5,7 @@ import { db, storage } from '../lib/firebase';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload } from 'lucide-react';
 import { Link } from 'react-router-dom';
+import Modal from '../components/ui/Modal';
 
 export default function CandidatesList() {
   const [candidates, setCandidates] = useState<any[]>([]);
@@ -530,8 +531,7 @@ export default function CandidatesList() {
       </div>
 
       {/* Delete Confirmation Modal */}
-      {candidateToDelete && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={!!candidateToDelete} onClose={() => setCandidateToDelete(null)} overlayClassName="bg-slate-900/40 z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-md shadow-xl">
             <div className="flex items-center mb-4">
               <div className="p-2 bg-red-100 text-red-600 rounded-xl mr-3">
@@ -558,12 +558,10 @@ export default function CandidatesList() {
               </button>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Bulk Upload Modal */}
-      {isBulkUploadModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={isBulkUploadModalOpen} onClose={isUploading ? undefined : () => setIsBulkUploadModalOpen(false)} overlayClassName="bg-slate-900/40 z-50">
           <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl relative">
             <button 
               onClick={() => setIsBulkUploadModalOpen(false)}
@@ -622,8 +620,7 @@ export default function CandidatesList() {
               )}
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

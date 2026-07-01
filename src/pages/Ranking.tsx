@@ -5,6 +5,7 @@ import { db } from '../lib/firebase';
 import { Trophy, CheckCircle, XCircle, AlertCircle, Star, GitCompare, X } from 'lucide-react';
 
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import Modal from '../components/ui/Modal';
 
 export default function Ranking() {
   const { vacancyId } = useParams();
@@ -243,8 +244,7 @@ export default function Ranking() {
       </div>
 
       {/* Comparison Modal */}
-      {showComparison && (
-        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={showComparison} onClose={() => setShowComparison(false)} overlayClassName="bg-slate-900/60 z-50">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
             <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-slate-50">
               <h2 className="text-xl font-black text-slate-800 flex items-center">
@@ -330,12 +330,10 @@ export default function Ranking() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Decision Modal */}
-      {decisionModal.isOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+      <Modal isOpen={decisionModal.isOpen} onClose={() => setDecisionModal({ isOpen: false, candidateId: '', appId: '', type: null })} overlayClassName="bg-slate-900/50 z-50">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden">
             <div className="p-6 border-b border-slate-100">
               <h2 className={`text-xl font-bold flex items-center ${decisionModal.type === 'Contratado' ? 'text-emerald-700' : 'text-rose-700'}`}>
@@ -381,8 +379,7 @@ export default function Ranking() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
     </div>
   );
 }

@@ -6,6 +6,7 @@ import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
 import { Loader2, ArrowLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink } from 'lucide-react';
+import Modal from '../components/ui/Modal';
 
 export default function CandidateProfile() {
   const { candidateId } = useParams();
@@ -996,8 +997,7 @@ export default function CandidateProfile() {
       </div>
 
       {/* CV Modal */}
-      {showCVModal && candidate.cvUrl && (
-        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+      <Modal isOpen={!!(showCVModal && candidate.cvUrl)} onClose={() => setShowCVModal(false)} overlayClassName="bg-slate-900/80 z-[100]">
           <div className="bg-white rounded-2xl w-full max-w-5xl h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
             <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
               <h3 className="font-display font-bold text-slate-800 flex items-center">
@@ -1029,12 +1029,10 @@ export default function CandidateProfile() {
               )}
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
 
       {/* Scorecard Modal */}
-      {showScorecardModal && (
-        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+      <Modal isOpen={showScorecardModal} onClose={() => setShowScorecardModal(false)} overlayClassName="bg-slate-900/80 z-[100]">
           <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
             <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
               <h3 className="font-display font-bold text-slate-800 flex items-center">
@@ -1159,11 +1157,9 @@ export default function CandidateProfile() {
               </button>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
       {/* Stage Guide Modal */}
-      {showStageGuide && (
-        <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-sm flex items-center justify-center z-[100] p-4">
+      <Modal isOpen={showStageGuide} onClose={() => setShowStageGuide(false)} overlayClassName="bg-slate-900/80 z-[100]">
           <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
             <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
               <h3 className="font-display font-bold text-slate-800 flex items-center">
@@ -1304,8 +1300,7 @@ export default function CandidateProfile() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+      </Modal>
 
     </div>
   );
