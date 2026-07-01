@@ -1245,11 +1245,10 @@ export default function CandidateProfile() {
                       </div>
                     </div>
                     <div>
-                      <h4 className="font-bold text-sm text-violet-900 flex items-center">
+                      <h4 className="font-bold text-sm text-violet-900">
                         Tests presenciales
-                        <span className="ml-2 px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full">Mensaje Automático</span>
                       </h4>
-                      <p className="text-xs text-slate-600 mt-1">Al seleccionar esta etapa, se envía el link para que el candidato realice el Test Psicométrico/Cognitivo.</p>
+                      <p className="text-xs text-slate-600 mt-1">Examen presencial que aplica el reclutador durante la entrevista. No se envía ningún mensaje ni link automático al candidato.</p>
                     </div>
                   </div>
                 </div>
