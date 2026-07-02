@@ -19,14 +19,20 @@ service cloud.firestore {
          request.auth.token.email == "Daruingmejia@gmail.com");
     }
 
+    // Anonymous sessions are public candidates applying to jobs. They must NEVER be
+    // treated as staff, even if an old polluted `users` doc granted them a role.
+    function isNotAnonymous() {
+      return isAuthenticated() && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
     function isAdmin() {
-      return isAuthenticated() &&
+      return isNotAnonymous() &&
         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['admin']) ||
         isAdminEmail());
     }
 
     function isRecruiter() {
-      return isAuthenticated() &&
+      return isNotAnonymous() &&
         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roleIds.hasAny(['recruiter', 'admin']) ||
         isAdminEmail());
     }

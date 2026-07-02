@@ -41,6 +41,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
+      // Public candidates sign in ANONYMOUSLY to apply — they are not staff. Never create
+      // a `users` doc for them (it clutters the team/access list and, under the old
+      // auto-grant, even picked up roles). Treat them as non-recruiters with no record.
+      if (currentUser.isAnonymous) {
+        setUserData(null);
+        setLoading(false);
+        return;
+      }
+
       const userRef = doc(db, 'users', currentUser.uid);
       // Create a "pending" doc on first sign-in (no role until an admin approves).
       // Previously every Google account was auto-granted 'recruiter'.

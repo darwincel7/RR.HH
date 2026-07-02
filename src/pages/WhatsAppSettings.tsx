@@ -109,7 +109,10 @@ export default function WhatsAppSettings() {
     setLoadingTeam(true);
     try {
       const snap = await getDocs(collection(db, 'users'));
-      setTeamUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      // Only real staff accounts belong here. Anonymous applicants (public candidates)
+      // have no email — filter out that legacy pollution so the list shows real people.
+      const all = snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+      setTeamUsers(all.filter((u: any) => u.email && String(u.email).trim() !== ''));
     } catch (e) {
       console.error('Error loading team:', e);
     } finally {
