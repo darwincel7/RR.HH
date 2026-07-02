@@ -13,6 +13,11 @@ interface ModalProps {
    * `fixed inset-0`, `backdrop-blur-sm` and scrolling are always applied.
    */
   overlayClassName?: string;
+  /**
+   * When true, clicking the backdrop (outside the panel) calls onClose.
+   * Default false so existing confirm/upload modals keep their behavior.
+   */
+  closeOnBackdrop?: boolean;
 }
 
 /**
@@ -32,6 +37,7 @@ export default function Modal({
   onClose,
   children,
   overlayClassName = 'bg-slate-900/50 z-50',
+  closeOnBackdrop = false,
 }: ModalProps) {
   // Keep the latest onClose without re-running the effect on every render.
   const onCloseRef = useRef(onClose);
@@ -59,7 +65,14 @@ export default function Modal({
 
   return createPortal(
     <div className={`fixed inset-0 backdrop-blur-sm overflow-y-auto ${overlayClassName}`}>
-      <div className="flex min-h-full items-center justify-center p-4">{children}</div>
+      <div
+        className="flex min-h-full items-center justify-center p-4"
+        // Close only when the click lands on this wrapper itself (the area around the
+        // panel), never when it bubbles up from the panel content.
+        onClick={closeOnBackdrop ? (e) => { if (e.target === e.currentTarget) onCloseRef.current?.(); } : undefined}
+      >
+        {children}
+      </div>
     </div>,
     document.body
   );

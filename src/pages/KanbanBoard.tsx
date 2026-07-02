@@ -18,7 +18,9 @@ export default function KanbanBoard() {
   const [candidates, setCandidates] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  
+  // CV preview modal (floating window) — shown in-place instead of a new tab.
+  const [cvPreview, setCvPreview] = useState<{ url: string; name: string } | null>(null);
+
   // Bulk selection state
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
@@ -469,7 +471,7 @@ export default function KanbanBoard() {
                                       onMouseDown={(e) => e.stopPropagation()}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (cvUrl) window.open(cvUrl, '_blank', 'noopener,noreferrer');
+                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato' });
                                       }}
                                       disabled={!cvUrl}
                                       title={cvUrl ? 'Abrir currículum en una pestaña nueva' : 'CV aún no disponible'}
@@ -599,6 +601,40 @@ export default function KanbanBoard() {
             />
 
           </div>
+      </Modal>
+
+      {/* CV preview — floating window in the same tab. Closes on X, Escape, or click outside. */}
+      <Modal isOpen={!!cvPreview} onClose={() => setCvPreview(null)} closeOnBackdrop overlayClassName="bg-slate-900/60 z-[110]">
+        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden animate-scale-in">
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 shrink-0">
+            <div className="flex items-center gap-2 min-w-0">
+              <FileText className="w-5 h-5 text-indigo-600 shrink-0" />
+              <h3 className="font-bold text-slate-800 truncate">Currículum — {cvPreview?.name}</h3>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <a
+                href={cvPreview?.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-xs font-bold text-indigo-600 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors"
+              >
+                Abrir aparte
+              </a>
+              <button
+                onClick={() => setCvPreview(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                title="Cerrar"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 bg-slate-100 min-h-0">
+            {cvPreview && (
+              <iframe src={cvPreview.url} title="Currículum" className="w-full h-full border-0" />
+            )}
+          </div>
+        </div>
       </Modal>
     </div>
   );
