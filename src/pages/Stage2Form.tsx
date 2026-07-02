@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Loader2, CheckCircle, Send, Building2 } from 'lucide-react';
 
@@ -103,37 +103,15 @@ export default function Stage2Form() {
         }
       });
 
-      // 1. Save answers to Firestore
-      await updateDoc(doc(db, 'applications', applicationId!), {
-        stage2Answers: formattedAnswers,
-        stage: 'Formulario etapa 2 completado',
-        stage2SubmittedAt: serverTimestamp(),
-        lastStageUpdate: serverTimestamp()
+      // Submit answers to the backend, which computes AND persists the score via the
+      // Admin SDK (server-authoritative — the candidate never writes their own score).
+      const res = await fetch('/api/score-stage2', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ applicationId, answers: formattedAnswers })
       });
-
-      // 2. Trigger AI Scoring (Backend)
-      let scoringData = null;
-      try {
-        const res = await fetch('/api/score-stage2', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ applicationId, answers: formattedAnswers })
-        });
-
-        if (res.ok) {
-          scoringData = await res.json();
-        } else {
-          console.error('AI scoring failed with status:', res.status);
-        }
-      } catch (aiErr) {
-        console.error('Error calling AI scoring:', aiErr);
-      }
-
-      // 3. Save scoring result to Firestore if successful
-      if (scoringData) {
-        await updateDoc(doc(db, 'applications', applicationId!), {
-          stage2Scoring: scoringData
-        });
+      if (!res.ok) {
+        throw new Error(`score-stage2 respondió ${res.status}`);
       }
 
       setSuccess(true);

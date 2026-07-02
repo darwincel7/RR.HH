@@ -61,11 +61,16 @@ service cloud.firestore {
       // PII, CV links, answers, scores and private interview notes).
       allow get: if true;
       allow list: if isRecruiter();
-      allow create: if isAuthenticated();
-      // Candidates may only submit their own answers/stage transitions; recruiters
-      // may update anything. (Server-side scoring writes go through the Admin SDK.)
-      allow update: if isRecruiter() ||
-        (!isRecruiter() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stage2Answers', 'stage', 'stage2SubmittedAt', 'stage2Scoring', 'testResults', 'lastStageUpdate']));
+      // Recruiters (e.g. bulk upload) may create freely. A public applicant may only
+      // create a fresh 'Nuevo' application and CANNOT preset any evaluation field
+      // (no injecting a fake top-ranked candidate).
+      allow create: if isRecruiter() ||
+        (isAuthenticated()
+          && request.resource.data.stage == 'Nuevo'
+          && !request.resource.data.keys().hasAny(['stage2Scoring', 'testResults', 'scoreSummary', 'recommendation', 'interviewScorecard']));
+      // Scores/answers are now written ONLY server-side (Admin SDK, which bypasses
+      // rules) or by a recruiter. Candidates can no longer forge their own scores.
+      allow update: if isRecruiter();
       allow delete: if isRecruiter();
     }
 

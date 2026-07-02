@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
-import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Loader2, CheckCircle, Send, Building2 } from 'lucide-react';
 import { masterTestQuestions, Question } from '../data/testQuestions';
@@ -143,66 +143,16 @@ export default function CandidateTest() {
     }
     setSubmitting(true);
     try {
-      // Format answers to use question text as keys
-      const formattedAnswers: Record<string, any> = {};
-      questions.forEach(q => {
-        if (q && answers[q.id]) {
-          formattedAnswers[q.text] = answers[q.id];
-        }
+      // Submit to the backend, which evaluates AND persists testResults via the
+      // Admin SDK (server-authoritative — the candidate never writes their own score).
+      const response = await fetch('/api/evaluate-test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ applicationId, questions, answers })
       });
-
-      // Evaluate Test with AI
-      let aiEvaluation = null;
-      try {
-        const response = await fetch('/api/evaluate-test', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ questions, answers })
-        });
-
-        if (response.ok) {
-          const text = await response.text();
-          try {
-            aiEvaluation = JSON.parse(text);
-          } catch (e) {
-             console.error('Invalid JSON from /api/evaluate-test:', text.substring(0, 50));
-          }
-        } else {
-          console.error('AI evaluation failed with status:', response.status);
-        }
-      } catch (aiErr) {
-        console.error('Error calling AI evaluation:', aiErr);
+      if (!response.ok) {
+        throw new Error(`evaluate-test respondió ${response.status}`);
       }
-
-      const testResultsData: any = {
-        answers: formattedAnswers,
-        completedAt: serverTimestamp()
-      };
-
-      if (aiEvaluation) {
-        testResultsData.score = aiEvaluation.score;
-        testResultsData.customer_service_score = aiEvaluation.customer_service_score;
-        testResultsData.practical_intelligence_score = aiEvaluation.practical_intelligence_score;
-        testResultsData.behavioral_fit_score = aiEvaluation.behavioral_fit_score;
-        testResultsData.stability_responsibility_score = aiEvaluation.stability_responsibility_score;
-        testResultsData.improvement_desire_score = aiEvaluation.improvement_desire_score;
-        testResultsData.orthography_score = aiEvaluation.orthography_score;
-        testResultsData.aiFeedback = aiEvaluation.justification;
-        testResultsData.redFlags = aiEvaluation.red_flags;
-        testResultsData.positiveSignals = aiEvaluation.positive_signals;
-        testResultsData.spellingMistakes = aiEvaluation.spelling_mistakes;
-        testResultsData.incorrectAnswers = aiEvaluation.incorrect_answers;
-        testResultsData.status = 'completed';
-      } else {
-        testResultsData.score = 0;
-        testResultsData.status = 'pending_review';
-      }
-
-      await updateDoc(doc(db, 'applications', applicationId), {
-        testResults: testResultsData,
-        stage: 'Tests presenciales',
-        lastStageUpdate: serverTimestamp()
-      });
 
       localStorage.removeItem(`darwin_test_${applicationId}`);
       setSuccess(true);

@@ -697,8 +697,24 @@ async function startServer() {
 
   app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
-      const { answers } = req.body;
-      
+      const { applicationId, answers } = req.body || {};
+      if (typeof applicationId !== 'string' || !applicationId || applicationId.includes('/') || applicationId.length > 200) {
+        return res.status(400).json({ error: 'applicationId inválido' });
+      }
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+        return res.status(400).json({ error: 'Respuestas inválidas' });
+      }
+      const application = await db.getDocData('applications', applicationId);
+      if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
+      // Idempotent: if already scored, return the existing result (no re-billing / no overwrite).
+      if (application.stage2Scoring) return res.json(application.stage2Scoring);
+
+      // Bound the prompt so a candidate cannot blow up token cost.
+      const qaText = Object.entries(answers)
+        .slice(0, 40)
+        .map(([q, a]) => `- ${String(q).slice(0, 300)}: ${String(a).slice(0, 4000)}`)
+        .join('\n');
+
       const stage2Schema: Schema = {
         type: Type.OBJECT,
         properties: {
@@ -752,8 +768,8 @@ async function startServer() {
       - Respuestas extremadamente cortas, vacías o evasivas en preguntas clave.
       
       Respuestas del candidato:
-      ${Object.entries(answers).map(([q, a]) => `- ${q}: ${a}`).join('\n')}
-      
+      ${qaText}
+
       Devuelve un análisis estructurado en JSON.
       `;
 
@@ -777,10 +793,17 @@ async function startServer() {
       
       const cleanJson = resultText.replace(/```json\n?|```/g, '').trim();
       const parsedData = JSON.parse(cleanJson);
-      
-      // Note: In a real app, we would update Firestore here too, 
-      // but for this demo, we'll just return it and let the frontend handle it or vice versa.
-      // Actually, let's just return it.
+
+      // Server-authoritative write via the Admin SDK. The candidate never writes
+      // their own score — the client only submits answers.
+      await db.setDocData('applications', applicationId, {
+        stage2Answers: answers,
+        stage2Scoring: parsedData,
+        stage: 'Formulario etapa 2 completado',
+        stage2SubmittedAt: new Date(),
+        lastStageUpdate: new Date(),
+      });
+
       res.json(parsedData);
 
     } catch (error: any) {
@@ -924,20 +947,29 @@ async function startServer() {
   // ============================================================================
   app.post("/api/evaluate-test", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
-      const { questions, answers } = req.body;
-
+      const { applicationId, questions, answers } = req.body || {};
+      if (typeof applicationId !== 'string' || !applicationId || applicationId.includes('/') || applicationId.length > 200) {
+        return res.status(400).json({ error: 'applicationId inválido' });
+      }
+      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
+        return res.status(400).json({ error: 'Respuestas inválidas' });
+      }
       if (!process.env.GEMINI_API_KEY) {
         return res.status(500).json({ error: "API key not configured" });
       }
+      const application = await db.getDocData('applications', applicationId);
+      if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
+      // Idempotent: don't re-grade / re-bill if already completed.
+      if (application.testResults) return res.json({ ...application.testResults, alreadyCompleted: true });
 
-      // Format the Q&A for the prompt
-      const qaList = (questions || []).map((q: any) => {
+      // Format the Q&A for the prompt (bounded to avoid runaway token cost)
+      const qaList = (Array.isArray(questions) ? questions.slice(0, 100) : []).map((q: any) => {
         if (!q) return '';
         const qId = typeof q === 'string' ? q : q.id;
         const qText = typeof q === 'string' ? q : q.text;
         const rawA = answers[qId];
         const aText = Array.isArray(rawA) ? rawA.join(', ') : (rawA || 'No respondió');
-        return `Pregunta: ${qText}\nRespuesta del candidato: ${aText}`;
+        return `Pregunta: ${String(qText).slice(0, 500)}\nRespuesta del candidato: ${String(aText).slice(0, 4000)}`;
       }).filter(Boolean).join('\n\n');
 
       const schema = {
@@ -1059,6 +1091,39 @@ async function startServer() {
       // Strip markdown code blocks if present
       const cleanJson = resultText.replace(/```json\n?|```/g, '').trim();
       const parsedResult = JSON.parse(cleanJson);
+
+      // Build the exact testResults shape the recruiter UI reads, and write it
+      // server-side. The candidate submits answers only — never their own score.
+      const formattedAnswers: Record<string, any> = {};
+      (Array.isArray(questions) ? questions : []).forEach((q: any) => {
+        if (!q) return;
+        const qId = typeof q === 'string' ? q : q.id;
+        const qText = typeof q === 'string' ? q : q.text;
+        if (answers[qId] !== undefined) formattedAnswers[qText] = answers[qId];
+      });
+      const testResultsData = {
+        answers: formattedAnswers,
+        completedAt: new Date(),
+        score: parsedResult.score,
+        customer_service_score: parsedResult.customer_service_score,
+        practical_intelligence_score: parsedResult.practical_intelligence_score,
+        behavioral_fit_score: parsedResult.behavioral_fit_score,
+        stability_responsibility_score: parsedResult.stability_responsibility_score,
+        improvement_desire_score: parsedResult.improvement_desire_score,
+        orthography_score: parsedResult.orthography_score,
+        aiFeedback: parsedResult.justification,
+        redFlags: parsedResult.red_flags,
+        positiveSignals: parsedResult.positive_signals,
+        spellingMistakes: parsedResult.spelling_mistakes,
+        incorrectAnswers: parsedResult.incorrect_answers,
+        status: 'completed',
+      };
+      await db.setDocData('applications', applicationId, {
+        testResults: testResultsData,
+        stage: 'Tests presenciales',
+        lastStageUpdate: new Date(),
+      });
+
       res.json(parsedResult);
 
     } catch (error: any) {
