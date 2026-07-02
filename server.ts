@@ -23,6 +23,7 @@ import mammoth from "mammoth";
 
 import { setLogLevel } from 'firebase/firestore';
 import { getServerDb, type ServerDb } from './serverDb';
+import { normalizePhone } from './src/lib/phone';
 
 import nodemailer from "nodemailer";
 
@@ -348,6 +349,10 @@ async function processPendingCVs() {
   if (cvWorkerRunning || !db?.canEnforceAuth) return;
   cvWorkerRunning = true;
   try {
+    // Return any candidate stranded in 'processing' (e.g. by a crash/restart or
+    // scale-to-zero mid-parse) back to 'pending' so it gets retried.
+    const reclaimed = await db.reclaimStuckProcessing(5 * 60 * 1000);
+    if (reclaimed) console.log(`[server CV worker] reclaimed ${reclaimed} stuck candidate(s) to pending`);
     const pending = await db.listPendingCandidates(10);
     for (const cand of pending) {
       const claimed = await db.claimCandidate(cand.id);
@@ -361,7 +366,10 @@ async function processPendingCVs() {
         if (isBulk) {
           if (parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
           if (parsedData.email) candidateUpdate.email = parsedData.email;
-          if (parsedData.phone) candidateUpdate.phone = parsedData.phone;
+          if (parsedData.phone) {
+            candidateUpdate.phone = parsedData.phone;
+            candidateUpdate.phoneNormalized = normalizePhone(parsedData.phone);
+          }
           if (parsedData.city) candidateUpdate.city = parsedData.city;
         }
         await db.setDocData('candidates', cand.id, candidateUpdate);

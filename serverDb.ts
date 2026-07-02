@@ -46,6 +46,8 @@ export interface ServerDb {
   listPendingCandidates(max: number): Promise<Array<{ id: string; cvUrl?: string; cvFileType?: string; fullName?: string }>>;
   /** Atomically claims a candidate for processing (pending -> processing). Returns false if already claimed. */
   claimCandidate(id: string): Promise<boolean>;
+  /** Returns candidates stuck in 'processing' (older than olderThanMs) to 'pending'. Returns count reclaimed. */
+  reclaimStuckProcessing(olderThanMs: number): Promise<number>;
   /** Ids of all applications for a candidate. */
   getApplicationIdsByCandidate(candidateId: string): Promise<string[]>;
   /** Uploads a publicly-readable file to Cloud Storage and returns its download URL. Admin mode only. */
@@ -132,9 +134,26 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         return await adb.runTransaction(async (tx: any) => {
           const snap = await tx.get(ref);
           if (!snap.exists || snap.data()?.aiStatus !== 'pending') return false;
-          tx.update(ref, { aiStatus: 'processing' });
+          tx.update(ref, { aiStatus: 'processing', processingStartedAt: new Date() });
           return true;
         });
+      },
+      async reclaimStuckProcessing(olderThanMs) {
+        // Single-field query (auto-indexed); filter the age in memory to avoid a
+        // composite index. A crash/restart between claim and completion would
+        // otherwise strand a candidate in 'processing' forever.
+        const snap = await adb.collection('candidates').where('aiStatus', '==', 'processing').limit(50).get();
+        const cutoffMs = Date.now() - olderThanMs;
+        let n = 0;
+        for (const d of snap.docs) {
+          const started: any = d.data()?.processingStartedAt;
+          const startedMs = started?.toMillis ? started.toMillis() : (started ? new Date(started).getTime() : 0);
+          if (!startedMs || startedMs < cutoffMs) {
+            await d.ref.update({ aiStatus: 'pending' });
+            n++;
+          }
+        }
+        return n;
       },
       async getApplicationIdsByCandidate(candidateId) {
         const snap = await adb.collection('applications').where('candidateId', '==', candidateId).get();
@@ -220,8 +239,22 @@ async function initClient(): Promise<ServerDb> {
       const ref = doc(cdb, 'candidates', id);
       const snap = await getDoc(ref);
       if (!snap.exists() || snap.data()?.aiStatus !== 'pending') return false;
-      await setDoc(ref, { aiStatus: 'processing' }, { merge: true });
+      await setDoc(ref, { aiStatus: 'processing', processingStartedAt: new Date() }, { merge: true });
       return true;
+    },
+    async reclaimStuckProcessing(olderThanMs) {
+      const snap = await getDocs(query(collection(cdb, 'candidates'), where('aiStatus', '==', 'processing'), limit(50)));
+      const cutoffMs = Date.now() - olderThanMs;
+      let n = 0;
+      for (const d of snap.docs) {
+        const started: any = d.data()?.processingStartedAt;
+        const startedMs = started?.toMillis ? started.toMillis() : (started ? new Date(started).getTime() : 0);
+        if (!startedMs || startedMs < cutoffMs) {
+          await setDoc(d.ref, { aiStatus: 'pending' }, { merge: true });
+          n++;
+        }
+      }
+      return n;
     },
     async getApplicationIdsByCandidate(candidateId) {
       const snap = await getDocs(query(collection(cdb, 'applications'), where('candidateId', '==', candidateId)));
