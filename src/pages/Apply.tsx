@@ -5,7 +5,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { signInAnonymously } from 'firebase/auth';
 import { db, auth, storage } from '../lib/firebase';
 import { Upload, CheckCircle, Loader2, MapPin, Clock, ArrowLeft, Building2 } from 'lucide-react';
-import { sendEmail, getEmailTemplate } from '../lib/email';
+import { sendApplicationConfirmation } from '../lib/email';
 
 export default function Apply() {
   const { vacancyId } = useParams();
@@ -179,14 +179,9 @@ export default function Apply() {
         lastStageUpdate: serverTimestamp()
       });
 
-      // 5. Send Confirmation Email
+      // 5. Send Confirmation Email (server-side template; best-effort)
       try {
-        const emailHtml = getEmailTemplate(
-          "¡Hemos recibido tu currículum!",
-          `Hola ${name},\n\nGracias por postularte a la vacante de ${vacancy?.title || 'nuestra empresa'}.\n\nHemos recibido tu currículum correctamente y nuestro equipo de reclutamiento lo estará evaluando en los próximos días.\n\nSi tu perfil se ajusta a lo que buscamos, te contactaremos para el siguiente paso.\n\n¡Mucho éxito!\n\nAtentamente,\nEl equipo de ${company.name}`,
-          company.logoUrl
-        );
-        await sendEmail(email, `Confirmación de postulación - ${company.name}`, emailHtml);
+        await sendApplicationConfirmation(email, name, vacancy?.title || 'nuestra empresa');
       } catch (emailError) {
         console.error("Error sending confirmation email:", emailError);
       }

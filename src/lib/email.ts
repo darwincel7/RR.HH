@@ -1,6 +1,10 @@
+import { apiFetch } from './api';
+
+// Recruiter-only transactional email (stage automations). Sends the recruiter's
+// auth token; the server rejects it otherwise.
 export async function sendEmail(to: string, subject: string, html: string) {
   try {
-    const res = await fetch('/api/email/send', {
+    const res = await apiFetch('/api/email/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ to, subject, html })
@@ -8,6 +12,22 @@ export async function sendEmail(to: string, subject: string, html: string) {
     return await res.json();
   } catch (error) {
     console.error("Error sending email:", error);
+    return { success: false, error };
+  }
+}
+
+// Public: the candidate's "application received" confirmation. The server owns the
+// template — we only pass data, never HTML — so this is not an open relay.
+export async function sendApplicationConfirmation(email: string, name: string, vacancyTitle: string) {
+  try {
+    const res = await fetch('/api/public/apply-confirmation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, name, vacancyTitle })
+    });
+    return await res.json();
+  } catch (error) {
+    console.error("Error sending confirmation email:", error);
     return { success: false, error };
   }
 }

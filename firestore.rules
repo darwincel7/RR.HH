@@ -50,12 +50,19 @@ service cloud.firestore {
     }
 
     match /applications/{applicationId} {
-      // Public read is required so the candidate can open their evaluation/test link
-      // by its (secret, random) document id without logging in.
-      allow read: if true;
+      // A candidate opens their OWN evaluation/test link by its unguessable
+      // {anonUID}_{vacancyId} document id (capability URL) — a single-document GET.
+      // LIST is recruiter-only, so the whole collection can never be enumerated or
+      // dumped (previously `read: if true` let anyone download every applicant's
+      // PII, CV links, answers, scores and private interview notes).
+      allow get: if true;
+      allow list: if isRecruiter();
       allow create: if isAuthenticated();
+      // Candidates may only submit their own answers/stage transitions; recruiters
+      // may update anything. (Server-side scoring writes go through the Admin SDK.)
       allow update: if isRecruiter() ||
         (!isRecruiter() && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stage2Answers', 'stage', 'stage2SubmittedAt', 'stage2Scoring', 'testResults', 'lastStageUpdate']));
+      allow delete: if isRecruiter();
     }
 
     match /whatsapp_messages/{messageId} {

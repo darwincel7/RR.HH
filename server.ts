@@ -495,36 +495,79 @@ async function startServer() {
   });
 
   // Email Endpoint (public: also used by the candidate application flow). Rate limited.
-  app.post("/api/email/send", globalRateLimit(60), rateLimit(30), async (req, res) => {
+  // Shared mail sender. Returns {success, simulated?}. Never lets the caller
+  // control anything beyond a single recipient/subject/html that WE assemble.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const sendMail = async (to: string, subject: string, html: string) => {
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      console.log("Email not sent: SMTP credentials missing. Would have sent to:", to);
+      return { success: true, simulated: true };
+    }
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    await transporter.sendMail({
+      from: `"Darwin Cell RRHH" <${process.env.SMTP_USER}>`,
+      to,
+      subject,
+      html,
+    });
+    return { success: true };
+  };
+
+  // Recruiter-only: arbitrary transactional email (used by stage automations).
+  // Previously PUBLIC — an open relay that let anyone send arbitrary HTML from the
+  // company address to any recipient. Now gated behind recruiter auth.
+  app.post("/api/email/send", requireRecruiter, globalRateLimit(120), rateLimit(60), async (req, res) => {
     try {
-      const { to, subject, html } = req.body;
-      
-      if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        console.log("Email not sent: SMTP credentials missing in environment variables. Would have sent to:", to);
-        return res.json({ success: true, simulated: true, message: "Email simulated (no credentials)" });
-      }
-
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: parseInt(process.env.SMTP_PORT || '587'),
-        secure: process.env.SMTP_SECURE === 'true',
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
-
-      await transporter.sendMail({
-        from: `"Darwin Cell RRHH" <${process.env.SMTP_USER}>`,
-        to,
-        subject,
-        html,
-      });
-
-      res.json({ success: true });
+      const { to, subject, html } = req.body || {};
+      if (typeof to !== 'string' || !EMAIL_RE.test(to)) return res.status(400).json({ error: 'Destinatario inválido' });
+      if (typeof subject !== 'string' || typeof html !== 'string') return res.status(400).json({ error: 'Asunto/contenido inválido' });
+      if (subject.length > 300 || html.length > 100_000) return res.status(413).json({ error: 'Contenido demasiado largo' });
+      const r = await sendMail(to, subject.slice(0, 300), html);
+      res.json(r);
     } catch (error) {
       console.error("Error sending email:", error);
       res.status(500).json({ error: "Failed to send email" });
+    }
+  });
+
+  // Public (rate-limited): the ONE fixed message a candidate may trigger — the
+  // "we received your application" confirmation. The template is built here from a
+  // trusted layout; the client cannot supply HTML/subject/attachments, so this
+  // cannot be used as a spam/phishing relay.
+  app.post("/api/public/apply-confirmation", globalRateLimit(60), rateLimit(10), async (req, res) => {
+    try {
+      const { email, name, vacancyTitle } = req.body || {};
+      if (typeof email !== 'string' || !EMAIL_RE.test(email) || email.length > 200) {
+        return res.status(400).json({ error: 'Correo inválido' });
+      }
+      const safe = (s: any, max: number) => (typeof s === 'string' ? s : '').replace(/[<>]/g, '').slice(0, max);
+      const cleanName = safe(name, 120) || 'candidato';
+      const cleanVacancy = safe(vacancyTitle, 160) || 'nuestra empresa';
+
+      let companyName = 'Darwin Cell';
+      let logoUrl = '';
+      try {
+        const company = await db.getDocData('settings', 'company');
+        if (company?.name) companyName = String(company.name).slice(0, 120);
+        if (company?.logoUrl) logoUrl = String(company.logoUrl);
+      } catch { /* branding is best-effort */ }
+
+      const body = `Hola ${cleanName},<br/><br/>Gracias por postularte a la vacante de <strong>${cleanVacancy}</strong>.<br/><br/>Hemos recibido tu currículum correctamente y nuestro equipo de reclutamiento lo estará evaluando en los próximos días.<br/><br/>Si tu perfil se ajusta a lo que buscamos, te contactaremos para el siguiente paso.<br/><br/>¡Mucho éxito!<br/><br/>Atentamente,<br/>El equipo de ${companyName}`;
+      const html = `<div style="font-family:'Segoe UI',Tahoma,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+        <div style="background:#fff;padding:24px;text-align:center;border-bottom:2px solid #f1f5f9;">${logoUrl ? `<img src="${logoUrl}" alt="${companyName}" style="max-height:80px;object-fit:contain;"/>` : `<h1 style="color:#0f172a;margin:0;font-size:24px;">${companyName}</h1>`}</div>
+        <div style="padding:32px;background:#fff;color:#334155;line-height:1.6;font-size:16px;"><h2 style="color:#0f172a;margin-top:0;font-size:20px;">¡Hemos recibido tu currículum!</h2><div style="margin-top:20px;">${body}</div></div>
+        <div style="background:#f8fafc;padding:20px;text-align:center;font-size:13px;color:#64748b;border-top:1px solid #e2e8f0;">© ${new Date().getFullYear()} ${companyName}. Correo automático, por favor no respondas.</div>
+      </div>`;
+      const r = await sendMail(email, `Confirmación de postulación - ${companyName}`, html);
+      res.json(r);
+    } catch (error) {
+      console.error("Error sending confirmation email:", error);
+      res.status(500).json({ error: "Failed to send confirmation" });
     }
   });
 
