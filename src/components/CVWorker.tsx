@@ -3,6 +3,7 @@ import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firesto
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
+import { normalizePhone } from '../lib/phone';
 
 export default function CVWorker() {
   const { isRecruiter } = useAuth();
@@ -68,7 +69,10 @@ export default function CVWorker() {
               if (data.fullName?.startsWith("Procesando:")) {
                 if (parsedData.full_name) candidateUpdatePayload.fullName = parsedData.full_name;
                 if (parsedData.email) candidateUpdatePayload.email = parsedData.email;
-                if (parsedData.phone) candidateUpdatePayload.phone = parsedData.phone;
+                if (parsedData.phone) {
+                  candidateUpdatePayload.phone = parsedData.phone;
+                  candidateUpdatePayload.phoneNormalized = normalizePhone(parsedData.phone);
+                }
                 if (parsedData.city) candidateUpdatePayload.city = parsedData.city;
               }
 

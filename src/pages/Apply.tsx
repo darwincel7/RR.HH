@@ -6,6 +6,7 @@ import { signInAnonymously } from 'firebase/auth';
 import { db, auth, storage } from '../lib/firebase';
 import { Upload, CheckCircle, Loader2, MapPin, Clock, ArrowLeft, Building2 } from 'lucide-react';
 import { sendApplicationConfirmation } from '../lib/email';
+import { normalizePhone } from '../lib/phone';
 
 export default function Apply() {
   const { vacancyId } = useParams();
@@ -161,6 +162,7 @@ export default function Apply() {
         fullName: name,
         email: email,
         phone: phone,
+        phoneNormalized: normalizePhone(phone),
         city: city,
         cvUrl,
         cvFileType: file.type,

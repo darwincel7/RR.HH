@@ -17,6 +17,7 @@
  */
 import fs from 'fs';
 import { randomUUID } from 'crypto';
+import { normalizePhone } from './src/lib/phone';
 
 const firebaseConfig = JSON.parse(fs.readFileSync('./firebase-applet-config.json', 'utf-8'));
 const databaseId: string = firebaseConfig.firestoreDatabaseId;
@@ -107,8 +108,17 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         await Promise.all(snap.docs.map(d => d.ref.delete()));
       },
       async findCandidateIdByPhone(phone) {
-        const snap = await adb.collection('candidates').where('phone', '==', phone).limit(1).get();
-        return snap.empty ? null : snap.docs[0].id;
+        const norm = normalizePhone(phone);
+        // Primary match: the canonical field written at intake / CV parse.
+        let snap = await adb.collection('candidates').where('phoneNormalized', '==', norm).limit(1).get();
+        if (!snap.empty) return snap.docs[0].id;
+        // Fallback for legacy candidates without phoneNormalized: try common raw forms.
+        const variants = Array.from(new Set([norm, String(phone || ''), norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
+        for (const v of variants) {
+          snap = await adb.collection('candidates').where('phone', '==', v).limit(1).get();
+          if (!snap.empty) return snap.docs[0].id;
+        }
+        return null;
       },
       async addWhatsappMessage(data) {
         await adb.collection('whatsapp_messages').add({ ...data, sentAt: FieldValue.serverTimestamp() });
@@ -189,8 +199,15 @@ async function initClient(): Promise<ServerDb> {
       await Promise.all(snap.docs.map(d => deleteDoc(d.ref)));
     },
     async findCandidateIdByPhone(phone) {
-      const snap = await getDocs(query(collection(cdb, 'candidates'), where('phone', '==', phone), limit(1)));
-      return snap.empty ? null : snap.docs[0].id;
+      const norm = normalizePhone(phone);
+      let snap = await getDocs(query(collection(cdb, 'candidates'), where('phoneNormalized', '==', norm), limit(1)));
+      if (!snap.empty) return snap.docs[0].id;
+      const variants = Array.from(new Set([norm, String(phone || ''), norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
+      for (const v of variants) {
+        snap = await getDocs(query(collection(cdb, 'candidates'), where('phone', '==', v), limit(1)));
+        if (!snap.empty) return snap.docs[0].id;
+      }
+      return null;
     },
     async addWhatsappMessage(data) {
       await addDoc(collection(cdb, 'whatsapp_messages'), { ...data, sentAt: serverTimestamp() });
