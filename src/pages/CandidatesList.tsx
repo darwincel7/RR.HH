@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, where, getDocs, doc, writeBatch, setDoc, serverTimestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
@@ -23,22 +23,41 @@ export default function CandidatesList() {
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchCandidates = async () => {
-    try {
-      setLoading(true);
-      // Fetch all applications
-      const appSnap = await getDocs(collection(db, 'applications'));
-      const apps = appSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+  const PAGE_SIZE = 100;
+  const [lastDoc, setLastDoc] = useState<any>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-      // Fetch all vacancies to map titles
+  // Paginated: loads the most recent PAGE_SIZE applications and appends on "load more"
+  // instead of downloading the entire collection. Contact info is fetched only for the
+  // applications on the current page.
+  const fetchCandidates = async (reset = true) => {
+    try {
+      reset ? setLoading(true) : setLoadingMore(true);
+
+      // Vacancy titles (few docs)
       const vacSnap = await getDocs(collection(db, 'vacancies'));
       const vacMap = new Map();
       vacSnap.docs.forEach(d => vacMap.set(d.id, d.data().title));
 
-      // Fetch all candidates to get contact info
-      const candSnap = await getDocs(collection(db, 'candidates'));
+      // One page of applications, newest first
+      const appsCol = collection(db, 'applications');
+      const cursor = reset ? null : lastDoc;
+      const qy = cursor
+        ? query(appsCol, orderBy('submittedAt', 'desc'), startAfter(cursor), limit(PAGE_SIZE))
+        : query(appsCol, orderBy('submittedAt', 'desc'), limit(PAGE_SIZE));
+      const appSnap = await getDocs(qy);
+      const appDocs = appSnap.docs;
+      setHasMore(appDocs.length === PAGE_SIZE);
+      if (appDocs.length > 0) setLastDoc(appDocs[appDocs.length - 1]);
+
+      const apps = appDocs.map(d => ({ id: d.id, ...d.data() } as any));
+
+      // Contact info for THIS page's candidates only
+      const candIds = Array.from(new Set(apps.map(a => a.candidateId).filter(Boolean)));
+      const candSnaps = await Promise.all(candIds.map(id => getDoc(doc(db, 'candidates', id))));
       const candMap = new Map();
-      candSnap.docs.forEach(d => candMap.set(d.id, d.data()));
+      candSnaps.forEach(s => { if (s.exists()) candMap.set(s.id, s.data()); });
 
       const combined = apps.map(app => {
         const cData = candMap.get(app.candidateId) || {};
@@ -64,18 +83,12 @@ export default function CandidatesList() {
         };
       });
 
-      // Sort by date applied (field is `submittedAt`, not `appliedAt`).
-      combined.sort((a, b) => {
-        const dateA = a.submittedAt?.toMillis?.() || 0;
-        const dateB = b.submittedAt?.toMillis?.() || 0;
-        return dateB - dateA;
-      });
-
-      setCandidates(combined);
+      // Already ordered by the query (submittedAt desc); append pages on "load more".
+      setCandidates(prev => reset ? combined : [...prev, ...combined]);
     } catch (error) {
       console.error("Error fetching candidates:", error);
     } finally {
-      setLoading(false);
+      reset ? setLoading(false) : setLoadingMore(false);
     }
   };
 
@@ -541,6 +554,18 @@ export default function CandidatesList() {
             </tbody>
           </table>
         </div>
+        {hasMore && (
+          <div className="p-4 text-center border-t border-slate-100">
+            <button
+              onClick={() => fetchCandidates(false)}
+              disabled={loadingMore}
+              className="px-6 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl transition-colors disabled:opacity-50"
+            >
+              {loadingMore ? 'Cargando…' : `Cargar ${PAGE_SIZE} más`}
+            </button>
+            <p className="text-xs text-slate-400 mt-2">Mostrando los {candidates.length} más recientes. La búsqueda/filtros aplican sobre lo cargado.</p>
+          </div>
+        )}
       </div>
 
       {/* Delete Confirmation Modal */}
