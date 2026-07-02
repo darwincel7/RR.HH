@@ -16,6 +16,16 @@ export async function sendWhatsAppAutomation(
     const NO_AUTOMATION_STAGES = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
     if (NO_AUTOMATION_STAGES.includes(stage)) return false;
 
+    // These messages advertise a date/time/place. Sending them without that data
+    // (e.g. on a plain Kanban stage change) produced broken "Fecha: / Hora: ()"
+    // invitations. Only send once a real fecha+hora is provided — which happens
+    // when the recruiter schedules the interview from the Entrevistas page.
+    const SCHEDULE_REQUIRED_STAGES = ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'];
+    if (SCHEDULE_REQUIRED_STAGES.includes(stage) && (!variables.fecha || !variables.hora)) {
+      console.warn(`[whatsapp] Se omite "${stage}": falta fecha/hora. Agenda la cita en Entrevistas para enviar la invitación.`);
+      return false;
+    }
+
     // Fetch templates
     const docRef = doc(db, 'settings', 'whatsapp_templates');
     const docSnap = await getDoc(docRef);

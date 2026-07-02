@@ -114,11 +114,32 @@ export default function Interviews() {
         status: 'pending',
         addedAt: serverTimestamp()
       });
-      
+
       // Remove from available list
       setAvailableCandidates(prev => prev.filter(c => c.id !== appId));
+
+      // Send the interview invitation WITH the scheduled date/time/place. This is the
+      // correct place for it (the session has the data) — the Kanban stage change no
+      // longer sends a blank "Fecha: / Hora: ()" message.
+      const session = sessions.find(s => s.id === selectedSessionId);
+      if (session && phone) {
+        const stageTemplate = session.type === 'presencial' ? 'Entrevista presencial' : 'Convocado a entrevista';
+        const sent = await sendWhatsAppAutomation(phone, stageTemplate, {
+          nombre: candidateName,
+          vacante: session.vacancyTitle,
+          fecha: session.date,
+          hora: session.time,
+          ubicacion: session.location,
+        });
+        alert(sent
+          ? `Candidato añadido. Invitación enviada por WhatsApp para el ${session.date} a las ${session.time}.`
+          : 'Candidato añadido, pero NO se pudo enviar la invitación por WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+      } else if (session && !phone) {
+        alert('Candidato añadido. No tiene teléfono registrado, así que no se envió la invitación.');
+      }
     } catch (error) {
       console.error("Error adding participant:", error);
+      alert('Error al añadir el candidato.');
     } finally {
       setAddingParticipant(false);
     }

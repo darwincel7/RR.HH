@@ -64,10 +64,10 @@ export default function CandidatesList() {
         };
       });
 
-      // Sort by date applied
+      // Sort by date applied (field is `submittedAt`, not `appliedAt`).
       combined.sort((a, b) => {
-        const dateA = a.appliedAt?.toMillis() || 0;
-        const dateB = b.appliedAt?.toMillis() || 0;
+        const dateA = a.submittedAt?.toMillis?.() || 0;
+        const dateB = b.submittedAt?.toMillis?.() || 0;
         return dateB - dateA;
       });
 
@@ -228,7 +228,7 @@ export default function CandidatesList() {
     const csvContent = [
       headers.join(','),
       ...filteredCandidates.map(c => {
-        const date = c.appliedAt?.toDate ? c.appliedAt.toDate().toLocaleDateString() : '';
+        const date = c.submittedAt?.toDate ? c.submittedAt.toDate().toLocaleDateString() : '';
         return [
           `"${c.candidateName}"`,
           `"${c.email}"`,

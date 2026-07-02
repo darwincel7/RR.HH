@@ -66,8 +66,9 @@ export default function Dashboard() {
           candidatos: vacancyCounts[key]
         })).sort((a, b) => b.candidatos - a.candidatos).slice(0, 5); // Top 5
 
-        // Fetch Recent Applications
-        const recentQ = query(collection(db, 'applications'), orderBy('appliedAt', 'desc'), limit(5));
+        // Fetch Recent Applications (ordered by the field that actually exists:
+        // applications are written with `submittedAt`, not `appliedAt`).
+        const recentQ = query(collection(db, 'applications'), orderBy('submittedAt', 'desc'), limit(5));
         const recentSnap = await getDocs(recentQ);
         const recent = recentSnap.docs.map(d => {
           const data = d.data();
