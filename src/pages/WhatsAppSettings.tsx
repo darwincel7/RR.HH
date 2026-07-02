@@ -1,10 +1,15 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, getDocs, updateDoc, deleteDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
-import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload } from 'lucide-react';
+import { useAuth } from '../contexts/AuthContext';
+import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock } from 'lucide-react';
 
 export default function WhatsAppSettings() {
+  const { isAdmin, user } = useAuth();
+  const [teamUsers, setTeamUsers] = useState<any[]>([]);
+  const [loadingTeam, setLoadingTeam] = useState(false);
+  const [teamBusy, setTeamBusy] = useState<string | null>(null);
   const [status, setStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -98,6 +103,46 @@ export default function WhatsAppSettings() {
     const interval = setInterval(fetchStatus, 5000); // Poll every 5s
     return () => clearInterval(interval);
   }, []);
+
+  // ---- Team access management (admin only) ----
+  const fetchTeam = async () => {
+    setLoadingTeam(true);
+    try {
+      const snap = await getDocs(collection(db, 'users'));
+      setTeamUsers(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (e) {
+      console.error('Error loading team:', e);
+    } finally {
+      setLoadingTeam(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isAdmin) fetchTeam();
+  }, [isAdmin]);
+
+  const isRecruiterUser = (u: any) => Array.isArray(u.roleIds) && (u.roleIds.includes('recruiter') || u.roleIds.includes('admin'));
+
+  const approveUser = async (id: string) => {
+    setTeamBusy(id);
+    try {
+      await updateDoc(doc(db, 'users', id), { roleIds: ['recruiter'], status: 'active' });
+      await fetchTeam();
+    } catch (e) {
+      console.error(e); alert('No se pudo aprobar. Intenta de nuevo.');
+    } finally { setTeamBusy(null); }
+  };
+
+  const revokeUser = async (id: string) => {
+    if (!confirm('¿Quitar el acceso de esta persona? No podrá entrar al panel.')) return;
+    setTeamBusy(id);
+    try {
+      await deleteDoc(doc(db, 'users', id));
+      await fetchTeam();
+    } catch (e) {
+      console.error(e); alert('No se pudo revocar. Intenta de nuevo.');
+    } finally { setTeamBusy(null); }
+  };
 
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -227,6 +272,91 @@ export default function WhatsAppSettings() {
           Configuración guardada correctamente.
         </div>
       )}
+
+      {/* Team access (admin only) */}
+      {isAdmin && (() => {
+        const decorated = teamUsers.map(u => ({
+          ...u,
+          isSelf: u.id === user?.uid,
+          isOwnerAdmin: (u.email || '').toLowerCase() === 'daruingmejia@gmail.com',
+        })).map(u => ({ ...u, hasAccess: isRecruiterUser(u) || u.isOwnerAdmin }));
+        const pending = decorated.filter(u => !u.hasAccess);
+        const active = decorated.filter(u => u.hasAccess);
+        return (
+          <div className="bg-white shadow-sm border border-slate-200 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center">
+                <div className="p-2 bg-violet-50 text-violet-600 rounded-lg mr-3"><ShieldCheck className="w-5 h-5" /></div>
+                <div>
+                  <h2 className="text-lg font-bold text-slate-800">Equipo y Accesos</h2>
+                  <p className="text-sm text-slate-500">Aprueba quién puede entrar al panel. Los nuevos quedan pendientes hasta que los apruebes.</p>
+                </div>
+              </div>
+              <button onClick={fetchTeam} disabled={loadingTeam} className="p-2 text-slate-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-colors" title="Actualizar">
+                {loadingTeam ? <Loader2 className="w-5 h-5 animate-spin" /> : <RefreshCw className="w-5 h-5" />}
+              </button>
+            </div>
+
+            {/* Pending approvals */}
+            <div className="mb-6">
+              <h3 className="text-xs font-bold uppercase tracking-wider text-amber-600 mb-3 flex items-center">
+                <Clock className="w-4 h-4 mr-1.5" /> Pendientes de aprobación ({pending.length})
+              </h3>
+              {pending.length === 0 ? (
+                <p className="text-sm text-slate-400">No hay solicitudes pendientes.</p>
+              ) : (
+                <div className="space-y-2">
+                  {pending.map(u => (
+                    <div key={u.id} className="flex items-center justify-between p-3 rounded-xl border border-amber-200 bg-amber-50/50">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-800 truncate">{u.name || 'Sin nombre'}</p>
+                        <p className="text-xs text-slate-500 truncate">{u.email}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button onClick={() => approveUser(u.id)} disabled={teamBusy === u.id}
+                          className="flex items-center px-3 py-1.5 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg transition-colors disabled:opacity-50">
+                          {teamBusy === u.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <><UserCheck className="w-4 h-4 mr-1" /> Aprobar</>}
+                        </button>
+                        <button onClick={() => revokeUser(u.id)} disabled={teamBusy === u.id}
+                          className="flex items-center px-3 py-1.5 text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors disabled:opacity-50">
+                          <UserX className="w-4 h-4 mr-1" /> Rechazar
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Active team */}
+            <div>
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center">
+                <UserCheck className="w-4 h-4 mr-1.5" /> Con acceso ({active.length})
+              </h3>
+              <div className="space-y-2">
+                {active.map(u => (
+                  <div key={u.id} className="flex items-center justify-between p-3 rounded-xl border border-slate-200">
+                    <div className="min-w-0">
+                      <p className="text-sm font-bold text-slate-800 truncate">
+                        {u.name || 'Sin nombre'}
+                        {u.isSelf && <span className="ml-2 text-xs font-medium text-slate-400">(tú)</span>}
+                        {u.isOwnerAdmin && <span className="ml-2 px-2 py-0.5 text-[10px] font-bold bg-violet-100 text-violet-700 rounded-full">ADMIN</span>}
+                      </p>
+                      <p className="text-xs text-slate-500 truncate">{u.email}</p>
+                    </div>
+                    {!u.isSelf && !u.isOwnerAdmin && (
+                      <button onClick={() => revokeUser(u.id)} disabled={teamBusy === u.id}
+                        className="flex items-center px-3 py-1.5 text-xs font-bold text-rose-600 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors disabled:opacity-50 shrink-0">
+                        {teamBusy === u.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <><UserX className="w-4 h-4 mr-1" /> Quitar acceso</>}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Company Profile */}
       <div className="bg-white shadow-sm border border-slate-200 rounded-xl p-6">

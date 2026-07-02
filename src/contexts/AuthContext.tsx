@@ -34,14 +34,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         if (userSnap.exists()) {
           setUserData(userSnap.data());
         } else {
+          // New sign-ins start with NO role: they land in a "pending" state until an
+          // admin approves them from Settings. Previously every Google account was
+          // auto-granted 'recruiter', which let anyone into the console.
           const newUserData = {
             uid: currentUser.uid,
             name: currentUser.displayName || 'Unknown',
             email: currentUser.email || '',
-            roleIds: ['recruiter'], // Default role
-            status: 'active'
+            roleIds: [] as string[],
+            status: 'pending'
           };
-          await setDoc(userRef, newUserData);
+          try {
+            await setDoc(userRef, newUserData);
+          } catch (e) {
+            // Non-fatal: the pending screen still renders from the derived roles.
+            console.warn('Could not create pending user doc:', e);
+          }
           setUserData(newUserData);
         }
       } else {

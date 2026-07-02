@@ -1,13 +1,13 @@
 import React, { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText } from 'lucide-react';
+import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock } from 'lucide-react';
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import CVWorker from '../CVWorker';
 import AITestButton from '../AITestButton';
 
 export default function DashboardLayout() {
-  const { user, loading, logout } = useAuth();
+  const { user, loading, logout, isRecruiter } = useAuth();
   const location = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -18,6 +18,32 @@ export default function DashboardLayout() {
 
   if (!user) {
     return <Navigate to="/login" state={{ from: location }} replace />;
+  }
+
+  // Signed in but not yet approved by an admin → hold at a pending screen.
+  if (!isRecruiter) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
+        <div className="max-w-md w-full bg-white rounded-3xl shadow-xl border border-slate-200 p-8 text-center">
+          <div className="w-16 h-16 mx-auto mb-5 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center">
+            <Clock className="w-8 h-8" />
+          </div>
+          <h1 className="text-2xl font-display font-bold text-slate-900 mb-2">Cuenta pendiente de aprobación</h1>
+          <p className="text-slate-500 mb-1">
+            Tu acceso está esperando la autorización de un administrador.
+          </p>
+          <p className="text-sm text-slate-400 mb-6">
+            Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>. Cuando te aprueben, podrás entrar al panel.
+          </p>
+          <button
+            onClick={logout}
+            className="inline-flex items-center px-5 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors"
+          >
+            <LogOut className="w-4 h-4 mr-2" /> Cerrar sesión
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const navigation = [

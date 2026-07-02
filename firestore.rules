@@ -33,7 +33,11 @@ service cloud.firestore {
 
     match /users/{userId} {
       allow read: if isAuthenticated() && (isOwner(userId) || isAdmin() || isRecruiter());
-      allow create: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == ['recruiter']) || isAdmin());
+      // A new sign-in may only create its OWN doc with NO roles (pending). Granting
+      // 'recruiter'/'admin' requires an existing admin (approval from Settings).
+      allow create: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == []) || isAdmin());
+      // Owners may edit their own profile but never their own roleIds; only an admin
+      // can change roles (approve / revoke access).
       allow update: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == resource.data.roleIds) || isAdmin());
       allow delete: if isAdmin();
     }
