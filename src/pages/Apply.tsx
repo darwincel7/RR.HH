@@ -150,7 +150,9 @@ export default function Apply() {
 
       // 2. Upload file to Firebase Storage
       const fileExt = file.name.split('.').pop();
-      const storageRef = ref(storage, `cvs/${candidateId}_${vacancyId}_${Date.now()}.${fileExt}`);
+      // Store under a per-owner folder so Storage rules can restrict reads to the
+      // uploader (candidates can't read each other's CVs).
+      const storageRef = ref(storage, `cvs/${candidateId}/${vacancyId}_${Date.now()}.${fileExt}`);
       await uploadBytes(storageRef, file);
       const cvUrl = await getDownloadURL(storageRef);
 

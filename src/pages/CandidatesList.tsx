@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, doc, writeBatch, setDoc, serverTimestamp } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
-import { db, storage } from '../lib/firebase';
+import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -172,7 +172,9 @@ export default function CandidatesList() {
           
           // 2. Upload file
           const fileExt = file.name.split('.').pop() || 'pdf';
-          const storageRef = ref(storage, `cvs/${candidateId}_bulk_${Date.now()}.${fileExt}`);
+          // Folder = the uploading recruiter's uid, so Storage rules allow the write/read.
+          const uploaderUid = auth.currentUser?.uid || candidateId;
+          const storageRef = ref(storage, `cvs/${uploaderUid}/${candidateId}_bulk_${Date.now()}.${fileExt}`);
           await uploadBytes(storageRef, file);
           const cvUrl = await getDownloadURL(storageRef);
 

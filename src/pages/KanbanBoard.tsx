@@ -3,7 +3,7 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
-import { db, storage } from '../lib/firebase';
+import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload } from 'lucide-react';
 
@@ -168,9 +168,10 @@ export default function KanbanBoard() {
           // 1. Create a candidate record
           const candidateId = doc(collection(db, 'candidates')).id;
           
-          // 2. Upload file to storage
+          // 2. Upload file to storage (folder = uploading recruiter's uid)
           const fileExt = file.name.split('.').pop() || 'pdf';
-          const storageRef = ref(storage, `cvs/${candidateId}_bulk_${Date.now()}.${fileExt}`);
+          const uploaderUid = auth.currentUser?.uid || candidateId;
+          const storageRef = ref(storage, `cvs/${uploaderUid}/${candidateId}_bulk_${Date.now()}.${fileExt}`);
           await uploadBytes(storageRef, file);
           const cvUrl = await getDownloadURL(storageRef);
 
