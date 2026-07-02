@@ -5,7 +5,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
-import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload } from 'lucide-react';
+import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText } from 'lucide-react';
 
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
@@ -459,6 +459,31 @@ export default function KanbanBoard() {
                                     Perfil
                                   </div>
                                 </div>
+
+                                {/* Open the candidate's CV directly from the card. */}
+                                {(() => {
+                                  const cvUrl = candidates[item.candidateId]?.cvUrl || item.cvUrl;
+                                  return (
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (cvUrl) window.open(cvUrl, '_blank', 'noopener,noreferrer');
+                                      }}
+                                      disabled={!cvUrl}
+                                      title={cvUrl ? 'Abrir currículum en una pestaña nueva' : 'CV aún no disponible'}
+                                      className={`mt-3 w-full flex items-center justify-center gap-1.5 text-xs font-bold py-2 rounded-lg transition-colors ${
+                                        cvUrl
+                                          ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                      }`}
+                                    >
+                                      <FileText className="w-3.5 h-3.5" />
+                                      {cvUrl ? 'Ver Currículum' : 'CV no disponible'}
+                                    </button>
+                                  );
+                                })()}
                               </div>
                             )}
                           </Draggable>
