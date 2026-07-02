@@ -32,14 +32,19 @@ export default function DashboardLayout() {
           <h1 className="text-2xl font-display font-bold text-slate-900 mb-2">
             {isBlocked ? 'Acceso no autorizado' : 'Cuenta pendiente de aprobación'}
           </h1>
-          <p className="text-slate-500 mb-1">
+          <p className="text-slate-500 mb-4">
             {isBlocked
               ? 'Un administrador ha restringido el acceso de esta cuenta.'
-              : 'Tu acceso está esperando la autorización de un administrador.'}
+              : 'Tu cuenta se creó correctamente, pero aún no tiene acceso al panel.'}
           </p>
+          {!isBlocked && (
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 text-sm text-amber-800">
+              Para activar tu acceso, comunícate con <strong>Darwin</strong> (daruingmejia@gmail.com)
+              y pídele que apruebe tu cuenta desde el panel de administración.
+            </div>
+          )}
           <p className="text-sm text-slate-400 mb-6">
             Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>.
-            {!isBlocked && ' Cuando te aprueben, podrás entrar al panel.'}
           </p>
           <button
             onClick={logout}
