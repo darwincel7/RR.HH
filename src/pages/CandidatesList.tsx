@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter } from 'firebase/firestore';
+import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
-import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload } from 'lucide-react';
+import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
 import { PIPELINE_STAGES } from '../constants/stages';
@@ -139,6 +139,49 @@ export default function CandidatesList() {
   useEffect(() => {
     fetchCandidates();
   }, []);
+
+  // Count how many CVs are stuck in 'error' so we can offer a one-click bulk retry.
+  // The server CV worker only picks up 'pending' docs, so an errored CV stays stuck
+  // until it's flipped back to 'pending' — this surfaces that pile at a glance.
+  const [erroredCount, setErroredCount] = useState(0);
+  const [retryingCVs, setRetryingCVs] = useState(false);
+
+  const countErroredCVs = async () => {
+    try {
+      const snap = await getCountFromServer(query(collection(db, 'candidates'), where('aiStatus', '==', 'error')));
+      setErroredCount(snap.data().count);
+    } catch (e) {
+      console.error('No se pudo contar los CV con error:', e);
+    }
+  };
+  useEffect(() => { countErroredCVs(); }, []);
+
+  // Re-queue every errored CV (error -> pending). The server worker then reprocesses
+  // them automatically, so a transient Gemini/network hiccup doesn't leave a pile of
+  // candidates un-scored needing one manual retry each.
+  const retryErroredCVs = async () => {
+    if (erroredCount === 0 || retryingCVs) return;
+    if (!window.confirm(`¿Reintentar ${erroredCount} CV con error? La IA los volverá a leer.`)) return;
+    setRetryingCVs(true);
+    try {
+      const snap = await getDocs(query(collection(db, 'candidates'), where('aiStatus', '==', 'error')));
+      const docs = snap.docs;
+      // Firestore batches cap at 500 writes; chunk to stay well under.
+      for (let i = 0; i < docs.length; i += 400) {
+        const batch = writeBatch(db);
+        docs.slice(i, i + 400).forEach(d => batch.update(d.ref, { aiStatus: 'pending', aiError: null }));
+        await batch.commit();
+      }
+      setErroredCount(0);
+      alert(`${docs.length} CV puestos en cola. La IA los reprocesará en unos segundos.`);
+      refresh();
+    } catch (e) {
+      console.error('No se pudieron reintentar los CV:', e);
+      alert('No se pudieron reintentar los CV. Revisa tus permisos e inténtalo de nuevo.');
+    } finally {
+      setRetryingCVs(false);
+    }
+  };
 
   const anyFilterActive = !!(searchTerm || stageFilter || cityFilter || expFilter);
 
@@ -411,7 +454,18 @@ export default function CandidatesList() {
             {fullyLoaded && <span className="text-slate-400"> · {candidates.length} candidatos</span>}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
+          {erroredCount > 0 && (
+            <button
+              onClick={retryErroredCVs}
+              disabled={retryingCVs}
+              className="flex items-center px-4 py-2 bg-amber-50 border border-amber-200 text-amber-700 text-sm font-bold rounded-lg hover:bg-amber-100 transition-colors shadow-sm disabled:opacity-50"
+              title="Volver a poner en cola los CV que fallaron al leerse con IA"
+            >
+              <RefreshCw className={`w-4 h-4 mr-2 ${retryingCVs ? 'animate-spin' : ''}`} />
+              {retryingCVs ? 'Reintentando…' : `Reintentar ${erroredCount} CV con error`}
+            </button>
+          )}
           <button
             onClick={() => setIsBulkUploadModalOpen(true)}
             className="flex items-center px-4 py-2 bg-indigo-50 border border-indigo-100 text-indigo-700 text-sm font-bold rounded-lg hover:bg-indigo-100 transition-colors shadow-sm"
