@@ -55,6 +55,41 @@ function getAI(): GoogleGenAI | null {
 
   return new GoogleGenAI({ apiKey });
 }
+
+// Reject if a promise takes longer than `ms` — so a hung Gemini call can't hold a
+// Cloud Run concurrency slot open indefinitely.
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`Gemini timeout tras ${ms}ms`)), ms);
+    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+  });
+}
+
+// Wraps ai.models.generateContent with a hard timeout + bounded exponential backoff
+// on transient errors (429/5xx/timeout). Prevents thundering-herd during AI spikes.
+async function generateContentResilient(ai: GoogleGenAI, params: any, opts: { timeoutMs?: number; retries?: number } = {}): Promise<any> {
+  const timeoutMs = opts.timeoutMs ?? 90_000;
+  const retries = opts.retries ?? 2;
+  let lastErr: any;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await withTimeout(ai.models.generateContent(params), timeoutMs);
+    } catch (err: any) {
+      lastErr = err;
+      const msg = String(err?.message || err);
+      const status = Number(err?.status || err?.code || 0);
+      const retriable = [429, 500, 503].includes(status) || /timeout|deadline|unavailable|overloaded|rate.?limit|429|503|500/i.test(msg);
+      if (attempt < retries && retriable) {
+        const backoff = 600 * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
+        console.warn(`[gemini] intento ${attempt + 1} falló (${msg.slice(0, 90)}); reintento en ${backoff}ms`);
+        await new Promise((r) => setTimeout(r, backoff));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
 const logger = pino({ level: 'silent' });
 
 // WhatsApp State
@@ -326,7 +361,7 @@ async function runCvParse(input: { pdfBase64?: string; mimeType?: string; fileUr
     throw new CvParseError(400, "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente.");
   }
 
-  const response = await ai.models.generateContent({
+  const response = await generateContentResilient(ai,{
     model: 'gemini-3.1-pro-preview',
     contents: [prompt, contentsPart],
     config: {
@@ -836,7 +871,7 @@ async function startServer() {
         return res.status(400).json({ error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentResilient(ai,{
         model: 'gemini-3.1-pro-preview',
         contents: [prompt],
         config: {
@@ -877,7 +912,7 @@ async function startServer() {
         return res.status(400).json({ success: false, error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentResilient(ai,{
         model: 'gemini-3.1-pro-preview',
         contents: ["Say 'Hello, AI is working!'"]
       });
@@ -968,7 +1003,7 @@ async function startServer() {
         return res.status(400).json({ error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentResilient(ai,{
         model: 'gemini-3.1-pro-preview',
         contents: [prompt, contentsPart],
         config: {
@@ -1133,7 +1168,7 @@ async function startServer() {
         return res.status(400).json({ error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentResilient(ai,{
         model: "gemini-3.1-pro-preview",
         contents: prompt,
         config: {
@@ -1221,6 +1256,21 @@ async function startServer() {
       }, 1000);
     }
   });
+
+  // Graceful shutdown: Cloud Run sends SIGTERM on every deploy/scale-down. Drain
+  // in-flight requests and close the WhatsApp socket cleanly instead of dropping them.
+  let shuttingDown = false;
+  const shutdown = (sig: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[shutdown] ${sig} recibido — cerrando limpiamente...`);
+    try { (sock as any)?.end?.(undefined); } catch { /* ignore */ }
+    server.close(() => { console.log('[shutdown] servidor HTTP cerrado'); process.exit(0); });
+    // Force-exit if draining hangs (Cloud Run allows ~10s before SIGKILL).
+    setTimeout(() => process.exit(0), 8000);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
 bootstrap();
