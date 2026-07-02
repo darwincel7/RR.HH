@@ -417,14 +417,19 @@ async function startServer() {
   // ---------------------------------------------------------------------------
   // Security middleware
   // ---------------------------------------------------------------------------
-  // Requires a valid recruiter/admin Firebase ID token. Enforcement is active only
-  // when the Admin SDK is available (db.canEnforceAuth); in client fallback mode it
-  // fails open so the app keeps working until admin credentials are configured.
+  // Requires a valid recruiter/admin Firebase ID token. Enforcement needs the Admin
+  // SDK (db.canEnforceAuth). In PRODUCTION we FAIL CLOSED if it's unavailable — a
+  // credential/DB misconfig must never silently expose recruiter endpoints to the
+  // public. Only in non-production do we fail open (local dev convenience).
   let warnedNoEnforce = false;
   const requireRecruiter = async (req: any, res: any, next: any) => {
     if (!db?.canEnforceAuth) {
+      if (process.env.NODE_ENV === 'production') {
+        console.error('[auth] FAIL-CLOSED: auth cannot be enforced (Admin SDK unavailable) — refusing recruiter request.');
+        return res.status(503).json({ error: 'Servicio no disponible temporalmente. Inténtalo más tarde.' });
+      }
       if (!warnedNoEnforce) {
-        console.warn('[auth] API auth NOT enforced (no admin credentials). Configure GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_JSON to enable.');
+        console.warn('[auth] API auth NOT enforced (dev mode, no admin credentials). Set GOOGLE_APPLICATION_CREDENTIALS or FIREBASE_SERVICE_ACCOUNT_JSON.');
         warnedNoEnforce = true;
       }
       return next();

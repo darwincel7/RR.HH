@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
 import { auth, db, googleProvider } from '../lib/firebase';
 
 interface AuthContextType {
@@ -24,41 +24,45 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    let unsubUser: () => void = () => {};
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      unsubUser();          // tear down any previous user-doc listener
+      unsubUser = () => {};
       setUser(currentUser);
-      if (currentUser) {
-        // Fetch or create user document
-        const userRef = doc(db, 'users', currentUser.uid);
-        const userSnap = await getDoc(userRef);
-        
-        if (userSnap.exists()) {
-          setUserData(userSnap.data());
-        } else {
-          // New sign-ins start with NO role: they land in a "pending" state until an
-          // admin approves them from Settings. Previously every Google account was
-          // auto-granted 'recruiter', which let anyone into the console.
-          const newUserData = {
+
+      if (!currentUser) {
+        setUserData(null);
+        setLoading(false);
+        return;
+      }
+
+      const userRef = doc(db, 'users', currentUser.uid);
+      // Create a "pending" doc on first sign-in (no role until an admin approves).
+      // Previously every Google account was auto-granted 'recruiter'.
+      try {
+        const snap = await getDoc(userRef);
+        if (!snap.exists()) {
+          await setDoc(userRef, {
             uid: currentUser.uid,
             name: currentUser.displayName || 'Unknown',
             email: currentUser.email || '',
             roleIds: [] as string[],
-            status: 'pending'
-          };
-          try {
-            await setDoc(userRef, newUserData);
-          } catch (e) {
-            // Non-fatal: the pending screen still renders from the derived roles.
-            console.warn('Could not create pending user doc:', e);
-          }
-          setUserData(newUserData);
+            status: 'pending',
+          });
         }
-      } else {
-        setUserData(null);
+      } catch (e) {
+        console.warn('Could not initialize user doc:', e);
       }
-      setLoading(false);
+
+      // Live-subscribe so approvals/revocations take effect without a manual reload.
+      unsubUser = onSnapshot(
+        userRef,
+        (s) => { setUserData(s.exists() ? s.data() : null); setLoading(false); },
+        (err) => { console.error('user snapshot error:', err); setLoading(false); }
+      );
     });
 
-    return () => unsubscribe();
+    return () => { unsubUser(); unsubscribe(); };
   }, []);
 
   const loginWithGoogle = async () => {

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { doc, getDoc, setDoc, collection, getDocs, updateDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, getDocs, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
@@ -133,11 +133,13 @@ export default function WhatsAppSettings() {
     } finally { setTeamBusy(null); }
   };
 
+  // Block durably (roleIds cleared + status 'blocked') instead of deleting the doc,
+  // so the person cannot simply sign in again to reappear as "pending".
   const revokeUser = async (id: string) => {
     if (!confirm('¿Quitar el acceso de esta persona? No podrá entrar al panel.')) return;
     setTeamBusy(id);
     try {
-      await deleteDoc(doc(db, 'users', id));
+      await updateDoc(doc(db, 'users', id), { roleIds: [], status: 'blocked' });
       await fetchTeam();
     } catch (e) {
       console.error(e); alert('No se pudo revocar. Intenta de nuevo.');
@@ -280,7 +282,8 @@ export default function WhatsAppSettings() {
           isSelf: u.id === user?.uid,
           isOwnerAdmin: (u.email || '').toLowerCase() === 'daruingmejia@gmail.com',
         })).map(u => ({ ...u, hasAccess: isRecruiterUser(u) || u.isOwnerAdmin }));
-        const pending = decorated.filter(u => !u.hasAccess);
+        const pending = decorated.filter(u => !u.hasAccess && u.status !== 'blocked');
+        const blocked = decorated.filter(u => !u.hasAccess && u.status === 'blocked');
         const active = decorated.filter(u => u.hasAccess);
         return (
           <div className="bg-white shadow-sm border border-slate-200 rounded-xl p-6">
@@ -354,6 +357,29 @@ export default function WhatsAppSettings() {
                 ))}
               </div>
             </div>
+
+            {/* Blocked */}
+            {blocked.length > 0 && (
+              <div className="mt-6 pt-6 border-t border-slate-100">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-3 flex items-center">
+                  <UserX className="w-4 h-4 mr-1.5" /> Bloqueados ({blocked.length})
+                </h3>
+                <div className="space-y-2">
+                  {blocked.map(u => (
+                    <div key={u.id} className="flex items-center justify-between p-3 rounded-xl border border-slate-200 bg-slate-50 opacity-90">
+                      <div className="min-w-0">
+                        <p className="text-sm font-bold text-slate-500 line-through truncate">{u.name || 'Sin nombre'}</p>
+                        <p className="text-xs text-slate-400 truncate">{u.email}</p>
+                      </div>
+                      <button onClick={() => approveUser(u.id)} disabled={teamBusy === u.id}
+                        className="flex items-center px-3 py-1.5 text-xs font-bold text-emerald-600 bg-emerald-50 hover:bg-emerald-100 rounded-lg transition-colors disabled:opacity-50 shrink-0">
+                        {teamBusy === u.id ? <Loader2 className="w-4 h-4 animate-spin" /> : <><UserCheck className="w-4 h-4 mr-1" /> Re-aprobar</>}
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         );
       })()}

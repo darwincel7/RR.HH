@@ -7,7 +7,7 @@ import CVWorker from '../CVWorker';
 import AITestButton from '../AITestButton';
 
 export default function DashboardLayout() {
-  const { user, loading, logout, isRecruiter } = useAuth();
+  const { user, userData, loading, logout, isRecruiter } = useAuth();
   const location = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -20,20 +20,26 @@ export default function DashboardLayout() {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
-  // Signed in but not yet approved by an admin → hold at a pending screen.
+  // Signed in but not yet approved (or blocked) by an admin → hold at a gate screen.
   if (!isRecruiter) {
+    const isBlocked = userData?.status === 'blocked';
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50 px-4">
         <div className="max-w-md w-full bg-white rounded-3xl shadow-xl border border-slate-200 p-8 text-center">
-          <div className="w-16 h-16 mx-auto mb-5 rounded-full bg-amber-100 text-amber-600 flex items-center justify-center">
+          <div className={`w-16 h-16 mx-auto mb-5 rounded-full flex items-center justify-center ${isBlocked ? 'bg-rose-100 text-rose-600' : 'bg-amber-100 text-amber-600'}`}>
             <Clock className="w-8 h-8" />
           </div>
-          <h1 className="text-2xl font-display font-bold text-slate-900 mb-2">Cuenta pendiente de aprobación</h1>
+          <h1 className="text-2xl font-display font-bold text-slate-900 mb-2">
+            {isBlocked ? 'Acceso no autorizado' : 'Cuenta pendiente de aprobación'}
+          </h1>
           <p className="text-slate-500 mb-1">
-            Tu acceso está esperando la autorización de un administrador.
+            {isBlocked
+              ? 'Un administrador ha restringido el acceso de esta cuenta.'
+              : 'Tu acceso está esperando la autorización de un administrador.'}
           </p>
           <p className="text-sm text-slate-400 mb-6">
-            Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>. Cuando te aprueben, podrás entrar al panel.
+            Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>.
+            {!isBlocked && ' Cuando te aprueben, podrás entrar al panel.'}
           </p>
           <button
             onClick={logout}
