@@ -6,6 +6,7 @@ import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
+import { PIPELINE_STAGES } from '../constants/stages';
 
 export default function CandidatesList() {
   const [candidates, setCandidates] = useState<any[]>([]);
@@ -27,6 +28,42 @@ export default function CandidatesList() {
   const [lastDoc, setLastDoc] = useState<any>(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  // Once the whole base has been pulled (for search/filter/export) we stop paginating
+  // and operate over the full in-memory set.
+  const [fullyLoaded, setFullyLoaded] = useState(false);
+  const [loadingAll, setLoadingAll] = useState(false);
+
+  // Mirror of `candidates` readable synchronously inside loadAll's guard/fallback,
+  // avoiding a stale closure without adding it to loadAll's dependencies.
+  const candidatesRef = useRef<any[]>([]);
+  useEffect(() => { candidatesRef.current = candidates; }, [candidates]);
+
+  // Joins an application doc with its candidate + vacancy and computes the blended score.
+  // Shared by the paginated fetch and the full-base load so both produce identical rows.
+  const buildRows = (appDocs: any[], vacMap: Map<string, any>, candMap: Map<string, any>) =>
+    appDocs.map(d => {
+      const app = { id: d.id, ...d.data() } as any;
+      const cData = candMap.get(app.candidateId) || {};
+
+      let totalScore = 0;
+      let stagesCompleted = 0;
+      if (app.scoreSummary !== undefined && app.scoreSummary !== null) { totalScore += (app.scoreSummary * 20); stagesCompleted++; }
+      if (app.stage2Scoring?.total_score !== undefined && app.stage2Scoring?.total_score !== null) { totalScore += app.stage2Scoring.total_score; stagesCompleted++; }
+      if (app.interviewObservation?.score !== undefined && app.interviewObservation?.score !== null) { totalScore += (app.interviewObservation.score * 20); stagesCompleted++; }
+      if (app.testResults?.score !== undefined && app.testResults?.score !== null) { totalScore += app.testResults.score; stagesCompleted++; }
+      const calculatedTotalScore = stagesCompleted > 0 ? Math.round(totalScore / stagesCompleted) : 0;
+
+      return {
+        ...app,
+        vacancyTitle: vacMap.get(app.vacancyId) || 'Desconocida',
+        email: cData.email || '',
+        phone: cData.phone || '',
+        city: cData.city || '',
+        aiExtraction: cData.aiExtraction || null,
+        aiStatus: cData.aiStatus || null,
+        calculatedTotalScore
+      };
+    });
 
   // Paginated: loads the most recent PAGE_SIZE applications and appends on "load more"
   // instead of downloading the entire collection. Contact info is fetched only for the
@@ -51,37 +88,13 @@ export default function CandidatesList() {
       setHasMore(appDocs.length === PAGE_SIZE);
       if (appDocs.length > 0) setLastDoc(appDocs[appDocs.length - 1]);
 
-      const apps = appDocs.map(d => ({ id: d.id, ...d.data() } as any));
-
       // Contact info for THIS page's candidates only
-      const candIds = Array.from(new Set(apps.map(a => a.candidateId).filter(Boolean)));
+      const candIds = Array.from(new Set(appDocs.map(d => d.data().candidateId).filter(Boolean)));
       const candSnaps = await Promise.all(candIds.map(id => getDoc(doc(db, 'candidates', id))));
       const candMap = new Map();
       candSnaps.forEach(s => { if (s.exists()) candMap.set(s.id, s.data()); });
 
-      const combined = apps.map(app => {
-        const cData = candMap.get(app.candidateId) || {};
-        
-        // Calculate score
-        let totalScore = 0;
-        let stagesCompleted = 0;
-        if (app.scoreSummary !== undefined && app.scoreSummary !== null) { totalScore += (app.scoreSummary * 20); stagesCompleted++; }
-        if (app.stage2Scoring?.total_score !== undefined && app.stage2Scoring?.total_score !== null) { totalScore += app.stage2Scoring.total_score; stagesCompleted++; }
-        if (app.interviewObservation?.score !== undefined && app.interviewObservation?.score !== null) { totalScore += (app.interviewObservation.score * 20); stagesCompleted++; }
-        if (app.testResults?.score !== undefined && app.testResults?.score !== null) { totalScore += app.testResults.score; stagesCompleted++; }
-        const calculatedTotalScore = stagesCompleted > 0 ? Math.round(totalScore / stagesCompleted) : 0;
-
-        return {
-          ...app,
-          vacancyTitle: vacMap.get(app.vacancyId) || 'Desconocida',
-          email: cData.email || '',
-          phone: cData.phone || '',
-          city: cData.city || '',
-          aiExtraction: cData.aiExtraction || null,
-          aiStatus: cData.aiStatus || null,
-          calculatedTotalScore
-        };
-      });
+      const combined = buildRows(appDocs, vacMap, candMap);
 
       // Already ordered by the query (submittedAt desc); append pages on "load more".
       setCandidates(prev => reset ? combined : [...prev, ...combined]);
@@ -92,9 +105,62 @@ export default function CandidatesList() {
     }
   };
 
+  // Pulls the ENTIRE base (all applications + candidates) in three collection reads so
+  // search, filters and CSV export cover every historical candidate — not just the
+  // paginated window. Runs once per page visit; subsequent calls are a no-op.
+  const loadAll = async (force = false): Promise<any[]> => {
+    if (fullyLoaded && !force) return candidatesRef.current;
+    setLoadingAll(true);
+    try {
+      const [vacSnap, appSnap, candSnap] = await Promise.all([
+        getDocs(collection(db, 'vacancies')),
+        getDocs(query(collection(db, 'applications'), orderBy('submittedAt', 'desc'))),
+        getDocs(collection(db, 'candidates')),
+      ]);
+      const vacMap = new Map();
+      vacSnap.docs.forEach(d => vacMap.set(d.id, d.data().title));
+      const candMap = new Map();
+      candSnap.docs.forEach(d => candMap.set(d.id, d.data()));
+
+      const combined = buildRows(appSnap.docs, vacMap, candMap);
+      setCandidates(combined);
+      setHasMore(false);
+      setLastDoc(null);
+      setFullyLoaded(true);
+      return combined;
+    } catch (error) {
+      console.error("Error loading full base:", error);
+      return candidatesRef.current;
+    } finally {
+      setLoadingAll(false);
+    }
+  };
+
   useEffect(() => {
     fetchCandidates();
   }, []);
+
+  const anyFilterActive = !!(searchTerm || stageFilter || cityFilter || expFilter);
+
+  // Refresh after a mutation (delete / bulk move / bulk upload). If we were already
+  // showing the full base (or a filter is active), re-pull everything so the view stays
+  // consistent; otherwise just reload the first page.
+  const refresh = () => {
+    if (fullyLoaded || anyFilterActive) {
+      loadAll(true);
+    } else {
+      fetchCandidates(true);
+    }
+  };
+
+  // As soon as the recruiter starts searching or filtering, pull the whole base once so
+  // the results span all history instead of only the loaded page(s).
+  useEffect(() => {
+    if (anyFilterActive && !fullyLoaded && !loadingAll) {
+      loadAll();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anyFilterActive]);
 
   const handleDelete = async () => {
     if (!candidateToDelete) return;
@@ -111,7 +177,7 @@ export default function CandidatesList() {
       await batch.commit();
 
       setCandidateToDelete(null);
-      fetchCandidates(); // Refresh list
+      refresh(); // Refresh list
     } catch (error) {
       console.error("Error deleting candidate:", error);
       alert("Error al eliminar el candidato");
@@ -156,7 +222,7 @@ export default function CandidatesList() {
       }
 
       setSelectedApps([]);
-      fetchCandidates();
+      refresh();
     } catch (error) {
       console.error("Error bulk moving candidates:", error);
       alert("Error al mover candidatos");
@@ -237,7 +303,7 @@ export default function CandidatesList() {
       setTimeout(() => {
         setIsUploading(false);
         setIsBulkUploadModalOpen(false);
-        fetchCandidates();
+        refresh();
       }, 1000);
 
     } catch (error) {
@@ -247,11 +313,46 @@ export default function CandidatesList() {
     }
   };
 
-  const exportToCSV = () => {
+  // Single source of truth for the active search + filters, applied to the on-screen list
+  // and to the CSV export alike.
+  function matchesFilters(c: any) {
+    const term = searchTerm.toLowerCase();
+    const matchesSearch =
+      c.candidateName?.toLowerCase().includes(term) ||
+      c.email?.toLowerCase().includes(term) ||
+      c.phone?.toLowerCase().includes(term) ||
+      c.aiExtraction?.relevant_experience_summary?.toLowerCase().includes(term) ||
+      c.aiExtraction?.strengths_detected?.some((s: string) => s.toLowerCase().includes(term));
+
+    const matchesStage = stageFilter ? c.stage === stageFilter : true;
+
+    const matchesCity = cityFilter
+      ? c.city?.toLowerCase().includes(cityFilter.toLowerCase()) || c.aiExtraction?.city?.toLowerCase().includes(cityFilter.toLowerCase())
+      : true;
+
+    const expYears = c.aiExtraction?.experience_total_years || 0;
+    const matchesExp = expFilter ? expYears >= parseInt(expFilter) : true;
+
+    return matchesSearch && matchesStage && matchesCity && matchesExp;
+  }
+
+  const [exporting, setExporting] = useState(false);
+
+  const exportToCSV = async () => {
+    setExporting(true);
+    // Export the WHOLE base (respecting active filters), not just the loaded window.
+    let rows: any[];
+    try {
+      const full = await loadAll();
+      rows = full.filter(matchesFilters);
+    } finally {
+      setExporting(false);
+    }
+
     const headers = ['Nombre', 'Email', 'Teléfono', 'Vacante', 'Etapa', 'Score Total', 'Fecha Aplicación'];
     const csvContent = [
       headers.join(','),
-      ...filteredCandidates.map(c => {
+      ...rows.map(c => {
         const date = c.submittedAt?.toDate ? c.submittedAt.toDate().toLocaleDateString() : '';
         return [
           `"${c.candidateName}"`,
@@ -276,25 +377,11 @@ export default function CandidatesList() {
     document.body.removeChild(link);
   };
 
-  const filteredCandidates = candidates.filter(c => {
-    const matchesSearch = 
-      c.candidateName?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.email?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.phone?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.aiExtraction?.relevant_experience_summary?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      c.aiExtraction?.strengths_detected?.some((s: string) => s.toLowerCase().includes(searchTerm.toLowerCase()));
-    
-    const matchesStage = stageFilter ? c.stage === stageFilter : true;
-    
-    const matchesCity = cityFilter ? c.city?.toLowerCase().includes(cityFilter.toLowerCase()) || c.aiExtraction?.city?.toLowerCase().includes(cityFilter.toLowerCase()) : true;
-    
-    const expYears = c.aiExtraction?.experience_total_years || 0;
-    const matchesExp = expFilter ? expYears >= parseInt(expFilter) : true;
-    
-    return matchesSearch && matchesStage && matchesCity && matchesExp;
-  });
+  const filteredCandidates = candidates.filter(matchesFilters);
 
-  const uniqueStages = [...new Set(candidates.map(c => c.stage))];
+  // Stage options are the canonical pipeline (always complete, even before the full base
+  // loads); cities are collected from whatever is currently in memory.
+  const uniqueStages = [...new Set([...PIPELINE_STAGES, ...candidates.map(c => c.stage).filter(Boolean)])];
   const uniqueCities = [...new Set(candidates.map(c => c.city || c.aiExtraction?.city).filter(Boolean))];
 
   if (loading) {
@@ -313,7 +400,10 @@ export default function CandidatesList() {
             <Users className="w-6 h-6 mr-2 text-indigo-600" />
             Base de Candidatos Global
           </h1>
-          <p className="text-slate-500">Talent Pool: Busca y filtra entre todos los candidatos históricos.</p>
+          <p className="text-slate-500">
+            Talent Pool. Al buscar o filtrar se incluye todo el histórico.
+            {fullyLoaded && <span className="text-slate-400"> · {candidates.length} candidatos</span>}
+          </p>
         </div>
         <div className="flex gap-2">
           <button
@@ -325,13 +415,21 @@ export default function CandidatesList() {
           </button>
           <button
             onClick={exportToCSV}
-            className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-50 transition-colors shadow-sm"
+            disabled={exporting}
+            className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-50"
           >
             <Download className="w-4 h-4 mr-2" />
-            Exportar CSV
+            {exporting ? 'Exportando…' : 'Exportar CSV'}
           </button>
         </div>
       </div>
+
+      {loadingAll && (
+        <div className="flex items-center gap-2 text-sm text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-4 py-2">
+          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-indigo-600"></div>
+          Cargando base completa para buscar en todo el histórico…
+        </div>
+      )}
 
       {selectedApps.length > 0 && (
         <div className="bg-indigo-600 text-white rounded-xl shadow-lg p-4 flex items-center justify-between sticky top-4 z-10 animate-fade-in">
@@ -363,7 +461,10 @@ export default function CandidatesList() {
         </div>
       )}
 
-      <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-4">
+      <div
+        className="bg-white rounded-xl shadow-sm border border-slate-200 p-4"
+        onFocusCapture={() => { if (!fullyLoaded && !loadingAll) loadAll(); }}
+      >
         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
           <div className="relative">
             <Search className="w-5 h-5 text-slate-400 absolute left-3 top-2.5" />
@@ -563,7 +664,7 @@ export default function CandidatesList() {
             >
               {loadingMore ? 'Cargando…' : `Cargar ${PAGE_SIZE} más`}
             </button>
-            <p className="text-xs text-slate-400 mt-2">Mostrando los {candidates.length} más recientes. La búsqueda/filtros aplican sobre lo cargado.</p>
+            <p className="text-xs text-slate-400 mt-2">Mostrando los {candidates.length} más recientes. Al buscar o filtrar se carga todo el histórico automáticamente.</p>
           </div>
         )}
       </div>
