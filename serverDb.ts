@@ -35,6 +35,10 @@ export interface ServerDb {
   canEnforceAuth: boolean;
   getDocData(collection: string, id: string): Promise<any | null>;
   setDocData(collection: string, id: string, data: Record<string, any>): Promise<void>;
+  /** Atomically creates/updates a candidate + application in a single batch. */
+  applyBatch(candidate: { id: string; data: Record<string, any> }, application: { id: string; data: Record<string, any> }): Promise<void>;
+  /** First candidate id whose normalized phone OR email matches (for dedup). */
+  findCandidateIdByPhoneOrEmail(phoneNormalized: string, email: string): Promise<string | null>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -101,6 +105,23 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async setDocData(collection, id, data) {
         await adb.collection(collection).doc(id).set(data, { merge: true });
+      },
+      async applyBatch(candidate, application) {
+        const batch = adb.batch();
+        batch.set(adb.collection('candidates').doc(candidate.id), candidate.data, { merge: true });
+        batch.set(adb.collection('applications').doc(application.id), application.data, { merge: true });
+        await batch.commit();
+      },
+      async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
+        if (phoneNormalized) {
+          const s = await adb.collection('candidates').where('phoneNormalized', '==', phoneNormalized).limit(1).get();
+          if (!s.empty) return s.docs[0].id;
+        }
+        if (email) {
+          const s = await adb.collection('candidates').where('email', '==', email).limit(1).get();
+          if (!s.empty) return s.docs[0].id;
+        }
+        return null;
       },
       async deleteDocData(collection, id) {
         await adb.collection(collection).doc(id).delete();
@@ -194,7 +215,7 @@ async function initClient(): Promise<ServerDb> {
   const { initializeApp } = await import('firebase/app');
   const {
     initializeFirestore, collection, query, where, limit, getDocs, addDoc,
-    serverTimestamp, doc, getDoc, setDoc, deleteDoc,
+    serverTimestamp, doc, getDoc, setDoc, deleteDoc, writeBatch,
   } = await import('firebase/firestore');
 
   const app = initializeApp(firebaseConfig, 'server-client-fallback');
@@ -209,6 +230,23 @@ async function initClient(): Promise<ServerDb> {
     },
     async setDocData(c, id, data) {
       await setDoc(doc(cdb, c, id), data, { merge: true });
+    },
+    async applyBatch(candidate, application) {
+      const batch = writeBatch(cdb);
+      batch.set(doc(cdb, 'candidates', candidate.id), candidate.data, { merge: true });
+      batch.set(doc(cdb, 'applications', application.id), application.data, { merge: true });
+      await batch.commit();
+    },
+    async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
+      if (phoneNormalized) {
+        const s = await getDocs(query(collection(cdb, 'candidates'), where('phoneNormalized', '==', phoneNormalized), limit(1)));
+        if (!s.empty) return s.docs[0].id;
+      }
+      if (email) {
+        const s = await getDocs(query(collection(cdb, 'candidates'), where('email', '==', email), limit(1)));
+        if (!s.empty) return s.docs[0].id;
+      }
+      return null;
     },
     async deleteDocData(c, id) {
       await deleteDoc(doc(cdb, c, id));

@@ -548,39 +548,89 @@ async function startServer() {
     }
   });
 
-  // Public (rate-limited): the ONE fixed message a candidate may trigger — the
-  // "we received your application" confirmation. The template is built here from a
-  // trusted layout; the client cannot supply HTML/subject/attachments, so this
-  // cannot be used as a spam/phishing relay.
+  // Builds + sends the fixed "we received your application" confirmation. Template
+  // is server-owned (client never supplies HTML) so it can't be used as a relay.
+  const sendApplyConfirmation = async (email: string, name: string, vacancyTitle: string) => {
+    const safe = (s: any, max: number) => (typeof s === 'string' ? s : '').replace(/[<>]/g, '').slice(0, max);
+    const cleanName = safe(name, 120) || 'candidato';
+    const cleanVacancy = safe(vacancyTitle, 160) || 'nuestra empresa';
+    let companyName = 'Darwin Cell';
+    let logoUrl = '';
+    try {
+      const company = await db.getDocData('settings', 'company');
+      if (company?.name) companyName = String(company.name).slice(0, 120);
+      if (company?.logoUrl) logoUrl = String(company.logoUrl);
+    } catch { /* branding is best-effort */ }
+    const body = `Hola ${cleanName},<br/><br/>Gracias por postularte a la vacante de <strong>${cleanVacancy}</strong>.<br/><br/>Hemos recibido tu currículum correctamente y nuestro equipo de reclutamiento lo estará evaluando en los próximos días.<br/><br/>Si tu perfil se ajusta a lo que buscamos, te contactaremos para el siguiente paso.<br/><br/>¡Mucho éxito!<br/><br/>Atentamente,<br/>El equipo de ${companyName}`;
+    const html = `<div style="font-family:'Segoe UI',Tahoma,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
+      <div style="background:#fff;padding:24px;text-align:center;border-bottom:2px solid #f1f5f9;">${logoUrl ? `<img src="${logoUrl}" alt="${companyName}" style="max-height:80px;object-fit:contain;"/>` : `<h1 style="color:#0f172a;margin:0;font-size:24px;">${companyName}</h1>`}</div>
+      <div style="padding:32px;background:#fff;color:#334155;line-height:1.6;font-size:16px;"><h2 style="color:#0f172a;margin-top:0;font-size:20px;">¡Hemos recibido tu currículum!</h2><div style="margin-top:20px;">${body}</div></div>
+      <div style="background:#f8fafc;padding:20px;text-align:center;font-size:13px;color:#64748b;border-top:1px solid #e2e8f0;">© ${new Date().getFullYear()} ${companyName}. Correo automático, por favor no respondas.</div>
+    </div>`;
+    return sendMail(email, `Confirmación de postulación - ${companyName}`, html);
+  };
+
   app.post("/api/public/apply-confirmation", globalRateLimit(60), rateLimit(10), async (req, res) => {
     try {
       const { email, name, vacancyTitle } = req.body || {};
       if (typeof email !== 'string' || !EMAIL_RE.test(email) || email.length > 200) {
         return res.status(400).json({ error: 'Correo inválido' });
       }
-      const safe = (s: any, max: number) => (typeof s === 'string' ? s : '').replace(/[<>]/g, '').slice(0, max);
-      const cleanName = safe(name, 120) || 'candidato';
-      const cleanVacancy = safe(vacancyTitle, 160) || 'nuestra empresa';
-
-      let companyName = 'Darwin Cell';
-      let logoUrl = '';
-      try {
-        const company = await db.getDocData('settings', 'company');
-        if (company?.name) companyName = String(company.name).slice(0, 120);
-        if (company?.logoUrl) logoUrl = String(company.logoUrl);
-      } catch { /* branding is best-effort */ }
-
-      const body = `Hola ${cleanName},<br/><br/>Gracias por postularte a la vacante de <strong>${cleanVacancy}</strong>.<br/><br/>Hemos recibido tu currículum correctamente y nuestro equipo de reclutamiento lo estará evaluando en los próximos días.<br/><br/>Si tu perfil se ajusta a lo que buscamos, te contactaremos para el siguiente paso.<br/><br/>¡Mucho éxito!<br/><br/>Atentamente,<br/>El equipo de ${companyName}`;
-      const html = `<div style="font-family:'Segoe UI',Tahoma,sans-serif;max-width:600px;margin:0 auto;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;">
-        <div style="background:#fff;padding:24px;text-align:center;border-bottom:2px solid #f1f5f9;">${logoUrl ? `<img src="${logoUrl}" alt="${companyName}" style="max-height:80px;object-fit:contain;"/>` : `<h1 style="color:#0f172a;margin:0;font-size:24px;">${companyName}</h1>`}</div>
-        <div style="padding:32px;background:#fff;color:#334155;line-height:1.6;font-size:16px;"><h2 style="color:#0f172a;margin-top:0;font-size:20px;">¡Hemos recibido tu currículum!</h2><div style="margin-top:20px;">${body}</div></div>
-        <div style="background:#f8fafc;padding:20px;text-align:center;font-size:13px;color:#64748b;border-top:1px solid #e2e8f0;">© ${new Date().getFullYear()} ${companyName}. Correo automático, por favor no respondas.</div>
-      </div>`;
-      const r = await sendMail(email, `Confirmación de postulación - ${companyName}`, html);
+      const r = await sendApplyConfirmation(email, name, vacancyTitle);
       res.json(r);
     } catch (error) {
       console.error("Error sending confirmation email:", error);
       res.status(500).json({ error: "Failed to send confirmation" });
+    }
+  });
+
+  // Public (rate-limited): create a job application. Deduplicates by normalized
+  // phone/email so the same person can't flood the pipeline, writes candidate +
+  // application atomically (no orphans), and sends the confirmation email.
+  app.post("/api/apply", globalRateLimit(120), rateLimit(20), async (req, res) => {
+    try {
+      const { vacancyId, candidateId, name, phone, email, city, cvUrl, cvFileType } = req.body || {};
+      const str = (v: any) => (typeof v === 'string' ? v : '');
+      if (!str(vacancyId) || vacancyId.includes('/') || vacancyId.length > 200) return res.status(400).json({ error: 'Vacante inválida' });
+      if (!str(candidateId) || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
+      if (!str(name) || name.length > 200) return res.status(400).json({ error: 'Nombre inválido' });
+      if (!str(phone) || phone.length > 40) return res.status(400).json({ error: 'Teléfono inválido' });
+      if (!EMAIL_RE.test(str(email)) || email.length > 200) return res.status(400).json({ error: 'Correo inválido' });
+      if (!str(cvUrl).startsWith('https://') || cvUrl.length > 1000) return res.status(400).json({ error: 'CV inválido' });
+
+      const vacancy = await db.getDocData('vacancies', vacancyId);
+      if (!vacancy || !vacancy.active) return res.status(400).json({ error: 'La vacante no existe o ya no está activa.' });
+
+      const phoneNormalized = normalizePhone(phone);
+      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, str(email));
+      const effectiveId = existingId || candidateId;
+      const applicationId = `${effectiveId}_${vacancyId}`;
+
+      const existingApp = await db.getDocData('applications', applicationId);
+      if (existingApp) {
+        return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
+      }
+
+      const now = new Date();
+      await db.applyBatch(
+        { id: effectiveId, data: {
+          fullName: str(name).slice(0, 200), email: str(email), phone: str(phone), phoneNormalized,
+          city: str(city).slice(0, 120), cvUrl, cvFileType: str(cvFileType).slice(0, 120),
+          aiStatus: 'pending', createdAt: now,
+        } },
+        { id: applicationId, data: {
+          candidateId: effectiveId, vacancyId, candidateName: str(name).slice(0, 200),
+          stage: 'Nuevo', cvUrl, cvFileType: str(cvFileType).slice(0, 120),
+          submittedAt: now, lastStageUpdate: now,
+        } },
+      );
+
+      try { await sendApplyConfirmation(str(email), str(name), vacancy.title || ''); } catch (e) { console.error('confirmation email failed', e); }
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Error creating application:", error);
+      res.status(500).json({ error: "No se pudo enviar la postulación." });
     }
   });
 

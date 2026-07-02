@@ -1,12 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, getDoc } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { signInAnonymously } from 'firebase/auth';
 import { db, auth, storage } from '../lib/firebase';
 import { Upload, CheckCircle, Loader2, MapPin, Clock, ArrowLeft, Building2 } from 'lucide-react';
-import { sendApplicationConfirmation } from '../lib/email';
-import { normalizePhone } from '../lib/phone';
 
 export default function Apply() {
   const { vacancyId } = useParams();
@@ -157,37 +155,32 @@ export default function Apply() {
       await uploadBytes(storageRef, file);
       const cvUrl = await getDownloadURL(storageRef);
 
-      // 3. Save Candidate Profile (Basic Info, AI will process later)
-      await setDoc(doc(db, 'candidates', candidateId), {
-        fullName: name,
-        email: email,
-        phone: phone,
-        phoneNormalized: normalizePhone(phone),
-        city: city,
-        cvUrl,
-        cvFileType: file.type,
-        aiStatus: 'pending', // Indicates it needs AI processing later
-        createdAt: serverTimestamp()
+      // 3. Create the candidate + application on the BACKEND, which deduplicates by
+      // phone/email (no duplicate pipeline entries), writes both atomically, and
+      // sends the confirmation email.
+      const res = await fetch('/api/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          vacancyId,
+          candidateId,
+          name,
+          phone,
+          email,
+          city,
+          cvUrl,
+          cvFileType: file.type,
+        }),
       });
-
-      // 4. Save Application
-      const applicationId = `${candidateId}_${vacancyId}`;
-      await setDoc(doc(db, 'applications', applicationId), {
-        candidateId,
-        vacancyId,
-        candidateName: name,
-        stage: 'Nuevo',
-        cvUrl,
-        cvFileType: file.type,
-        submittedAt: serverTimestamp(),
-        lastStageUpdate: serverTimestamp()
-      });
-
-      // 5. Send Confirmation Email (server-side template; best-effort)
-      try {
-        await sendApplicationConfirmation(email, name, vacancy?.title || 'nuestra empresa');
-      } catch (emailError) {
-        console.error("Error sending confirmation email:", emailError);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `Error ${res.status}`);
+      }
+      if (data.duplicate) {
+        setProgress(100);
+        setErrorMsg(data.message || 'Ya tienes una postulación registrada para esta vacante.');
+        setSubmitting(false);
+        return;
       }
 
       setProgress(100);
