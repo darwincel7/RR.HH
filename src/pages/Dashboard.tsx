@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../contexts/AuthContext';
-import { collection, getDocs, query, orderBy, limit } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, limit, where, getCountFromServer } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { PIPELINE_STAGES } from '../constants/stages';
 import { Briefcase, Users, UserCheck, Clock, ArrowRight, TrendingUp, Activity, Sparkles } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
@@ -35,36 +36,33 @@ export default function Dashboard() {
           vacMap.set(d.id, d.data().title);
         });
 
-        // Fetch Applications
-        const appSnap = await getDocs(collection(db, 'applications'));
-        const apps = appSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
-        
-        let inInterview = 0;
-        let hired = 0;
-        const stageCounts: Record<string, number> = {};
-        const vacancyCounts: Record<string, number> = {};
+        // Counts via server-side aggregation (count()) instead of downloading every
+        // application — stays cheap/fast with thousands of applications.
+        const appsCol = collection(db, 'applications');
+        const totalApplications = (await getCountFromServer(appsCol)).data().count;
 
-        apps.forEach(app => {
-          // Stage counts
-          if (app.stage === 'Convocado a entrevista' || app.stage === 'Entrevista presencial') inInterview++;
-          if (app.stage === 'Contratado') hired++;
-          
-          stageCounts[app.stage] = (stageCounts[app.stage] || 0) + 1;
-          
-          // Vacancy counts
-          const vTitle = vacMap.get(app.vacancyId) || 'Desconocida';
-          vacancyCounts[vTitle] = (vacancyCounts[vTitle] || 0) + 1;
-        });
+        // One count() per pipeline stage (single-field, auto-indexed), in parallel.
+        const stageEntries = await Promise.all(
+          PIPELINE_STAGES.map(async (s) => {
+            const c = (await getCountFromServer(query(appsCol, where('stage', '==', s)))).data().count;
+            return { name: s, value: c };
+          })
+        );
+        const stageBy = (name: string) => stageEntries.find(e => e.name === name)?.value || 0;
+        const inInterview = stageBy('Convocado a entrevista') + stageBy('Entrevista presencial');
+        const hired = stageBy('Contratado');
+        const formattedStageData = stageEntries.filter(e => e.value > 0).sort((a, b) => b.value - a.value);
 
-        const formattedStageData = Object.keys(stageCounts).map(key => ({
-          name: key,
-          value: stageCounts[key]
-        })).sort((a, b) => b.value - a.value);
-
-        const formattedVacancyData = Object.keys(vacancyCounts).map(key => ({
-          name: key.length > 15 ? key.substring(0, 15) + '...' : key,
-          candidatos: vacancyCounts[key]
-        })).sort((a, b) => b.candidatos - a.candidatos).slice(0, 5); // Top 5
+        // One count() per ACTIVE vacancy, then top 5.
+        const activeVacDocs = vacSnap.docs.filter(d => d.data().active === true);
+        const vacEntries = await Promise.all(
+          activeVacDocs.map(async (vd) => {
+            const c = (await getCountFromServer(query(appsCol, where('vacancyId', '==', vd.id)))).data().count;
+            const title = vd.data().title || 'Vacante';
+            return { name: title.length > 15 ? title.substring(0, 15) + '...' : title, candidatos: c };
+          })
+        );
+        const formattedVacancyData = vacEntries.sort((a, b) => b.candidatos - a.candidatos).slice(0, 5);
 
         // Fetch Recent Applications (ordered by the field that actually exists:
         // applications are written with `submittedAt`, not `appliedAt`).
@@ -81,7 +79,7 @@ export default function Dashboard() {
 
         setMetrics({
           activeVacancies,
-          totalCandidates: apps.length,
+          totalCandidates: totalApplications,
           inInterview,
           hired
         });
