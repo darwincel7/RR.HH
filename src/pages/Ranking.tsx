@@ -80,18 +80,24 @@ export default function Ranking() {
       setCandidates(prev => prev.map(c => c.id === decisionModal.appId ? { ...c, stage: decisionModal.type, decisionReason } : c));
       
       // Trigger Automation
+      let waFailed = false;
       const candSnap = await getDoc(doc(db, 'candidates', decisionModal.candidateId));
       if (candSnap.exists()) {
         const phone = candSnap.data().phone;
-        await sendWhatsAppAutomation(phone, decisionModal.type!, {
+        const r = await sendWhatsAppAutomation(phone, decisionModal.type!, {
           nombre: candSnap.data().fullName || candSnap.data().name,
           vacante: vacancy?.title,
           email: candSnap.data().email
         });
+        waFailed = r.status === 'failed';
       }
 
       setDecisionModal({ isOpen: false, candidateId: '', appId: '', type: null });
       setDecisionReason('');
+      // The decision was already saved; only warn if the WhatsApp notice failed.
+      if (waFailed) {
+        alert('La decisión se guardó, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+      }
     } catch (error) {
       console.error("Error saving decision:", error);
       alert("Error al guardar la decisión");

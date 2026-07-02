@@ -124,14 +124,14 @@ export default function Interviews() {
       const session = sessions.find(s => s.id === selectedSessionId);
       if (session && phone) {
         const stageTemplate = session.type === 'presencial' ? 'Entrevista presencial' : 'Convocado a entrevista';
-        const sent = await sendWhatsAppAutomation(phone, stageTemplate, {
+        const r = await sendWhatsAppAutomation(phone, stageTemplate, {
           nombre: candidateName,
           vacante: session.vacancyTitle,
           fecha: session.date,
           hora: session.time,
           ubicacion: session.location,
         });
-        alert(sent
+        alert(r.status === 'sent'
           ? `Candidato añadido. Invitación enviada por WhatsApp para el ${session.date} a las ${session.time}.`
           : 'Candidato añadido, pero NO se pudo enviar la invitación por WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
       } else if (session && !phone) {
@@ -160,18 +160,18 @@ export default function Interviews() {
     }
     
     try {
-      const success = await sendWhatsAppAutomation(participant.candidatePhone, "Recordatorio de entrevista", {
+      const r = await sendWhatsAppAutomation(participant.candidatePhone, "Recordatorio de entrevista", {
         nombre: participant.candidateName,
         vacante: session.vacancyTitle,
         fecha: session.date,
         hora: session.time,
         ubicacion: session.location
       });
-      
-      if (success) {
+
+      if (r.status === 'sent') {
         alert("Recordatorio enviado con éxito.");
       } else {
-        alert("Error al enviar el recordatorio.");
+        alert("No se pudo enviar el recordatorio por WhatsApp. Revisa la conexión de WhatsApp en Configuración.");
       }
     } catch (error) {
       console.error("Error sending reminder:", error);

@@ -3,18 +3,26 @@ import { db } from './firebase';
 import { sendEmail, getEmailTemplate } from './email';
 import { apiFetch } from './api';
 
+// Distinguishes an intentional skip (no message was meant to go out) from a real
+// delivery failure, so callers can warn the recruiter only when something actually
+// broke instead of on every stage change.
+export type AutomationResult = {
+  status: 'sent' | 'skipped' | 'failed';
+  reason?: string;
+};
+
 export async function sendWhatsAppAutomation(
   phone: string,
   stage: string,
   variables: { nombre: string; vacante?: string; link?: string; fecha?: string; hora?: string; ubicacion?: string; email?: string }
-) {
+): Promise<AutomationResult> {
   try {
     // Stages handled in person NEVER trigger an automatic message, even if a
     // custom template is configured in settings:
     //  - "Tests presenciales" / "Pruebas técnicas": the exam is given in person.
     //  - "Contratado": hiring is confirmed personally by the recruiter.
     const NO_AUTOMATION_STAGES = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
-    if (NO_AUTOMATION_STAGES.includes(stage)) return false;
+    if (NO_AUTOMATION_STAGES.includes(stage)) return { status: 'skipped', reason: 'stage_sin_automatizacion' };
 
     // These messages advertise a date/time/place. Sending them without that data
     // (e.g. on a plain Kanban stage change) produced broken "Fecha: / Hora: ()"
@@ -23,7 +31,7 @@ export async function sendWhatsAppAutomation(
     const SCHEDULE_REQUIRED_STAGES = ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'];
     if (SCHEDULE_REQUIRED_STAGES.includes(stage) && (!variables.fecha || !variables.hora)) {
       console.warn(`[whatsapp] Se omite "${stage}": falta fecha/hora. Agenda la cita en Entrevistas para enviar la invitación.`);
-      return false;
+      return { status: 'skipped', reason: 'falta_fecha_hora' };
     }
 
     // Fetch templates
@@ -62,7 +70,7 @@ export async function sendWhatsAppAutomation(
       }
     }
 
-    if (!template) return false;
+    if (!template) return { status: 'skipped', reason: 'sin_plantilla' };
 
     // Replace variables
     let message = template.replace(/{{nombre}}/g, variables.nombre || '');
@@ -103,15 +111,15 @@ export async function sendWhatsAppAutomation(
       data = await res.json();
     } catch (parseError) {
       console.error("Failed to parse API response. Status:", res.status);
-      return false;
+      return { status: 'failed', reason: `respuesta_invalida_${res.status}` };
     }
-    
+
     if (data.success && data.messageSent) {
       // Find candidate ID by phone to save the message
       const candidatesRef = collection(db, 'candidates');
       const q = query(candidatesRef, where('phone', '==', phone));
       const querySnapshot = await getDocs(q);
-      
+
       if (!querySnapshot.empty) {
         const candidateId = querySnapshot.docs[0].id;
         await addDoc(collection(db, 'whatsapp_messages'), {
@@ -123,11 +131,12 @@ export async function sendWhatsAppAutomation(
           stage
         });
       }
-      return true;
+      return { status: 'sent' };
     }
-    return false;
+    // API reachable but the message did not go out (e.g. WhatsApp socket disconnected).
+    return { status: 'failed', reason: data?.error || 'whatsapp_no_conectado' };
   } catch (error) {
     console.error("Error sending WhatsApp automation:", error);
-    return false;
+    return { status: 'failed', reason: 'error_de_red' };
   }
 }

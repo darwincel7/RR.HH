@@ -201,6 +201,7 @@ export default function CandidatesList() {
       // Trigger automation per candidate. Build the link that matches the target stage
       // (the eval form for stage 2, the test for presential tests) and keep each send
       // best-effort so one failure does not block the rest.
+      let whatsappFailed = 0;
       for (const app of appsToMove) {
         if (!app.phone) continue;
         try {
@@ -210,19 +211,24 @@ export default function CandidatesList() {
           } else if (newStage === 'Formulario etapa 2 enviado') {
             link = `${window.location.origin}/eval/${app.id}`;
           }
-          await sendWhatsAppAutomation(app.phone, newStage, {
+          const r = await sendWhatsAppAutomation(app.phone, newStage, {
             nombre: app.candidateName,
             vacante: app.vacancyTitle,
             link,
             email: app.email
           });
+          if (r.status === 'failed') whatsappFailed++;
         } catch (autoErr) {
           console.error(`Automation failed for ${app.id} (stage saved anyway):`, autoErr);
+          whatsappFailed++;
         }
       }
 
       setSelectedApps([]);
       refresh();
+      if (whatsappFailed > 0) {
+        alert(`Candidatos movidos. ⚠️ ${whatsappFailed} mensaje(s) de WhatsApp no se enviaron (revisa la conexión de WhatsApp en Configuración).`);
+      }
     } catch (error) {
       console.error("Error bulk moving candidates:", error);
       alert("Error al mover candidatos");

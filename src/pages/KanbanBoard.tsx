@@ -85,6 +85,7 @@ export default function KanbanBoard() {
 
     const appsToMove = applications.filter(a => selectedApps.has(a.id) && a.stage !== targetStage);
     let movedCount = 0;
+    let whatsappFailed = 0;
     const failed: string[] = [];
 
     // Process each candidate independently so one failure doesn't abort the whole batch.
@@ -111,15 +112,17 @@ export default function KanbanBoard() {
               link = `${window.location.origin}/eval/${movedApp.id}`;
             }
 
-            await sendWhatsAppAutomation(phone, targetStage, {
+            const r = await sendWhatsAppAutomation(phone, targetStage, {
               nombre: movedApp.candidateName,
               vacante: vacancy?.title,
               link,
               email: candSnap.data().email
             });
+            if (r.status === 'failed') whatsappFailed++;
           }
         } catch (autoErr) {
           console.error(`Automation failed for ${movedApp.id} (stage saved anyway):`, autoErr);
+          whatsappFailed++;
         }
       } catch (err) {
         console.error(`Error moving application ${movedApp.id}:`, err);
@@ -130,10 +133,13 @@ export default function KanbanBoard() {
     setSelectedApps(new Set()); // Clear selection
     setBulkActionLoading(false);
 
+    const waNote = whatsappFailed > 0
+      ? ` ⚠️ ${whatsappFailed} mensaje(s) de WhatsApp no se enviaron (revisa la conexión de WhatsApp en Configuración).`
+      : '';
     if (failed.length === 0) {
-      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".`);
+      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${waNote}`);
     } else {
-      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
+      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.${waNote}`);
     }
   };
 
@@ -260,12 +266,16 @@ export default function KanbanBoard() {
             link = `${window.location.origin}/eval/${movedApp.id}`;
           }
 
-          await sendWhatsAppAutomation(phone, newStage, {
+          const r = await sendWhatsAppAutomation(phone, newStage, {
             nombre: movedApp.candidateName,
             vacante: vacancy?.title,
             link,
             email: candSnap.data().email
           });
+          // The move already succeeded; only warn (don't revert) if the message failed.
+          if (r.status === 'failed') {
+            alert('El candidato se movió, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+          }
         }
       }
     } catch (error) {

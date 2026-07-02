@@ -237,12 +237,16 @@ export default function CandidateProfile() {
         link = `${window.location.origin}/eval/${application.id}`;
       }
 
-      await sendWhatsAppAutomation(candidate.phone, newStage, {
+      const r = await sendWhatsAppAutomation(candidate.phone, newStage, {
         nombre: candidate.fullName || candidate.name,
         vacante: 'la vacante', // We don't have the title here directly, but we can default it
         link,
         email: candidate.email
       });
+      // The stage change already saved; only warn (don't revert) if the message failed.
+      if (r.status === 'failed') {
+        alert('La etapa se actualizó, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+      }
     } catch (error) {
       console.error("Error updating stage:", error);
       setApplication({ ...application, stage: previousStage }); // Revert UI
