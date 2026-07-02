@@ -88,7 +88,7 @@ export default function Apply() {
         setErrorMsg('Por favor, sube un archivo PDF, Word (doc/docx) o Imagen (jpg/png).');
         return;
       }
-      if (selectedFile.size > 20 * 1024 * 1024) {
+      if (selectedFile.size >= 20 * 1024 * 1024) {
         setErrorMsg('El archivo no debe superar los 20MB.');
         return;
       }
@@ -113,7 +113,7 @@ export default function Apply() {
         setErrorMsg('Por favor, sube un archivo PDF, Word (doc/docx) o Imagen (jpg/png).');
         return;
       }
-      if (selectedFile.size > 20 * 1024 * 1024) {
+      if (selectedFile.size >= 20 * 1024 * 1024) {
         setErrorMsg('El archivo no debe superar los 20MB.');
         return;
       }
@@ -155,12 +155,16 @@ export default function Apply() {
       await uploadBytes(storageRef, file);
       const cvUrl = await getDownloadURL(storageRef);
 
-      // 3. Create the candidate + application on the BACKEND, which deduplicates by
-      // phone/email (no duplicate pipeline entries), writes both atomically, and
-      // sends the confirmation email.
+      // 3. Create the candidate + application on the BACKEND (dedupes, writes both
+      // atomically, sends the confirmation email). Send the anonymous ID token so the
+      // server derives the candidate id from the verified uid, not from the body.
+      const idToken = await userCredential.user.getIdToken();
       const res = await fetch('/api/apply', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${idToken}`,
+        },
         body: JSON.stringify({
           vacancyId,
           candidateId,

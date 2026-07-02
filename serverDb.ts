@@ -46,6 +46,8 @@ export interface ServerDb {
   addWhatsappMessage(data: Record<string, any>): Promise<void>;
   /** Verifies a Firebase ID token and resolves the caller's recruiter/admin status. Admin mode only. */
   verifyRecruiter(idToken: string): Promise<RecruiterIdentity | null>;
+  /** Verifies a Firebase ID token (incl. anonymous) and returns its uid, or null. Admin mode only. */
+  verifyUid(idToken: string): Promise<string | null>;
   /** Candidates awaiting AI CV analysis (aiStatus == 'pending'). */
   listPendingCandidates(max: number): Promise<Array<{ id: string; cvUrl?: string; cvFileType?: string; fullName?: string }>>;
   /** Atomically claims a candidate for processing (pending -> processing). Returns false if already claimed. */
@@ -191,6 +193,14 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         const encoded = encodeURIComponent(path);
         return `https://firebasestorage.googleapis.com/v0/b/${firebaseConfig.storageBucket}/o/${encoded}?alt=media&token=${token}`;
       },
+      async verifyUid(idToken) {
+        try {
+          const decoded = await auth.verifyIdToken(idToken);
+          return decoded.uid || null;
+        } catch {
+          return null;
+        }
+      },
       async verifyRecruiter(idToken) {
         const decoded = await auth.verifyIdToken(idToken);
         const email = decoded.email || null;
@@ -300,6 +310,10 @@ async function initClient(): Promise<ServerDb> {
     },
     async uploadPublicFile() {
       throw new Error('uploadPublicFile requires admin mode (no admin credentials configured).');
+    },
+    async verifyUid() {
+      // The client SDK cannot verify ID tokens.
+      return null;
     },
     async verifyRecruiter() {
       // The client SDK cannot verify ID tokens. Auth enforcement is disabled in this mode.

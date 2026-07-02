@@ -299,12 +299,14 @@ export default function CandidateProfile() {
     if (!application?.testResults?.answers) return;
     setReEvaluatingTest(true);
     try {
-      const response = await fetch('/api/evaluate-test', {
+      const response = await apiFetch('/api/evaluate-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          questions: Object.keys(application.testResults.answers), 
-          answers: application.testResults.answers 
+        body: JSON.stringify({
+          applicationId: application.id,
+          questions: Object.keys(application.testResults.answers),
+          answers: application.testResults.answers,
+          force: true,
         })
       });
 
@@ -354,10 +356,10 @@ export default function CandidateProfile() {
     if (!application?.stage2Answers) return;
     setReEvaluatingStage2(true);
     try {
-      const res = await fetch('/api/score-stage2', {
+      const res = await apiFetch('/api/score-stage2', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applicationId: application.id, answers: application.stage2Answers })
+        body: JSON.stringify({ applicationId: application.id, answers: application.stage2Answers, force: true })
       });
 
       if (!res.ok) {

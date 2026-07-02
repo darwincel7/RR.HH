@@ -154,7 +154,7 @@ export default function CandidateTest() {
         throw new Error(`evaluate-test respondió ${response.status}`);
       }
 
-      localStorage.removeItem(`darwin_test_${applicationId}`);
+      localStorage.removeItem(`aura_test_${applicationId}`);
       setSuccess(true);
     } catch (error) {
       console.error("Error submitting test:", error);

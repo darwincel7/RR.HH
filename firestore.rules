@@ -38,7 +38,7 @@ service cloud.firestore {
       allow create: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == []) || isAdmin());
       // Owners may edit their own profile but never their own roleIds; only an admin
       // can change roles (approve / revoke access).
-      allow update: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == resource.data.roleIds) || isAdmin());
+      allow update: if isAuthenticated() && ((isOwner(userId) && request.resource.data.roleIds == resource.data.roleIds && request.resource.data.status == resource.data.status) || isAdmin());
       allow delete: if isAdmin();
     }
 

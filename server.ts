@@ -96,6 +96,7 @@ const logger = pino({ level: 'silent' });
 let sock: WASocket | null = null;
 let qrCode: string | null = null;
 let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disconnected';
+let isShuttingDown = false; // set on SIGTERM so we don't reconnect WhatsApp mid-shutdown
 
 // Custom Firestore auth state to ensure persistence across container restarts
 const useFirestoreAuthState = async (collectionName: string) => {
@@ -205,10 +206,10 @@ async function connectToWhatsApp() {
       // The user must click "Force Reconnect" in the UI to claim the session.
       if (statusCode === DisconnectReason.connectionReplaced) {
         console.log('WhatsApp connection replaced (Status 440). Suspending auto-reconnect. Please click "Forzar Reconexión" in the settings.');
-      } else if (statusCode !== DisconnectReason.loggedOut) {
+      } else if (statusCode !== DisconnectReason.loggedOut && !isShuttingDown) {
         console.log('Attempting to reconnect in 5 seconds...');
         setTimeout(() => {
-          connectToWhatsApp().catch(err => console.error('Failed to reconnect:', err));
+          if (!isShuttingDown) connectToWhatsApp().catch(err => console.error('Failed to reconnect:', err));
         }, 5000);
       } else {
         console.log('WhatsApp logged out. Need to scan new QR.');
@@ -492,6 +493,21 @@ async function startServer() {
     }
   };
 
+  // Non-middleware check: is the caller a verified recruiter? Used to gate the
+  // recruiter-only `force` re-scoring on the otherwise-public scoring endpoints.
+  const callerIsRecruiter = async (req: any): Promise<boolean> => {
+    if (!db?.canEnforceAuth) return false;
+    const header = req.headers.authorization || '';
+    const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+    if (!token) return false;
+    try {
+      const id = await db.verifyRecruiter(token);
+      return !!(id && id.isRecruiter);
+    } catch {
+      return false;
+    }
+  };
+
   // Lightweight in-memory fixed-window rate limiter (per client IP, per minute).
   // Best-effort only: req.ip can be partially spoofed via X-Forwarded-For, so this adds
   // fairness between callers but is NOT the budget guard — see globalRateLimit below.
@@ -624,37 +640,57 @@ async function startServer() {
   // application atomically (no orphans), and sends the confirmation email.
   app.post("/api/apply", globalRateLimit(120), rateLimit(20), async (req, res) => {
     try {
-      const { vacancyId, candidateId, name, phone, email, city, cvUrl, cvFileType } = req.body || {};
+      const { vacancyId, candidateId: bodyCandidateId, name, phone, email, city, cvUrl, cvFileType } = req.body || {};
       const str = (v: any) => (typeof v === 'string' ? v : '');
       if (!str(vacancyId) || vacancyId.includes('/') || vacancyId.length > 200) return res.status(400).json({ error: 'Vacante inválida' });
-      if (!str(candidateId) || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
       if (!str(name) || name.length > 200) return res.status(400).json({ error: 'Nombre inválido' });
       if (!str(phone) || phone.length > 40) return res.status(400).json({ error: 'Teléfono inválido' });
       if (!EMAIL_RE.test(str(email)) || email.length > 200) return res.status(400).json({ error: 'Correo inválido' });
-      if (!str(cvUrl).startsWith('https://') || cvUrl.length > 1000) return res.status(400).json({ error: 'CV inválido' });
+      // CV must live in OUR Firebase Storage bucket (blocks SSRF: the CV worker fetches this URL server-side).
+      if (!str(cvUrl).startsWith('https://firebasestorage.googleapis.com/') || cvUrl.length > 1000) {
+        return res.status(400).json({ error: 'CV inválido' });
+      }
+
+      // Identity: derive the candidate id from the VERIFIED anonymous ID token, never
+      // from the request body. This stops a leaked capability URL (which exposes a
+      // victim's candidateId) from being used to overwrite that victim's profile.
+      let candidateId = str(bodyCandidateId);
+      if (db.canEnforceAuth) {
+        const header = req.headers.authorization || '';
+        const token = header.startsWith('Bearer ') ? header.slice(7) : null;
+        const uid = token ? await db.verifyUid(token) : null;
+        if (!uid) return res.status(401).json({ error: 'No autenticado' });
+        candidateId = uid;
+      }
+      if (!candidateId || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
 
       const vacancy = await db.getDocData('vacancies', vacancyId);
       if (!vacancy || !vacancy.active) return res.status(400).json({ error: 'La vacante no existe o ya no está activa.' });
 
       const phoneNormalized = normalizePhone(phone);
-      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, str(email));
-      const effectiveId = existingId || candidateId;
-      const applicationId = `${effectiveId}_${vacancyId}`;
 
-      const existingApp = await db.getDocData('applications', applicationId);
-      if (existingApp) {
+      // Duplicate = a candidate with THIS phone/email already applied to THIS vacancy.
+      // We do NOT merge into that candidate's record (that could corrupt a different
+      // person who shares a phone/email); we only block a repeat application here.
+      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, str(email));
+      if (existingId) {
+        const dup = await db.getDocData('applications', `${existingId}_${vacancyId}`);
+        if (dup) return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+      }
+      const applicationId = `${candidateId}_${vacancyId}`;
+      if (await db.getDocData('applications', applicationId)) {
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
 
       const now = new Date();
       await db.applyBatch(
-        { id: effectiveId, data: {
+        { id: candidateId, data: {
           fullName: str(name).slice(0, 200), email: str(email), phone: str(phone), phoneNormalized,
           city: str(city).slice(0, 120), cvUrl, cvFileType: str(cvFileType).slice(0, 120),
           aiStatus: 'pending', createdAt: now,
         } },
         { id: applicationId, data: {
-          candidateId: effectiveId, vacancyId, candidateName: str(name).slice(0, 200),
+          candidateId, vacancyId, candidateName: str(name).slice(0, 200),
           stage: 'Nuevo', cvUrl, cvFileType: str(cvFileType).slice(0, 120),
           submittedAt: now, lastStageUpdate: now,
         } },
@@ -800,7 +836,10 @@ async function startServer() {
       const application = await db.getDocData('applications', applicationId);
       if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
       // Idempotent: if already scored, return the existing result (no re-billing / no overwrite).
-      if (application.stage2Scoring) return res.json(application.stage2Scoring);
+      // Idempotent for candidates (no re-billing / no double-submit overwrite), but a
+      // recruiter may force a fresh re-score via the "Reevaluar IA" button.
+      const forceStage2 = req.body?.force === true && await callerIsRecruiter(req);
+      if (application.stage2Scoring && !forceStage2) return res.json(application.stage2Scoring);
 
       // Bound the prompt so a candidate cannot blow up token cost.
       const qaText = Object.entries(answers)
@@ -889,13 +928,14 @@ async function startServer() {
 
       // Server-authoritative write via the Admin SDK. The candidate never writes
       // their own score — the client only submits answers.
-      await db.setDocData('applications', applicationId, {
-        stage2Answers: answers,
-        stage2Scoring: parsedData,
-        stage: 'Formulario etapa 2 completado',
-        stage2SubmittedAt: new Date(),
-        lastStageUpdate: new Date(),
-      });
+      const stage2Write: any = { stage2Answers: answers, stage2Scoring: parsedData, lastStageUpdate: new Date() };
+      // Only advance the stage on the candidate's FIRST submission — a recruiter
+      // re-score (force) must not drag the candidate back to 'Formulario etapa 2'.
+      if (!forceStage2) {
+        stage2Write.stage = 'Formulario etapa 2 completado';
+        stage2Write.stage2SubmittedAt = new Date();
+      }
+      await db.setDocData('applications', applicationId, stage2Write);
 
       res.json(parsedData);
 
@@ -1053,7 +1093,8 @@ async function startServer() {
       const application = await db.getDocData('applications', applicationId);
       if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
       // Idempotent: don't re-grade / re-bill if already completed.
-      if (application.testResults) return res.json({ ...application.testResults, alreadyCompleted: true });
+      const forceTest = req.body?.force === true && await callerIsRecruiter(req);
+      if (application.testResults && !forceTest) return res.json({ ...application.testResults, alreadyCompleted: true });
 
       // Format the Q&A for the prompt (bounded to avoid runaway token cost)
       const qaList = (Array.isArray(questions) ? questions.slice(0, 100) : []).map((q: any) => {
@@ -1211,11 +1252,11 @@ async function startServer() {
         incorrectAnswers: parsedResult.incorrect_answers,
         status: 'completed',
       };
-      await db.setDocData('applications', applicationId, {
-        testResults: testResultsData,
-        stage: 'Tests presenciales',
-        lastStageUpdate: new Date(),
-      });
+      const testWrite: any = { testResults: testResultsData, lastStageUpdate: new Date() };
+      // Only advance the stage on the candidate's FIRST submission — a recruiter
+      // re-evaluation (force) must not reset the candidate's current stage.
+      if (!forceTest) testWrite.stage = 'Tests presenciales';
+      await db.setDocData('applications', applicationId, testWrite);
 
       res.json(parsedResult);
 
@@ -1259,10 +1300,9 @@ async function startServer() {
 
   // Graceful shutdown: Cloud Run sends SIGTERM on every deploy/scale-down. Drain
   // in-flight requests and close the WhatsApp socket cleanly instead of dropping them.
-  let shuttingDown = false;
   const shutdown = (sig: string) => {
-    if (shuttingDown) return;
-    shuttingDown = true;
+    if (isShuttingDown) return;
+    isShuttingDown = true;
     console.log(`[shutdown] ${sig} recibido — cerrando limpiamente...`);
     try { (sock as any)?.end?.(undefined); } catch { /* ignore */ }
     server.close(() => { console.log('[shutdown] servidor HTTP cerrado'); process.exit(0); });

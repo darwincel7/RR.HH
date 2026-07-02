@@ -154,8 +154,19 @@ export default function CandidatesList() {
 
   const handleBulkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0) return;
-    const files = Array.from(e.target.files) as File[];
-    
+    // Only CV file types (matches the Storage rule application/.*|image/.*); skip
+    // others so one unsupported file can't abort the whole batch with a rules error.
+    const ALLOWED = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/webp'];
+    const allSelected = Array.from(e.target.files) as File[];
+    const files = allSelected.filter(f => ALLOWED.includes(f.type));
+    if (files.length === 0) {
+      alert('Sube archivos PDF, Word o imagen (JPG/PNG).');
+      return;
+    }
+    if (files.length < allSelected.length) {
+      alert(`Se omitieron ${allSelected.length - files.length} archivo(s) con formato no soportado. Solo PDF, Word o imagen.`);
+    }
+
     setIsUploading(true);
     setUploadProgress(0);
 
@@ -542,7 +553,7 @@ export default function CandidatesList() {
               <h2 className="text-xl font-bold text-slate-900">Eliminar Candidato</h2>
             </div>
             <p className="text-slate-600 mb-6 text-sm">
-              ¿Estás seguro de que deseas eliminar permanentemente a <strong>{candidateToDelete.name}</strong>? 
+              ¿Estás seguro de que deseas eliminar permanentemente a <strong>{candidateToDelete?.name}</strong>?
               Se eliminarán todos sus datos y postulaciones. Esta acción no se puede deshacer.
             </p>
             <div className="flex justify-end space-x-3">
@@ -599,6 +610,7 @@ export default function CandidatesList() {
                 <input
                   type="file"
                   multiple
+                  accept=".pdf,.doc,.docx,image/jpeg,image/png,image/webp,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
                   ref={fileInputRef}
                   className="hidden"
                   onChange={handleBulkUpload}

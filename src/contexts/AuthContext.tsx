@@ -25,7 +25,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     let unsubUser: () => void = () => {};
+    // Guards against re-entrancy: if a newer auth event fires while an older one is
+    // still awaiting getDoc/setDoc, the stale invocation bails instead of attaching
+    // a leaked listener to the previous user's doc.
+    let generation = 0;
     const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
+      const gen = ++generation;
       unsubUser();          // tear down any previous user-doc listener
       unsubUser = () => {};
       setUser(currentUser);
@@ -41,6 +46,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       // Previously every Google account was auto-granted 'recruiter'.
       try {
         const snap = await getDoc(userRef);
+        if (gen !== generation) return; // superseded by a newer auth event
         if (!snap.exists()) {
           await setDoc(userRef, {
             uid: currentUser.uid,
@@ -53,11 +59,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       } catch (e) {
         console.warn('Could not initialize user doc:', e);
       }
+      if (gen !== generation) return; // superseded while awaiting
 
       // Live-subscribe so approvals/revocations take effect without a manual reload.
       unsubUser = onSnapshot(
         userRef,
-        (s) => { setUserData(s.exists() ? s.data() : null); setLoading(false); },
+        (s) => { if (gen === generation) { setUserData(s.exists() ? s.data() : null); setLoading(false); } },
         (err) => { console.error('user snapshot error:', err); setLoading(false); }
       );
     });
