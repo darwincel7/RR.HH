@@ -381,6 +381,51 @@ async function runCvParse(input: { pdfBase64?: string; mimeType?: string; fileUr
 // Backend CV worker: in admin mode the server (not each recruiter's browser) processes
 // pending CVs. Candidates are claimed atomically so concurrent runs never double-process.
 let cvWorkerRunning = false;
+
+// How many CVs to parse in parallel per run. Each parse is an independent Gemini call;
+// running a few at once clears the queue faster under high application volume without
+// overloading the single 1-CPU/1GB instance or tripping Gemini rate limits (the parse
+// helper already retries with backoff on transient errors).
+const CV_CONCURRENCY = 3;
+
+// Parses one already-claimed candidate's CV and writes the results. Isolated so one
+// candidate's failure never aborts the others in the batch.
+async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string }) {
+  const isBulk = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
+  try {
+    const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
+
+    const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
+    if (isBulk) {
+      if (parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
+      if (parsedData.email) candidateUpdate.email = parsedData.email;
+      if (parsedData.phone) {
+        candidateUpdate.phone = parsedData.phone;
+        candidateUpdate.phoneNormalized = normalizePhone(parsedData.phone);
+      }
+      if (parsedData.city) candidateUpdate.city = parsedData.city;
+    }
+    await db.setDocData('candidates', cand.id, candidateUpdate);
+
+    const appIds = await db.getApplicationIdsByCandidate(cand.id);
+    for (const appId of appIds) {
+      const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
+      if (isBulk && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
+      await db.setDocData('applications', appId, appUpdate);
+    }
+    console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
+  } catch (err: any) {
+    console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
+    await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
+    if (isBulk) {
+      const appIds = await db.getApplicationIdsByCandidate(cand.id);
+      for (const appId of appIds) {
+        await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
+      }
+    }
+  }
+}
+
 async function processPendingCVs() {
   if (cvWorkerRunning || !db?.canEnforceAuth) return;
   cvWorkerRunning = true;
@@ -389,45 +434,24 @@ async function processPendingCVs() {
     // scale-to-zero mid-parse) back to 'pending' so it gets retried.
     const reclaimed = await db.reclaimStuckProcessing(5 * 60 * 1000);
     if (reclaimed) console.log(`[server CV worker] reclaimed ${reclaimed} stuck candidate(s) to pending`);
-    const pending = await db.listPendingCandidates(10);
-    for (const cand of pending) {
-      const claimed = await db.claimCandidate(cand.id);
-      if (!claimed) continue;
+    const pending = await db.listPendingCandidates(12);
+    if (pending.length === 0) return;
 
-      const isBulk = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
-      try {
-        const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
-
-        const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
-        if (isBulk) {
-          if (parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
-          if (parsedData.email) candidateUpdate.email = parsedData.email;
-          if (parsedData.phone) {
-            candidateUpdate.phone = parsedData.phone;
-            candidateUpdate.phoneNormalized = normalizePhone(parsedData.phone);
-          }
-          if (parsedData.city) candidateUpdate.city = parsedData.city;
-        }
-        await db.setDocData('candidates', cand.id, candidateUpdate);
-
-        const appIds = await db.getApplicationIdsByCandidate(cand.id);
-        for (const appId of appIds) {
-          const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
-          if (isBulk && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
-          await db.setDocData('applications', appId, appUpdate);
-        }
-        console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
-      } catch (err: any) {
-        console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
-        await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
-        if (isBulk) {
-          const appIds = await db.getApplicationIdsByCandidate(cand.id);
-          for (const appId of appIds) {
-            await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
-          }
-        }
+    // Bounded-concurrency workers pull from a shared queue. queue.shift() is safe across
+    // these async workers because JS runs them on a single thread (no two shift() calls
+    // interleave), and claimCandidate() is an atomic transaction, so even if the same id
+    // were seen twice only one worker would win the claim.
+    const queue = [...pending];
+    const worker = async () => {
+      for (;;) {
+        const cand = queue.shift();
+        if (!cand) return;
+        const claimed = await db.claimCandidate(cand.id);
+        if (!claimed) continue;
+        await processOneCandidate(cand);
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(CV_CONCURRENCY, pending.length) }, worker));
   } catch (err) {
     console.error('[server CV worker] loop error:', err);
   } finally {
