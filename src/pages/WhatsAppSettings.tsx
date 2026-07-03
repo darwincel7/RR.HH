@@ -153,34 +153,37 @@ export default function WhatsAppSettings() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Check file size (limit to 1MB to fit in Firestore document)
-    if (file.size > 1024 * 1024) {
-      alert("El logo es demasiado grande. Por favor, sube una imagen de menos de 1MB.");
+    if (file.size > 2 * 1024 * 1024) {
+      alert("El logo es demasiado grande. Por favor, sube una imagen de menos de 2MB.");
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
 
     try {
       setUploadingLogo(true);
-      
-      // Convert to Base64
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        const base64String = reader.result as string;
-        setCompanyLogoUrl(base64String);
-        setUploadingLogo(false);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
-        }
-      };
-      reader.onerror = () => {
-        throw new Error("Failed to read file");
-      };
-      reader.readAsDataURL(file);
-      
+      // Upload to Cloud Storage via the backend (same as the team photo) and keep only
+      // the URL. Embedding the base64 in the settings doc bloated every page load and
+      // broke the DB migration (fields >1500 bytes are rejected on import).
+      const dataUrl: string = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
+        reader.readAsDataURL(file);
+      });
+      const res = await apiFetch('/api/company/logo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.url) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      setCompanyLogoUrl(data.url);
     } catch (error) {
       console.error("Error uploading logo:", error);
-      alert("Error al procesar el logo. Por favor, inténtalo de nuevo.");
+      alert("Error al subir el logo. Por favor, inténtalo de nuevo.");
+    } finally {
       setUploadingLogo(false);
       if (fileInputRef.current) {
         fileInputRef.current.value = '';

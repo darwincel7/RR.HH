@@ -901,6 +901,34 @@ async function startServer() {
     }
   });
 
+  // Company logo upload. Same mechanism as the careers image: the file lives in Cloud
+  // Storage and only its URL is stored in Firestore. The logo used to be embedded as a
+  // giant base64 string INSIDE the settings/company document, which bloated every
+  // careers-page load and even broke the database migration (fields >1500 bytes).
+  app.post("/api/company/logo", requireRecruiter, async (req, res) => {
+    try {
+      const { dataUrl } = req.body || {};
+      if (typeof dataUrl !== 'string') {
+        return res.status(400).json({ error: 'Falta la imagen (dataUrl).' });
+      }
+      const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) {
+        return res.status(400).json({ error: 'Formato de imagen inválido. Debe ser una imagen.' });
+      }
+      const contentType = match[1];
+      const buffer = Buffer.from(match[2], 'base64');
+      if (buffer.length > 2 * 1024 * 1024) {
+        return res.status(413).json({ error: 'El logo supera 2MB.' });
+      }
+      const ext = contentType.split('/')[1].split('+')[0].replace('jpeg', 'jpg');
+      const url = await db.uploadPublicFile(`company/logo-${Date.now()}.${ext}`, buffer, contentType);
+      return res.json({ url });
+    } catch (error) {
+      console.error("Logo upload error:", error);
+      res.status(500).json({ error: "No se pudo subir el logo." });
+    }
+  });
+
   app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
       const { applicationId, answers } = req.body || {};
