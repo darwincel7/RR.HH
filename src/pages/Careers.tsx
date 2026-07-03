@@ -7,34 +7,54 @@ import { Briefcase, MapPin, Clock, ArrowRight, Sparkles, Building2, Users, Star,
 export default function Careers() {
   const [vacancies, setVacancies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [company, setCompany] = useState({ name: 'AuraATS', logoUrl: '', careersImageUrl: '' });
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        const companyRef = doc(db, 'settings', 'company');
-        const q = query(collection(db, 'vacancies'), where('active', '==', true));
+  const applyCompany = (c: any) => {
+    if (!c) return;
+    setCompany({
+      name: c.name || 'AuraATS',
+      logoUrl: c.logoUrl || '',
+      careersImageUrl: c.careersImageUrl || '',
+    });
+  };
 
-        const [companySnap, vacSnap] = await Promise.all([
-          getDoc(companyRef),
-          getDocs(q)
-        ]);
-
-        if (companySnap.exists()) {
-          setCompany({
-            name: companySnap.data().name || 'AuraATS',
-            logoUrl: companySnap.data().logoUrl || '',
-            careersImageUrl: companySnap.data().careersImageUrl || ''
-          });
-        }
-
-        setVacancies(vacSnap.docs.map(d => ({ id: d.id, ...d.data() })));
-      } catch (error) {
-        console.error("Error fetching careers data:", error);
-      } finally {
-        setLoading(false);
-      }
+  async function fetchData() {
+    setLoading(true);
+    setLoadError(false);
+    // Primary source: the server's cached endpoint. The whole public traffic costs at
+    // most one Firestore read per minute, so a visitor spike can never exhaust the
+    // database quota again (which used to blank the portal into "no hay vacantes").
+    try {
+      const res = await fetch('/api/public/careers-data');
+      if (!res.ok) throw new Error(`careers-data ${res.status}`);
+      const data = await res.json();
+      applyCompany(data.company);
+      setVacancies(Array.isArray(data.vacancies) ? data.vacancies : []);
+      setLoading(false);
+      return;
+    } catch (err) {
+      console.warn('careers-data endpoint failed, falling back to Firestore:', err);
     }
+    // Fallback: direct Firestore reads (the old path), e.g. if the server is restarting.
+    try {
+      const [companySnap, vacSnap] = await Promise.all([
+        getDoc(doc(db, 'settings', 'company')),
+        getDocs(query(collection(db, 'vacancies'), where('active', '==', true))),
+      ]);
+      if (companySnap.exists()) applyCompany(companySnap.data());
+      setVacancies(vacSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (error) {
+      // Both paths failed (e.g. Firestore quota exhausted). This is an ERROR state,
+      // not "there are no vacancies" — show retry instead of a misleading empty state.
+      console.error("Error fetching careers data:", error);
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
     fetchData();
   }, []);
 
@@ -139,7 +159,19 @@ export default function Careers() {
           vacancies.length > 0 ? 'mt-8 lg:-mt-16' : 'pt-14'
         }`}
       >
-        {vacancies.length === 0 ? (
+        {loadError ? (
+          <div className="bg-white rounded-3xl p-12 text-center border border-amber-200 shadow-2xl max-w-xl mx-auto">
+            <Briefcase className="w-16 h-16 text-amber-300 mx-auto mb-4" />
+            <h3 className="text-xl font-bold text-slate-800 mb-2">Estamos recibiendo muchas visitas</h3>
+            <p className="text-slate-500 mb-6">No pudimos cargar las vacantes en este momento. Por favor, intenta de nuevo en unos segundos — tu aplicación sí nos interesa.</p>
+            <button
+              onClick={fetchData}
+              className="px-6 py-3 bg-violet-700 text-white font-bold rounded-xl hover:bg-violet-800 transition-colors"
+            >
+              Reintentar
+            </button>
+          </div>
+        ) : vacancies.length === 0 ? (
           <div className="bg-white rounded-3xl p-12 text-center border border-slate-200 shadow-2xl max-w-xl mx-auto">
             <Briefcase className="w-16 h-16 text-slate-300 mx-auto mb-4" />
             <h3 className="text-xl font-bold text-slate-800 mb-2">No hay vacantes abiertas</h3>
@@ -202,6 +234,10 @@ export default function Careers() {
           <p>&copy; {new Date().getFullYear()} {company.name}. Todos los derechos reservados.</p>
           <p className="mt-2 text-xs text-slate-400 flex items-center justify-center">
             Powered by AuraATS <Sparkles className="w-3 h-3 ml-1 text-violet-400" />
+          </p>
+          {/* Staff-only entry point — candidates never need an account. */}
+          <p className="mt-4 text-xs">
+            <Link to="/login" className="text-slate-300 hover:text-slate-500 transition-colors">Acceso equipo</Link>
           </p>
         </div>
       </footer>

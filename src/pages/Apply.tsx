@@ -50,10 +50,29 @@ export default function Apply() {
   useEffect(() => {
     async function fetchData() {
       if (!vacancyId) return;
+      // Primary source: the server's cached careers endpoint (zero Firestore reads per
+      // visitor — survives read-quota exhaustion). Falls back to direct Firestore.
+      try {
+        const res = await fetch('/api/public/careers-data');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.company) {
+            setCompany({ name: data.company.name || 'AuraATS', logoUrl: data.company.logoUrl || '' });
+          }
+          const vac = (Array.isArray(data.vacancies) ? data.vacancies : []).find((v: any) => v.id === vacancyId);
+          if (vac) {
+            setVacancy(vac);
+            setLoading(false);
+            return;
+          }
+          // Not in the active list — might be cache staleness; verify directly below.
+        }
+      } catch (err) {
+        console.warn('careers-data endpoint failed, falling back to Firestore:', err);
+      }
       try {
         // Fetch Company Branding
-        const companyRef = doc(db, 'settings', 'company');
-        const companySnap = await getDoc(companyRef);
+        const companySnap = await getDoc(doc(db, 'settings', 'company'));
         if (companySnap.exists()) {
           setCompany({
             name: companySnap.data().name || 'AuraATS',
@@ -62,8 +81,7 @@ export default function Apply() {
         }
 
         // Fetch Vacancy
-        const docRef = doc(db, 'vacancies', vacancyId);
-        const docSnap = await getDoc(docRef);
+        const docSnap = await getDoc(doc(db, 'vacancies', vacancyId));
         if (docSnap.exists() && docSnap.data().active) {
           setVacancy(docSnap.data());
         } else {
@@ -71,7 +89,7 @@ export default function Apply() {
         }
       } catch (error) {
         console.error("Error fetching data:", error);
-        setErrorMsg('Error al cargar la vacante.');
+        setErrorMsg('Estamos recibiendo muchas visitas y no pudimos cargar la vacante. Por favor, recarga la página en unos segundos.');
       } finally {
         setLoading(false);
       }

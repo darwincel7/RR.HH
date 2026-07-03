@@ -10,7 +10,9 @@ export default function Login() {
 
   const from = location.state?.from?.pathname || "/";
 
-  if (user) {
+  // Anonymous sessions (public applicants) must NOT bounce away from the login form —
+  // otherwise a staff member could never sign in on a browser where someone applied.
+  if (user && !user.isAnonymous) {
     return <Navigate to={from} replace />;
   }
 

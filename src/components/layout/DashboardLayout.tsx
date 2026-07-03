@@ -16,8 +16,19 @@ export default function DashboardLayout() {
     return <div className="min-h-screen flex items-center justify-center bg-slate-50">Loading...</div>;
   }
 
+  // The bare domain "/" is where candidates land (links shared on WhatsApp/social).
+  // They must reach the PUBLIC careers portal — never a login wall. Deep panel URLs
+  // (/candidates, /settings…) are only ever used by staff, so those still go to login.
   if (!user) {
-    return <Navigate to="/login" state={{ from: location }} replace />;
+    const isBareRoot = location.pathname === '/';
+    return <Navigate to={isBareRoot ? '/careers' : '/login'} state={{ from: location }} replace />;
+  }
+
+  // Anonymous sessions belong to public applicants (created invisibly by the apply
+  // flow). They are NOT staff: send them to the careers portal instead of ever
+  // showing them an "approval pending" gate meant for team members.
+  if (user.isAnonymous) {
+    return <Navigate to="/careers" replace />;
   }
 
   // Signed in but not yet approved (or blocked) by an admin → hold at a gate screen.
@@ -30,18 +41,27 @@ export default function DashboardLayout() {
             <Clock className="w-8 h-8" />
           </div>
           <h1 className="text-2xl font-display font-bold text-slate-900 mb-2">
-            {isBlocked ? 'Acceso no autorizado' : 'Cuenta pendiente de aprobación'}
+            {isBlocked ? 'Acceso no autorizado' : 'Esta área es solo para el equipo interno'}
           </h1>
           <p className="text-slate-500 mb-4">
             {isBlocked
               ? 'Un administrador ha restringido el acceso de esta cuenta.'
-              : 'Tu cuenta se creó correctamente, pero aún no tiene acceso al panel.'}
+              : 'No necesitas ninguna cuenta ni aprobación para ver las vacantes y aplicar.'}
           </p>
           {!isBlocked && (
-            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 text-sm text-amber-800">
-              Para activar tu acceso, comunícate con <strong>Darwin</strong> (daruingmejia@gmail.com)
-              y pídele que apruebe tu cuenta desde el panel de administración.
-            </div>
+            <>
+              {/* Most people who land here are job seekers — put their path FIRST. */}
+              <Link
+                to="/careers"
+                className="w-full flex items-center justify-center px-5 py-3.5 mb-4 rounded-xl bg-violet-700 text-white font-bold hover:bg-violet-800 transition-colors shadow-md"
+              >
+                <Briefcase className="w-5 h-5 mr-2" /> Ver vacantes y aplicar
+              </Link>
+              <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 mb-4 text-xs text-amber-800 text-left">
+                <strong>¿Eres parte del equipo interno de la empresa?</strong> Comunícate con Darwin
+                (daruingmejia@gmail.com) para que apruebe tu cuenta desde el panel de administración.
+              </div>
+            </>
           )}
           <p className="text-sm text-slate-400 mb-6">
             Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>.

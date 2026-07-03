@@ -58,6 +58,8 @@ export interface ServerDb {
   getApplicationIdsByCandidate(candidateId: string): Promise<string[]>;
   /** Uploads a publicly-readable file to Cloud Storage and returns its download URL. Admin mode only. */
   uploadPublicFile(path: string, buffer: Buffer, contentType: string): Promise<string>;
+  /** Active (published) vacancies, for the public careers portal. */
+  listActiveVacancies(): Promise<any[]>;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -181,6 +183,10 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       async getApplicationIdsByCandidate(candidateId) {
         const snap = await adb.collection('applications').where('candidateId', '==', candidateId).get();
         return snap.docs.map((d: any) => d.id);
+      },
+      async listActiveVacancies() {
+        const snap = await adb.collection('vacancies').where('active', '==', true).get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
       },
       async uploadPublicFile(path, buffer, contentType) {
         const bucket = getStorage(app).bucket(firebaseConfig.storageBucket);
@@ -307,6 +313,10 @@ async function initClient(): Promise<ServerDb> {
     async getApplicationIdsByCandidate(candidateId) {
       const snap = await getDocs(query(collection(cdb, 'applications'), where('candidateId', '==', candidateId)));
       return snap.docs.map(d => d.id);
+    },
+    async listActiveVacancies() {
+      const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
     },
     async uploadPublicFile() {
       throw new Error('uploadPublicFile requires admin mode (no admin credentials configured).');

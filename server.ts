@@ -659,6 +659,38 @@ async function startServer() {
     }
   });
 
+  // Public careers data with an in-memory cache. This is the quota shield for the
+  // public portal: instead of every visitor doing their own Firestore reads (which
+  // exhausted the free-tier daily read quota and made the portal show "no vacancies"),
+  // the WHOLE public traffic costs at most one Firestore round-trip per minute.
+  // On a Firestore error (e.g. quota exhausted) the last good copy is served, so the
+  // portal keeps working even when the database refuses reads.
+  let careersCache: { data: any; at: number } | null = null;
+  const CAREERS_CACHE_TTL = 60_000;
+  app.get("/api/public/careers-data", globalRateLimit(1200), async (_req, res) => {
+    try {
+      if (careersCache && Date.now() - careersCache.at < CAREERS_CACHE_TTL) {
+        return res.json(careersCache.data);
+      }
+      const [company, vacancies] = await Promise.all([
+        db.getDocData('settings', 'company'),
+        db.listActiveVacancies(),
+      ]);
+      const data = {
+        company: company
+          ? { name: company.name || '', logoUrl: company.logoUrl || '', careersImageUrl: company.careersImageUrl || '' }
+          : null,
+        vacancies,
+      };
+      careersCache = { data, at: Date.now() };
+      res.json(data);
+    } catch (err) {
+      console.error('[careers-data] Firestore read failed:', (err as any)?.message || err);
+      if (careersCache) return res.json(careersCache.data); // stale copy beats a dark portal
+      res.status(503).json({ error: 'Datos temporalmente no disponibles. Intenta en unos minutos.' });
+    }
+  });
+
   // Public (rate-limited): create a job application. Deduplicates by normalized
   // phone/email so the same person can't flood the pipeline, writes candidate +
   // application atomically (no orphans), and sends the confirmation email.
