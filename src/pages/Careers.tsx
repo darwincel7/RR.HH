@@ -27,6 +27,13 @@ export default function Careers() {
     // database quota again (which used to blank the portal into "no hay vacantes").
     try {
       const res = await fetch('/api/public/careers-data');
+      if (res.status === 503) {
+        // The server explicitly said "database unavailable and no cached copy".
+        // Falling back to direct Firestore would just stampede the same dead DB.
+        setLoadError(true);
+        setLoading(false);
+        return;
+      }
       if (!res.ok) throw new Error(`careers-data ${res.status}`);
       const data = await res.json();
       applyCompany(data.company);

@@ -666,27 +666,48 @@ async function startServer() {
   // On a Firestore error (e.g. quota exhausted) the last good copy is served, so the
   // portal keeps working even when the database refuses reads.
   let careersCache: { data: any; at: number } | null = null;
+  let careersInFlight: Promise<any> | null = null; // single-flight: concurrent misses share ONE Firestore round-trip
+  let careersErrorAt = 0;                          // cold-start negative cache (no data yet + Firestore down)
   const CAREERS_CACHE_TTL = 60_000;
-  app.get("/api/public/careers-data", globalRateLimit(1200), async (_req, res) => {
+  // No rate limiter here ON PURPOSE: a cache hit costs zero Firestore reads and trivial
+  // CPU, while a 429 would push clients onto their per-visitor direct-Firestore fallback —
+  // recreating the very quota drain this endpoint prevents. Firestore traffic is bounded
+  // by the TTL + single-flight below, not by limiting visitors.
+  app.get("/api/public/careers-data", async (_req, res) => {
+    if (careersCache && Date.now() - careersCache.at < CAREERS_CACHE_TTL) {
+      return res.json(careersCache.data);
+    }
+    // Cold start during an outage: don't retry Firestore more than once per 5s.
+    if (!careersCache && Date.now() - careersErrorAt < 5_000) {
+      return res.status(503).json({ error: 'Datos temporalmente no disponibles. Intenta en unos minutos.' });
+    }
     try {
-      if (careersCache && Date.now() - careersCache.at < CAREERS_CACHE_TTL) {
-        return res.json(careersCache.data);
+      if (!careersInFlight) {
+        careersInFlight = (async () => {
+          const [company, vacancies] = await Promise.all([
+            db.getDocData('settings', 'company'),
+            db.listActiveVacancies(),
+          ]);
+          return {
+            company: company
+              ? { name: company.name || '', logoUrl: company.logoUrl || '', careersImageUrl: company.careersImageUrl || '' }
+              : null,
+            vacancies,
+          };
+        })().finally(() => { careersInFlight = null; });
       }
-      const [company, vacancies] = await Promise.all([
-        db.getDocData('settings', 'company'),
-        db.listActiveVacancies(),
-      ]);
-      const data = {
-        company: company
-          ? { name: company.name || '', logoUrl: company.logoUrl || '', careersImageUrl: company.careersImageUrl || '' }
-          : null,
-        vacancies,
-      };
+      const data = await careersInFlight;
       careersCache = { data, at: Date.now() };
       res.json(data);
     } catch (err) {
       console.error('[careers-data] Firestore read failed:', (err as any)?.message || err);
-      if (careersCache) return res.json(careersCache.data); // stale copy beats a dark portal
+      if (careersCache) {
+        // Serve the stale copy AND re-arm the TTL so a sustained outage costs at most
+        // one failing Firestore attempt per TTL — not one per request.
+        careersCache.at = Date.now();
+        return res.json(careersCache.data);
+      }
+      careersErrorAt = Date.now();
       res.status(503).json({ error: 'Datos temporalmente no disponibles. Intenta en unos minutos.' });
     }
   });

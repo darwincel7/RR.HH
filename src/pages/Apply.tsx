@@ -52,8 +52,18 @@ export default function Apply() {
       if (!vacancyId) return;
       // Primary source: the server's cached careers endpoint (zero Firestore reads per
       // visitor — survives read-quota exhaustion). Falls back to direct Firestore.
+      // Tracks whether the endpoint answered OK but the vacancy wasn't in the active
+      // list — in that case a later read failure means "inactive", not "overloaded".
+      let endpointSaysInactive = false;
       try {
         const res = await fetch('/api/public/careers-data');
+        if (res.status === 503) {
+          // Server explicitly said the DB is unavailable with no cached copy;
+          // direct reads would fail too — show the retry message without burning quota.
+          setErrorMsg('Estamos recibiendo muchas visitas y no pudimos cargar la vacante. Por favor, recarga la página en unos segundos.');
+          setLoading(false);
+          return;
+        }
         if (res.ok) {
           const data = await res.json();
           if (data.company) {
@@ -65,7 +75,9 @@ export default function Apply() {
             setLoading(false);
             return;
           }
-          // Not in the active list — might be cache staleness; verify directly below.
+          // Not in the active list — most likely deactivated; the cache may also be up
+          // to 60s stale for a just-published vacancy, so verify directly below.
+          endpointSaysInactive = true;
         }
       } catch (err) {
         console.warn('careers-data endpoint failed, falling back to Firestore:', err);
@@ -89,7 +101,11 @@ export default function Apply() {
         }
       } catch (error) {
         console.error("Error fetching data:", error);
-        setErrorMsg('Estamos recibiendo muchas visitas y no pudimos cargar la vacante. Por favor, recarga la página en unos segundos.');
+        // If the (authoritative) endpoint already told us this vacancy isn't active,
+        // say that — not a misleading "overloaded, retry" for a genuinely dead link.
+        setErrorMsg(endpointSaysInactive
+          ? 'La vacante no existe o ya no está activa.'
+          : 'Estamos recibiendo muchas visitas y no pudimos cargar la vacante. Por favor, recarga la página en unos segundos.');
       } finally {
         setLoading(false);
       }

@@ -25,10 +25,13 @@ export default function DashboardLayout() {
   }
 
   // Anonymous sessions belong to public applicants (created invisibly by the apply
-  // flow). They are NOT staff: send them to the careers portal instead of ever
-  // showing them an "approval pending" gate meant for team members.
+  // flow). They are NOT staff: from the bare root send them to the careers portal.
+  // Deep panel links are staff-only (e.g. a recruiter whose browser picked up an
+  // anonymous session by testing the apply flow) → send those to /login preserving
+  // the destination, exactly like the unauthenticated branch above.
   if (user.isAnonymous) {
-    return <Navigate to="/careers" replace />;
+    const isBareRoot = location.pathname === '/';
+    return <Navigate to={isBareRoot ? '/careers' : '/login'} state={{ from: location }} replace />;
   }
 
   // Signed in but not yet approved (or blocked) by an admin → hold at a gate screen.
