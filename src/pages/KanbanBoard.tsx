@@ -7,8 +7,9 @@ import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText } from 'lucide-react';
 
-import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
+import WhatsAppSendReport from '../components/WhatsAppSendReport';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -24,6 +25,9 @@ export default function KanbanBoard() {
   // Bulk selection state
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  // Post-bulk-move WhatsApp delivery report (who did NOT get the automated message).
+  const [sendReport, setSendReport] = useState<{ stage: string; sent: number; failed: any[] } | null>(null);
+  const [retryingSends, setRetryingSends] = useState(false);
 
   // Bulk upload state
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
@@ -86,8 +90,24 @@ export default function KanbanBoard() {
     setBulkActionLoading(true);
 
     const appsToMove = applications.filter(a => selectedApps.has(a.id) && a.stage !== targetStage);
+    if (appsToMove.length === 0) { setBulkActionLoading(false); return; }
+
+    // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
+    // BEFORE moving anyone. Better to stop the whole batch than to move candidates
+    // whose messages will silently fail (a half-notified batch confuses the process).
+    if (stageMayAutoSend(targetStage)) {
+      const connected = await isWhatsAppConnected();
+      if (!connected) {
+        const proceed = window.confirm(
+          `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
+        );
+        if (!proceed) { setBulkActionLoading(false); return; }
+      }
+    }
+
     let movedCount = 0;
-    let whatsappFailed = 0;
+    let sentCount = 0;
+    const failedSends: any[] = [];
     const failed: string[] = [];
 
     // Process each candidate independently so one failure doesn't abort the whole batch.
@@ -114,17 +134,23 @@ export default function KanbanBoard() {
               link = `${window.location.origin}/eval/${movedApp.id}`;
             }
 
-            const r = await sendWhatsAppAutomation(phone, targetStage, {
+            const vars = {
               nombre: movedApp.candidateName,
               vacante: vacancy?.title,
               link,
               email: candSnap.data().email
-            });
-            if (r.status === 'failed') whatsappFailed++;
+            };
+            const r = await sendWhatsAppAutomation(phone, targetStage, vars);
+            if (r.status === 'sent') sentCount++;
+            if (r.status === 'failed') {
+              failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: phone || '—', vars });
+            }
+            // Space consecutive sends: gentler on WhatsApp and avoids burst-flagging.
+            if (phone && r.status !== 'skipped') await sleep(SEND_SPACING_MS);
           }
         } catch (autoErr) {
           console.error(`Automation failed for ${movedApp.id} (stage saved anyway):`, autoErr);
-          whatsappFailed++;
+          failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: '—', vars: { nombre: movedApp.candidateName, vacante: vacancy?.title, link: '', email: '' } });
         }
       } catch (err) {
         console.error(`Error moving application ${movedApp.id}:`, err);
@@ -135,13 +161,39 @@ export default function KanbanBoard() {
     setSelectedApps(new Set()); // Clear selection
     setBulkActionLoading(false);
 
-    const waNote = whatsappFailed > 0
-      ? ` ⚠️ ${whatsappFailed} mensaje(s) de WhatsApp no se enviaron (revisa la conexión de WhatsApp en Configuración).`
-      : '';
-    if (failed.length === 0) {
-      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${waNote}`);
+    if (failed.length > 0) {
+      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
+    }
+    if (failedSends.length > 0) {
+      // Show exactly WHO didn't get the message, with one-click retry.
+      setSendReport({ stage: targetStage, sent: sentCount, failed: failedSends });
+    } else if (failed.length === 0) {
+      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${sentCount > 0 ? ` ${sentCount} mensaje(s) de WhatsApp enviados.` : ''}`);
+    }
+  };
+
+  // Re-attempts ONLY the failed sends from the last bulk move (no re-moving).
+  const retryFailedSends = async () => {
+    if (!sendReport) return;
+    setRetryingSends(true);
+    const still: any[] = [];
+    let sentNow = sendReport.sent;
+    for (const f of sendReport.failed) {
+      try {
+        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
+        if (r.status === 'failed') still.push(f);
+        else if (r.status === 'sent') sentNow++;
+      } catch {
+        still.push(f);
+      }
+      await sleep(SEND_SPACING_MS);
+    }
+    setRetryingSends(false);
+    if (still.length === 0) {
+      setSendReport(null);
+      alert('✅ Todos los mensajes pendientes fueron enviados.');
     } else {
-      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.${waNote}`);
+      setSendReport({ stage: sendReport.stage, sent: sentNow, failed: still });
     }
   };
 
@@ -419,23 +471,30 @@ export default function KanbanBoard() {
                                 } ${isStale ? 'border-l-4 border-l-orange-500' : ''} ${isSelected ? 'ring-2 ring-violet-500 bg-violet-50/30' : ''}`}
                               >
                                 
-                                <div 
+                                {/* Selection checkbox: generous hit area (~48px) with a clear
+                                    hover highlight so "select" is visually distinct from
+                                    "open profile". mousedown is stopped so aiming at the
+                                    checkbox never starts a card drag. */}
+                                <div
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     toggleSelection(item.id);
                                   }}
-                                  className="absolute top-3 right-3 z-10 hover:scale-110 transition-transform"
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                  onTouchStart={(e) => e.stopPropagation()}
+                                  title={isSelected ? 'Quitar selección' : 'Seleccionar candidato'}
+                                  className="absolute top-0 right-0 z-10 p-3 cursor-pointer rounded-tr-xl rounded-bl-2xl hover:bg-violet-100/80 transition-colors group/check"
                                 >
-                                  <div className={`w-5 h-5 rounded-md border-[1.5px] flex items-center justify-center transition-all shadow-sm ${
-                                    isSelected 
-                                      ? 'bg-violet-500 border-violet-500 text-white' 
-                                      : 'bg-white/80 border-slate-300 text-transparent hover:border-violet-400'
+                                  <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shadow-sm ${
+                                    isSelected
+                                      ? 'bg-violet-500 border-violet-500 text-white'
+                                      : 'bg-white border-slate-300 text-transparent group-hover/check:border-violet-500 group-hover/check:scale-110'
                                   }`}>
-                                    <Check className="w-3.5 h-3.5" />
+                                    <Check className="w-4 h-4" />
                                   </div>
                                 </div>
 
-                                <div className="flex justify-between items-start mb-2 pr-6">
+                                <div className="flex justify-between items-start mb-2 pr-10">
                                   <h4 className="text-sm lg:text-base font-display font-bold text-slate-900 line-clamp-1">{item.candidateName}</h4>
                                   {item.scoreSummary && (
                                     <span className="flex items-center text-[10px] font-black text-white bg-gradient-ai px-1.5 py-0.5 rounded-md shadow-sm">
@@ -602,6 +661,14 @@ export default function KanbanBoard() {
 
           </div>
       </Modal>
+
+      {/* WhatsApp delivery report after a bulk move — who didn't get the message + retry. */}
+      <WhatsAppSendReport
+        report={sendReport}
+        retrying={retryingSends}
+        onRetry={retryFailedSends}
+        onClose={() => setSendReport(null)}
+      />
 
       {/* CV preview — floating window in the same tab. Closes on X, Escape, or click outside. */}
       <Modal isOpen={!!cvPreview} onClose={() => setCvPreview(null)} closeOnBackdrop overlayClassName="bg-slate-900/60 z-[110]">

@@ -11,6 +11,32 @@ export type AutomationResult = {
   reason?: string;
 };
 
+// True when moving to this stage would attempt an automatic WhatsApp message from a
+// plain stage change (no schedule data). Used by bulk moves to pre-flight the
+// connection BEFORE moving anyone, so a batch is never half-notified.
+export function stageMayAutoSend(stage: string): boolean {
+  const NO_AUTOMATION = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
+  const SCHEDULE_REQUIRED = ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'];
+  return !NO_AUTOMATION.includes(stage) && !SCHEDULE_REQUIRED.includes(stage);
+}
+
+// Live connection check against the server socket status.
+export async function isWhatsAppConnected(): Promise<boolean> {
+  try {
+    const res = await apiFetch('/api/whatsapp/status');
+    if (!res.ok) return false;
+    const data = await res.json();
+    return data.status === 'connected';
+  } catch {
+    return false;
+  }
+}
+
+// Small spacing between consecutive automated sends: gentler on the WhatsApp socket
+// and reduces the chance of Meta flagging a burst of identical messages as spam.
+export const SEND_SPACING_MS = 600;
+export const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
 export async function sendWhatsAppAutomation(
   phone: string,
   stage: string,

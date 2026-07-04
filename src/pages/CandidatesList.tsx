@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
-import { sendWhatsAppAutomation } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
@@ -19,6 +20,9 @@ export default function CandidatesList() {
 
   const [selectedApps, setSelectedApps] = useState<string[]>([]);
   const [bulkActionLoading, setBulkActionLoading] = useState(false);
+  // Post-bulk-move WhatsApp delivery report (who did NOT get the automated message).
+  const [sendReport, setSendReport] = useState<{ stage: string; sent: number; failed: any[] } | null>(null);
+  const [retryingSends, setRetryingSends] = useState(false);
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -231,20 +235,32 @@ export default function CandidatesList() {
     if (!newStage || selectedApps.length === 0) return;
     setBulkActionLoading(true);
     try {
-      const batch = writeBatch(db);
       const appsToMove = candidates.filter(c => selectedApps.includes(c.id));
 
+      // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
+      // BEFORE moving anyone — never leave a batch half-notified.
+      if (stageMayAutoSend(newStage)) {
+        const connected = await isWhatsAppConnected();
+        if (!connected) {
+          const proceed = window.confirm(
+            `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
+          );
+          if (!proceed) { setBulkActionLoading(false); return; }
+        }
+      }
+
+      const batch = writeBatch(db);
       for (const app of appsToMove) {
         const appRef = doc(db, 'applications', app.id);
         batch.update(appRef, { stage: newStage, lastStageUpdate: serverTimestamp() });
       }
-
       await batch.commit();
 
       // Trigger automation per candidate. Build the link that matches the target stage
       // (the eval form for stage 2, the test for presential tests) and keep each send
       // best-effort so one failure does not block the rest.
-      let whatsappFailed = 0;
+      let sentCount = 0;
+      const failedSends: any[] = [];
       for (const app of appsToMove) {
         if (!app.phone) continue;
         try {
@@ -254,29 +270,61 @@ export default function CandidatesList() {
           } else if (newStage === 'Formulario etapa 2 enviado') {
             link = `${window.location.origin}/eval/${app.id}`;
           }
-          const r = await sendWhatsAppAutomation(app.phone, newStage, {
+          const vars = {
             nombre: app.candidateName,
             vacante: app.vacancyTitle,
             link,
             email: app.email
-          });
-          if (r.status === 'failed') whatsappFailed++;
+          };
+          const r = await sendWhatsAppAutomation(app.phone, newStage, vars);
+          if (r.status === 'sent') sentCount++;
+          if (r.status === 'failed') {
+            failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars });
+          }
+          // Space consecutive sends: gentler on WhatsApp and avoids burst-flagging.
+          if (r.status !== 'skipped') await sleep(SEND_SPACING_MS);
         } catch (autoErr) {
           console.error(`Automation failed for ${app.id} (stage saved anyway):`, autoErr);
-          whatsappFailed++;
+          failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars: { nombre: app.candidateName, vacante: app.vacancyTitle, link: '', email: app.email } });
         }
       }
 
       setSelectedApps([]);
       refresh();
-      if (whatsappFailed > 0) {
-        alert(`Candidatos movidos. ⚠️ ${whatsappFailed} mensaje(s) de WhatsApp no se enviaron (revisa la conexión de WhatsApp en Configuración).`);
+      if (failedSends.length > 0) {
+        // Show exactly WHO didn't get the message, with one-click retry.
+        setSendReport({ stage: newStage, sent: sentCount, failed: failedSends });
       }
     } catch (error) {
       console.error("Error bulk moving candidates:", error);
       alert("Error al mover candidatos");
     } finally {
       setBulkActionLoading(false);
+    }
+  };
+
+  // Re-attempts ONLY the failed sends from the last bulk move (no re-moving).
+  const retryFailedSends = async () => {
+    if (!sendReport) return;
+    setRetryingSends(true);
+    const still: any[] = [];
+    let sentNow = sendReport.sent;
+    for (const f of sendReport.failed) {
+      try {
+        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
+        if (r.status === 'failed') still.push(f);
+        else if (r.status === 'sent') sentNow++;
+      } catch {
+        still.push(f);
+      }
+      await sleep(SEND_SPACING_MS);
+    }
+    setRetryingSends(false);
+    if (still.length === 0) {
+      setSendReport(null);
+      alert('✅ Todos los mensajes pendientes fueron enviados.');
+    } else {
+      setSendReport({ stage: sendReport.stage, sent: sentNow, failed: still });
     }
   };
 
@@ -728,6 +776,14 @@ export default function CandidatesList() {
           </div>
         )}
       </div>
+
+      {/* WhatsApp delivery report after a bulk move — who didn't get the message + retry. */}
+      <WhatsAppSendReport
+        report={sendReport}
+        retrying={retryingSends}
+        onRetry={retryFailedSends}
+        onClose={() => setSendReport(null)}
+      />
 
       {/* Delete Confirmation Modal */}
       <Modal isOpen={!!candidateToDelete} onClose={() => setCandidateToDelete(null)} overlayClassName="bg-slate-900/40 z-50">
