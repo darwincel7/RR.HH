@@ -284,6 +284,15 @@ export default function KanbanBoard() {
     }
   };
 
+  // Position of a card inside its column: an explicit kanbanOrder (set when the
+  // recruiter drops a card at a specific spot) wins; otherwise fall back to the
+  // application date so existing boards keep a stable, sensible order.
+  const getKanbanOrder = (app: any): number => {
+    if (typeof app.kanbanOrder === 'number') return app.kanbanOrder;
+    const t: any = app.submittedAt;
+    return t?.toMillis ? t.toMillis() : (t?.toDate ? t.toDate().getTime() : 0);
+  };
+
   const onDragEnd = async (result: DropResult) => {
     const { destination, source, draggableId } = result;
 
@@ -291,19 +300,46 @@ export default function KanbanBoard() {
     if (destination.droppableId === source.droppableId && destination.index === source.index) return;
 
     const newStage = destination.droppableId;
-    
-    // Optimistic UI update
+    const sameColumn = destination.droppableId === source.droppableId;
     const movedApp = applications.find(a => a.id === draggableId);
+    if (!movedApp) return;
+
+    // The card takes the exact slot where it was dropped: its new order is the
+    // midpoint between its two neighbors in the destination column AS RENDERED
+    // (filteredApplications — same list the Draggables index against — without the
+    // dragged card, matching how the library reports destination.index).
+    const destItems = filteredApplications
+      .filter(app => app.stage === newStage && app.id !== draggableId)
+      .sort((a, b) => getKanbanOrder(a) - getKanbanOrder(b));
+    const prevItem = destItems[destination.index - 1];
+    const nextItem = destItems[destination.index];
+    let newOrder: number;
+    if (prevItem && nextItem) newOrder = (getKanbanOrder(prevItem) + getKanbanOrder(nextItem)) / 2;
+    else if (prevItem) newOrder = getKanbanOrder(prevItem) + 100000;
+    else if (nextItem) newOrder = getKanbanOrder(nextItem) - 100000;
+    else newOrder = Date.now();
+
+    // Optimistic UI update
     const previousApps = [...applications];
-    setApplications(prev => prev.map(app => 
-      app.id === draggableId ? { ...app, stage: newStage } : app
+    setApplications(prev => prev.map(app =>
+      app.id === draggableId ? { ...app, stage: newStage, kanbanOrder: newOrder } : app
     ));
 
     // Update in Firestore
     try {
       const appRef = doc(db, 'applications', draggableId);
-      await updateDoc(appRef, { 
+
+      // Reorder INSIDE the same column: only the position changes — no stage write,
+      // no lastStageUpdate, and crucially NO automation (previously this re-fired
+      // the stage's WhatsApp template on a simple reorder).
+      if (sameColumn) {
+        await updateDoc(appRef, { kanbanOrder: newOrder });
+        return;
+      }
+
+      await updateDoc(appRef, {
         stage: newStage,
+        kanbanOrder: newOrder,
         lastStageUpdate: serverTimestamp()
       });
 
@@ -364,11 +400,14 @@ export default function KanbanBoard() {
     );
   });
 
-  // Group applications by stage
+  // Group applications by stage, ordered by their in-column position (kanbanOrder)
+  // so a card stays exactly where the recruiter dropped it.
   const columns = PIPELINE_STAGES.map(stage => ({
     id: stage,
     title: stage,
-    items: filteredApplications.filter(app => app.stage === stage)
+    items: filteredApplications
+      .filter(app => app.stage === stage)
+      .sort((a, b) => getKanbanOrder(a) - getKanbanOrder(b))
   })).filter(col => col.items.length > 0 || ['Nuevo', 'Aplicó', 'Precalificado', 'Revisión humana', 'Entrevista presencial', 'Contratado', 'Descartado'].includes(col.id)); // Show populated columns + some default ones
 
   return (
@@ -410,9 +449,11 @@ export default function KanbanBoard() {
 
       <div className="flex-1 overflow-x-auto overflow-y-hidden pb-2">
         <DragDropContext onDragEnd={onDragEnd}>
-          <div className="flex h-full space-x-4 lg:space-x-6 items-start min-w-max px-1">
+          {/* Columns stretch to full height so the drop zone covers the WHOLE column —
+              a card can be dropped at the top, middle, bottom or on the empty area. */}
+          <div className="flex h-full space-x-4 lg:space-x-6 min-w-max px-1">
             {columns.map(column => (
-              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col max-h-full">
+              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col h-full">
                 <div className="mb-3 flex justify-between items-center px-1">
                   <h3 className="font-display font-bold text-slate-700 text-[10px] lg:text-xs uppercase tracking-widest">{column.title}</h3>
                   <div className="flex items-center gap-2">
