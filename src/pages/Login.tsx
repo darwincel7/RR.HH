@@ -12,6 +12,13 @@ export default function Login() {
 
   const from = location.state?.from?.pathname || '/';
 
+  // Consume the post-logout flag here (not during DashboardLayout's render, which must
+  // stay pure). Reaching /login is the terminal step of a staff logout, so this is the
+  // right place to clear it.
+  useEffect(() => {
+    try { sessionStorage.removeItem('staffLoggedOut'); } catch { /* storage disabled */ }
+  }, []);
+
   // Company branding from the cached public endpoint (no Firestore reads per visit).
   useEffect(() => {
     let alive = true;

@@ -26,11 +26,12 @@ export default function DashboardLayout() {
   }
 
   if (!user) {
-    // Staff who just clicked "Cerrar sesión" go straight to /login.
+    // Staff who just clicked "Cerrar sesión" go straight to /login. READ ONLY here —
+    // render must stay pure (StrictMode double-invokes it, and mutating storage mid-render
+    // made the two passes disagree). The flag is cleared in Login's mount effect.
     let staffLoggedOut = false;
     try {
       staffLoggedOut = sessionStorage.getItem('staffLoggedOut') === '1';
-      if (staffLoggedOut) sessionStorage.removeItem('staffLoggedOut');
     } catch { /* storage disabled */ }
     if (staffLoggedOut) return <Navigate to="/login" replace />;
 
