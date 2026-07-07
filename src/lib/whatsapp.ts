@@ -14,10 +14,18 @@ export type AutomationResult = {
 // True when moving to this stage would attempt an automatic WhatsApp message from a
 // plain stage change (no schedule data). Used by bulk moves to pre-flight the
 // connection BEFORE moving anyone, so a batch is never half-notified.
+// Only stages that actually have a message template belong here — returning true for
+// template-less stages ('Nuevo', 'Aplicó', …) fired a pointless "messages won't be
+// sent" warning when WhatsApp was offline even though nothing would ever be sent.
 export function stageMayAutoSend(stage: string): boolean {
-  const NO_AUTOMATION = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
-  const SCHEDULE_REQUIRED = ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'];
-  return !NO_AUTOMATION.includes(stage) && !SCHEDULE_REQUIRED.includes(stage);
+  const SEND_STAGES = [
+    'Formulario etapa 2 enviado',
+    'Descartado',
+    'Banco de talento',
+    'Contacto WhatsApp 1',
+    'Recordatorio de entrevista',
+  ];
+  return SEND_STAGES.includes(stage);
 }
 
 // Live connection check against the server socket status.

@@ -463,7 +463,7 @@ export default function FormsSettings() {
               <div className="w-8 h-8 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center font-bold">3</div>
               <div>
                 <h2 className="text-lg font-bold text-slate-800">Test de Conocimientos (Etapa 3)</h2>
-                <p className="text-sm text-slate-500">Enviado automáticamente al mover a "Test". Contiene {testQuestions.length} preguntas.</p>
+                <p className="text-sm text-slate-500">Se aplica en persona: copia el link del test desde el perfil del candidato. Contiene {testQuestions.length} preguntas.</p>
               </div>
             </div>
             {expandedSection === 'test' ? <ChevronUp className="w-5 h-5 text-slate-400" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}

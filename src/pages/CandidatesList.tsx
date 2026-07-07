@@ -189,6 +189,14 @@ export default function CandidatesList() {
 
   const anyFilterActive = !!(searchTerm || stageFilter || cityFilter || expFilter);
 
+  // Changing search/filters clears the selection: otherwise candidates selected under
+  // a previous filter stay silently selected while INVISIBLE, and a bulk move would
+  // move (and WhatsApp-message) people the recruiter can't see.
+  useEffect(() => {
+    setSelectedApps([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchTerm, stageFilter, cityFilter, expFilter]);
+
   // Refresh after a mutation (delete / bulk move / bulk upload). If we were already
   // showing the full base (or a filter is active), re-pull everything so the view stays
   // consistent; otherwise just reload the first page.
@@ -235,7 +243,8 @@ export default function CandidatesList() {
     if (!newStage || selectedApps.length === 0) return;
     setBulkActionLoading(true);
     try {
-      const appsToMove = candidates.filter(c => selectedApps.includes(c.id));
+      // Only VISIBLE selected rows move — never rows hidden by the current filters.
+      const appsToMove = filteredCandidates.filter(c => selectedApps.includes(c.id));
 
       // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
       // BEFORE moving anyone — never leave a batch half-notified.

@@ -20,7 +20,7 @@ export default function KanbanBoard() {
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
   // CV preview modal (floating window) — shown in-place instead of a new tab.
-  const [cvPreview, setCvPreview] = useState<{ url: string; name: string } | null>(null);
+  const [cvPreview, setCvPreview] = useState<{ url: string; name: string; fileType?: string } | null>(null);
 
   // Bulk selection state
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
@@ -72,6 +72,13 @@ export default function KanbanBoard() {
 
     return () => unsubscribe();
   }, [vacancyId]);
+
+  // Changing the search clears the selection: otherwise cards selected under a
+  // previous search stay silently selected while INVISIBLE, and a bulk move would
+  // move (and WhatsApp-message) candidates the recruiter can't see.
+  useEffect(() => {
+    setSelectedApps(new Set());
+  }, [searchTerm]);
 
   const toggleSelection = (appId: string) => {
     setSelectedApps(prev => {
@@ -150,7 +157,10 @@ export default function KanbanBoard() {
           }
         } catch (autoErr) {
           console.error(`Automation failed for ${movedApp.id} (stage saved anyway):`, autoErr);
-          failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: '—', vars: { nombre: movedApp.candidateName, vacante: vacancy?.title, link: '', email: '' } });
+          // Keep the real phone (from the already-loaded candidates map) so the
+          // report's retry can actually resend instead of failing on '—' forever.
+          const knownPhone = candidates[movedApp.candidateId]?.phone || '';
+          failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: knownPhone || '—', vars: { nombre: movedApp.candidateName, vacante: vacancy?.title, link: '', email: candidates[movedApp.candidateId]?.email || '' } });
         }
       } catch (err) {
         console.error(`Error moving application ${movedApp.id}:`, err);
@@ -408,7 +418,7 @@ export default function KanbanBoard() {
     items: filteredApplications
       .filter(app => app.stage === stage)
       .sort((a, b) => getKanbanOrder(a) - getKanbanOrder(b))
-  })).filter(col => col.items.length > 0 || ['Nuevo', 'Aplicó', 'Precalificado', 'Revisión humana', 'Entrevista presencial', 'Contratado', 'Descartado'].includes(col.id)); // Show populated columns + some default ones
+  })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
     <div className="h-[calc(100vh-5rem)] lg:h-[calc(100vh-8rem)] flex flex-col animate-fade-in relative">
@@ -571,10 +581,10 @@ export default function KanbanBoard() {
                                       onMouseDown={(e) => e.stopPropagation()}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato' });
+                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato', fileType: candidates[item.candidateId]?.cvFileType || item.cvFileType });
                                       }}
                                       disabled={!cvUrl}
-                                      title={cvUrl ? 'Abrir currículum en una pestaña nueva' : 'CV aún no disponible'}
+                                      title={cvUrl ? 'Ver el currículum en una ventana' : 'CV aún no disponible'}
                                       className={`mt-3 w-full flex items-center justify-center gap-1.5 text-xs font-bold py-2 rounded-lg transition-colors ${
                                         cvUrl
                                           ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
@@ -685,7 +695,7 @@ export default function KanbanBoard() {
                   </div>
                   <h3 className="font-bold text-slate-800 mb-1">Haz clic para buscar los archivos</h3>
                   <p className="text-sm text-slate-500">Puedes seleccionar hasta 50 archivos a la vez</p>
-                  <p className="text-xs text-slate-400 mt-2">Formatos sportados: .pdf, .doc, .docx</p>
+                  <p className="text-xs text-slate-400 mt-2">Formatos soportados: .pdf, .doc, .docx</p>
                 </div>
               )}
             </div>
@@ -739,7 +749,13 @@ export default function KanbanBoard() {
           </div>
           <div className="flex-1 bg-slate-100 min-h-0">
             {cvPreview && (
-              <iframe src={cvPreview.url} title="Currículum" className="w-full h-full border-0" />
+              <iframe
+                src={cvPreview.fileType?.includes('word') || cvPreview.fileType === 'application/msword'
+                  ? `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(cvPreview.url)}`
+                  : cvPreview.url}
+                title="Currículum"
+                className="w-full h-full border-0"
+              />
             )}
           </div>
         </div>

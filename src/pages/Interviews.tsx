@@ -85,7 +85,9 @@ export default function Interviews() {
   const openAddParticipantModal = async (sessionId: string, vacancyId: string) => {
     setSelectedSessionId(sessionId);
     setShowAddModal(true);
-    
+    // Clear the PREVIOUS session's list while loading (it showed stale entries).
+    setAvailableCandidates([]);
+
     // Fetch candidates in "Convocado a entrevista" stage
     let qApps;
     if (vacancyId) {
@@ -93,9 +95,14 @@ export default function Interviews() {
     } else {
       qApps = query(collection(db, 'applications'), where('stage', '==', 'Convocado a entrevista'));
     }
-    
+
     const snap = await getDocs(qApps);
-    setAvailableCandidates(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+    // Exclude candidates ALREADY in this session — re-opening the modal used to offer
+    // them again, creating duplicate participants and duplicate WhatsApp invitations.
+    const alreadyIn = new Set((participants[sessionId] || []).map((p: any) => p.applicationId));
+    setAvailableCandidates(snap.docs
+      .map(d => ({ id: d.id, ...(d.data() as any) }))
+      .filter(c => !alreadyIn.has(c.id)));
   };
 
   const handleAddParticipant = async (appId: string, candidateId: string, candidateName: string) => {

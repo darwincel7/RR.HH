@@ -161,7 +161,7 @@ export default function Dashboard() {
           </div>
           <div className="mt-5 relative z-10">
             <p className="text-4xl font-extrabold text-slate-900">{metrics.totalCandidates}</p>
-            <p className="text-xs font-bold text-blue-600/70 uppercase tracking-widest mt-1">Total Candidatos</p>
+            <p className="text-xs font-bold text-blue-600/70 uppercase tracking-widest mt-1">Postulaciones</p>
           </div>
         </div>
 
@@ -277,7 +277,7 @@ export default function Dashboard() {
         <motion.div variants={itemVariants} className="bg-white rounded-3xl shadow-sm border border-slate-100 p-8 flex flex-col overflow-hidden">
           <div className="flex justify-between items-center mb-8">
             <h2 className="text-sm font-bold text-slate-800 uppercase tracking-widest">Actividad Reciente</h2>
-            <Link to="/vacancies" className="text-[10px] font-bold text-indigo-500 hover:text-indigo-600 uppercase tracking-widest transition-colors flex items-center bg-indigo-50 px-2 py-1 rounded-full">
+            <Link to="/candidates" className="text-[10px] font-bold text-indigo-500 hover:text-indigo-600 uppercase tracking-widest transition-colors flex items-center bg-indigo-50 px-2 py-1 rounded-full">
               Ver todo <ArrowRight className="w-3 h-3 ml-1" />
             </Link>
           </div>
@@ -297,7 +297,7 @@ export default function Dashboard() {
                       <div className="flex items-center gap-2 flex-shrink-0">
                          {app.scoreSummary && (
                           <span className="text-[10px] font-black text-amber-600 bg-amber-50 px-2.5 py-1 rounded-lg">
-                            {(app.scoreSummary * 20).toFixed(0)} PTS
+                            ⭐ {app.scoreSummary} / 5
                           </span>
                         )}
                       </div>

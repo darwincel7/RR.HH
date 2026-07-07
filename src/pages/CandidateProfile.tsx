@@ -13,6 +13,7 @@ export default function CandidateProfile() {
   const navigate = useNavigate();
   const [candidate, setCandidate] = useState<any>(null);
   const [application, setApplication] = useState<any>(null);
+  const [allApplications, setAllApplications] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [updatingStage, setUpdatingStage] = useState(false);
   
@@ -56,14 +57,33 @@ export default function CandidateProfile() {
 
         const q = query(collection(db, 'applications'), where('candidateId', '==', candidateId));
         const appSnap = await getDocs(q);
+        let primaryApp: any = null;
         if (!appSnap.empty) {
-          const appData = { id: appSnap.docs[0].id, ...appSnap.docs[0].data() } as any;
-          setApplication(appData);
-          if (appData.interviewObservation) {
-            setInterviewObs(appData.interviewObservation);
+          // ALL of the candidate's applications, newest first, enriched with the
+          // vacancy title. Previously docs[0] was an ARBITRARY application when the
+          // candidate applied to several vacancies — the profile could show (and
+          // stage-change!) the wrong one. Now the newest is default and a selector
+          // lets the recruiter switch explicitly.
+          const apps = appSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+          const ms = (t: any) => (t?.toMillis ? t.toMillis() : 0);
+          apps.sort((a, b) => ms(b.submittedAt) - ms(a.submittedAt));
+          const vacIds = [...new Set(apps.map(a => a.vacancyId).filter(Boolean))];
+          const vacMap: Record<string, string> = {};
+          await Promise.all(vacIds.map(async (vid: string) => {
+            try {
+              const vs = await getDoc(doc(db, 'vacancies', vid));
+              if (vs.exists()) vacMap[vid] = vs.data().title;
+            } catch { /* el título es opcional */ }
+          }));
+          apps.forEach(a => { a.vacancyTitle = vacMap[a.vacancyId] || (a.vacancyId === 'bulk_upload' ? 'Subida masiva de CVs' : 'Vacante'); });
+          setAllApplications(apps);
+          primaryApp = apps[0];
+          setApplication(primaryApp);
+          if (primaryApp.interviewObservation) {
+            setInterviewObs(primaryApp.interviewObservation);
           }
-          if (appData.interviewScorecard) {
-            setScorecardData(appData.interviewScorecard);
+          if (primaryApp.interviewScorecard) {
+            setScorecardData(primaryApp.interviewScorecard);
           }
         }
 
@@ -75,7 +95,7 @@ export default function CandidateProfile() {
           setScorecardTemplate(template);
           
           // If no existing scorecard data, initialize metrics from template
-          if (!appSnap.empty && !appSnap.docs[0].data().interviewScorecard && template.metrics) {
+          if (primaryApp && !primaryApp.interviewScorecard && template.metrics) {
             const initialMetrics: Record<string, number> = {};
             template.metrics.forEach((m: string) => {
               initialMetrics[m] = 30;
@@ -239,7 +259,7 @@ export default function CandidateProfile() {
 
       const r = await sendWhatsAppAutomation(candidate.phone, newStage, {
         nombre: candidate.fullName || candidate.name,
-        vacante: 'la vacante', // We don't have the title here directly, but we can default it
+        vacante: application?.vacancyTitle || 'la vacante',
         link,
         email: candidate.email
       });
@@ -346,7 +366,8 @@ export default function CandidateProfile() {
       await updateDoc(doc(db, 'applications', application.id), {
         testResults: updatedTestResults
       });
-      
+      setApplication({ ...application, testResults: updatedTestResults });
+
       alert('Test reevaluado con éxito');
     } catch (error) {
       console.error("Error reevaluating test:", error);
@@ -381,7 +402,8 @@ export default function CandidateProfile() {
       await updateDoc(doc(db, 'applications', application.id), {
         stage2Scoring: scoringData
       });
-      
+      setApplication({ ...application, stage2Scoring: scoringData });
+
       alert('Etapa 2 reevaluada con éxito');
     } catch (error) {
       console.error("Error reevaluating stage 2:", error);
@@ -489,7 +511,7 @@ export default function CandidateProfile() {
                 >
                   <FileText className="w-4 h-4 lg:w-5 lg:h-5 mr-2" /> Evaluar Entrevista
                 </button>
-                {candidate.aiStatus === 'pending' && (
+                {(candidate.aiStatus === 'pending' || candidate.aiStatus === 'error') && (
                   <button 
                     onClick={analyzeCVWithAI}
                     disabled={analyzingCV}
@@ -505,6 +527,32 @@ export default function CandidateProfile() {
 
           {application && (
             <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6">
+              {/* This candidate applied to more than one vacancy: make WHICH
+                  application is being managed explicit and switchable. */}
+              {allApplications.length > 1 && (
+                <div className="mb-4">
+                  <label className="block text-[10px] font-bold text-amber-600 uppercase tracking-widest mb-1.5">
+                    ⚠️ {allApplications.length} postulaciones — estás gestionando:
+                  </label>
+                  <select
+                    value={application.id}
+                    onChange={(e) => {
+                      const next = allApplications.find(a => a.id === e.target.value);
+                      if (!next) return;
+                      setApplication(next);
+                      setInterviewObs(next.interviewObservation || { score: 0, notes: '' });
+                      if (next.interviewScorecard) setScorecardData(next.interviewScorecard);
+                    }}
+                    className="w-full p-2.5 bg-amber-50 border border-amber-200 rounded-xl font-bold text-slate-700 text-sm focus:ring-2 focus:ring-amber-400 outline-none"
+                  >
+                    {allApplications.map(a => (
+                      <option key={a.id} value={a.id}>
+                        {a.vacancyTitle} — etapa: {a.stage}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="flex items-center justify-between mb-3 lg:mb-4">
                 <h3 className="text-[10px] lg:text-sm font-display font-bold text-slate-400 uppercase tracking-widest">Gestión de Etapa</h3>
                 <button 
@@ -535,7 +583,7 @@ export default function CandidateProfile() {
           <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6 flex flex-col h-[350px] lg:h-[400px]">
             <h3 className="text-[10px] lg:text-sm font-display font-bold text-slate-400 uppercase tracking-widest mb-3 lg:mb-4 flex items-center justify-between">
               <span className="flex items-center">
-                <div className={`w-2 h-2 rounded-full mr-2 ${wsStatus?.connected ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></div>
+                <div className={`w-2 h-2 rounded-full mr-2 ${wsStatus?.status === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></div>
                 Chat WhatsApp
               </span>
             </h3>
@@ -634,7 +682,7 @@ export default function CandidateProfile() {
                     <Briefcase className="w-4 h-4 mr-2 text-blue-400" /> Experiencia detectada
                   </h3>
                   <p className="text-2xl lg:text-3xl font-display font-black text-slate-800">
-                    {ai.yearsOfExperience || 0} <span className="text-sm lg:text-lg text-slate-400 font-medium">años</span>
+                    {ai.experience_total_years || 0} <span className="text-sm lg:text-lg text-slate-400 font-medium">años</span>
                   </p>
                 </div>
               </div>

@@ -60,7 +60,7 @@ export default function Stage2Form() {
           // Fallback to the requested template
           setQuestions([
             { id: 'q1', text: '👤 Nombre y Apellido', type: 'text' },
-            { id: 'q2', text: '📧 Número de Teléfono (Whatsapp)', type: 'text' },
+            { id: 'q2', text: '📱 Número de Teléfono (Whatsapp)', type: 'text' },
             { id: 'q3', text: '🏆 Menciona dos logros importantes y por qué te enorgullecen', type: 'textarea' },
             { id: 'q4', text: '🔄 Si pudieras cambiar algo de tu trabajo anterior ¿Qué sería y por qué?', type: 'textarea' },
             { id: 'q5', text: '🎯 ¿Hacia dónde te gustaría que fuera tu carrera en cinco años?', type: 'textarea' },
@@ -70,6 +70,7 @@ export default function Stage2Form() {
         }
       } catch (error) {
         console.error("Error fetching data:", error);
+        setErrorMsg('No pudimos cargar el formulario. Por favor, recarga la página en unos segundos.');
       } finally {
         setLoading(false);
       }
@@ -235,12 +236,12 @@ export default function Stage2Form() {
           )}
         </div>
 
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">PLANTILLA: Formulario para entrevista</h1>
-        <p className="text-gray-600 mb-8 italic">Este formulario está diseñado para recopilar información clave de los candidatos durante el proceso de entrevista. Nos permitirá conocer mejor tu perfil, experiencia, motivaciones y nivel de alineación con los valores y necesidades de nuestra empresa.</p>
+        <h1 className="text-2xl font-bold text-gray-900 mb-2">Formulario de la siguiente etapa</h1>
+        <p className="text-gray-600 mb-8 italic">¡Felicidades por avanzar en el proceso! Responde estas preguntas con calma y honestidad: nos ayudan a conocer mejor tu perfil, experiencia y motivaciones.</p>
 
         {errorMsg && <p className="text-red-600 mb-4 bg-red-50 p-4 rounded-md">{errorMsg}</p>}
 
-        {questions.length > 0 && (
+        {application && questions.length > 0 && (
           <form onSubmit={handleSubmit} className="space-y-6">
             
             {/* Progress indicator */}

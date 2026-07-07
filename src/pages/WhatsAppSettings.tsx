@@ -587,13 +587,6 @@ export default function WhatsAppSettings() {
           </div>
         </div>
 
-        {success && (
-          <div className="bg-green-50 text-green-700 p-4 border-b border-green-100 flex items-center text-sm font-bold">
-            <CheckCircle className="w-4 h-4 mr-2" />
-            Plantillas guardadas exitosamente.
-          </div>
-        )}
-
         <div className="p-6 space-y-6">
           <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg">
             <h3 className="text-sm font-bold text-blue-900 mb-2">Variables dinámicas disponibles:</h3>

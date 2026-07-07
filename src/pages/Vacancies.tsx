@@ -109,8 +109,8 @@ export default function Vacancies() {
     <div className="animate-slide-up">
       <div className="flex justify-between items-center mb-10">
         <div>
-          <h1 className="text-3xl font-display font-bold text-slate-900 tracking-tight">Vacantes Activas</h1>
-          <p className="text-slate-500 mt-1">Gestiona los embudos de contratación y publica nuevas posiciones.</p>
+          <h1 className="text-3xl font-display font-bold text-slate-900 tracking-tight">Vacantes</h1>
+          <p className="text-slate-500 mt-1">Gestiona los embudos de contratación y publica nuevas posiciones. Toca la etiqueta Activa/Inactiva para publicarla u ocultarla del portal.</p>
         </div>
         <button
           onClick={() => setIsCreating(true)}
@@ -137,9 +137,21 @@ export default function Vacancies() {
               <div>
                 <div className="flex items-center gap-3 mb-1">
                   <h3 className="text-lg font-display font-bold text-slate-900 group-hover:text-violet-600 transition-colors">{vacancy.title}</h3>
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider ${vacancy.active ? 'bg-emerald-50 text-emerald-600' : 'bg-slate-100 text-slate-600'}`}>
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await updateDoc(doc(db, 'vacancies', vacancy.id), { active: !vacancy.active });
+                      } catch (err) {
+                        console.error('No se pudo cambiar el estado de la vacante:', err);
+                        alert('No se pudo cambiar el estado de la vacante.');
+                      }
+                    }}
+                    title={vacancy.active ? 'Clic para desactivar (se oculta del portal público)' : 'Clic para activar (se publica en el portal)'}
+                    className={`text-[10px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider transition-colors cursor-pointer ${vacancy.active ? 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                  >
                     {vacancy.active ? 'Activa' : 'Inactiva'}
-                  </span>
+                  </button>
                 </div>
                 <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-slate-500 font-medium">
                   <span>Código: {vacancy.code}</span>

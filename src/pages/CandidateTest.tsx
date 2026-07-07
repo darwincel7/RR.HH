@@ -18,7 +18,8 @@ export default function CandidateTest() {
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({});
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(-1); // -1 means intro screen
   const [showMemoryWords, setShowMemoryWords] = useState(false);
-  const [memoryTimeLeft, setMemoryTimeLeft] = useState(5);
+  const [memoryWordsShown, setMemoryWordsShown] = useState(false); // only once per attempt
+  const [memoryTimeLeft, setMemoryTimeLeft] = useState(8);
 
   // Load saved answers from localStorage
   useEffect(() => {
@@ -32,7 +33,7 @@ export default function CandidateTest() {
           const parsed = JSON.parse(saved);
           if (parsed.answers) setAnswers(parsed.answers);
           // Only restore index if it fits within the new question array bounds
-          if (parsed.currentIndex !== undefined && parsed.currentIndex < 62) {
+          if (parsed.currentIndex !== undefined && parsed.currentIndex >= -1) {
              setCurrentQuestionIndex(parsed.currentIndex);
           }
         } catch (e) {
@@ -61,6 +62,15 @@ export default function CandidateTest() {
     }
     return () => clearTimeout(timer);
   }, [showMemoryWords, memoryTimeLeft]);
+
+  // A restored index may exceed the loaded question set (e.g. a shorter custom test):
+  // clamp it so questions[currentQuestionIndex] can never be undefined (white screen).
+  useEffect(() => {
+    if (questions.length > 0 && currentQuestionIndex >= questions.length) {
+      setCurrentQuestionIndex(questions.length - 1);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [questions.length]);
 
   // Initialize default answers for specific question types
   useEffect(() => {
@@ -110,6 +120,7 @@ export default function CandidateTest() {
         }
       } catch (error) {
         console.error("Error fetching data:", error);
+        setErrorMsg('No pudimos cargar el test. Por favor, recarga la página en unos segundos.');
       } finally {
         setLoading(false);
       }
@@ -121,9 +132,12 @@ export default function CandidateTest() {
     if (currentQuestionIndex < questions.length - 1) {
       const nextIndex = currentQuestionIndex + 1;
       setCurrentQuestionIndex(nextIndex);
-      if (questions[nextIndex]?.id === 'A11' || questions[nextIndex]?.id === 'C11') {
+      // Show the memorization screen only ONCE per attempt: navigating back and
+      // forth must not let the candidate re-view the words.
+      if ((questions[nextIndex]?.id === 'A11' || questions[nextIndex]?.id === 'C11') && !memoryWordsShown) {
+        setMemoryWordsShown(true);
         setShowMemoryWords(true);
-        setMemoryTimeLeft(5);
+        setMemoryTimeLeft(8);
       }
     } else {
       handleSubmit();
@@ -280,9 +294,13 @@ export default function CandidateTest() {
           )}
         </div>
 
-        {errorMsg && <p className="text-red-600 mb-4">{errorMsg}</p>}
+        {errorMsg && <p className="text-red-600 mb-4 bg-red-50 p-4 rounded-md">{errorMsg}</p>}
 
-        {currentQuestionIndex === -1 ? (
+        {(errorMsg && !application) || questions.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">
+            {!errorMsg && <p>Cargando el test…</p>}
+          </div>
+        ) : currentQuestionIndex === -1 ? (
           <div className="text-center space-y-6">
             <h1 className="text-2xl font-bold text-gray-900">Test de Juicio Situacional</h1>
             <div className="bg-blue-50 p-6 rounded-lg text-blue-800 text-left">
@@ -325,7 +343,9 @@ export default function CandidateTest() {
             ) : (
               <div>
                 <label className="block text-lg font-medium text-gray-900 mb-4">
-                  {questions[currentQuestionIndex].text}
+                  {(questions[currentQuestionIndex].id === 'A11' || questions[currentQuestionIndex].id === 'C11')
+                    ? '¿Cuáles de estas palabras recuerdas haber visto? Selecciona las que viste.'
+                    : questions[currentQuestionIndex].text}
                 </label>
                 {renderInput(questions[currentQuestionIndex])}
               </div>
@@ -343,7 +363,7 @@ export default function CandidateTest() {
               <button
                 type="button"
                 onClick={handleNext}
-                disabled={submitting || showMemoryWords || !questions[currentQuestionIndex] || !answers[questions[currentQuestionIndex].id]}
+                disabled={submitting || showMemoryWords || !questions[currentQuestionIndex] || (Array.isArray(answers[questions[currentQuestionIndex].id]) ? (answers[questions[currentQuestionIndex].id] as any[]).length === 0 : !answers[questions[currentQuestionIndex].id])}
                 className="flex justify-center py-2 px-6 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
               >
                 {submitting ? (

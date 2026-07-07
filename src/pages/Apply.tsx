@@ -34,7 +34,7 @@ export default function Apply() {
         setProgress((oldProgress) => {
           if (oldProgress >= 95) {
             clearInterval(timer);
-            return 95;
+            return oldProgress; // keep 100% if the submit already finished
           }
           const diff = Math.floor(Math.random() * 5) + 3; 
           const finalDiff = oldProgress > 80 ? Math.floor(Math.random() * 2) + 1 : diff;
@@ -119,11 +119,11 @@ export default function Apply() {
       const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/webp'];
       
       if (!allowedTypes.includes(selectedFile.type)) {
-        setErrorMsg('Por favor, sube un archivo PDF, Word (doc/docx) o Imagen (jpg/png).');
+        setErrorMsg(file ? 'Ese archivo no es válido; se mantiene tu CV anterior. Formatos: PDF, Word o imagen (JPG, PNG, WebP).' : 'Por favor, sube un archivo PDF, Word (doc/docx) o imagen (JPG, PNG o WebP).');
         return;
       }
       if (selectedFile.size >= 20 * 1024 * 1024) {
-        setErrorMsg('El archivo no debe superar los 20MB.');
+        setErrorMsg('El archivo debe pesar menos de 20MB.');
         return;
       }
       setFile(selectedFile);
@@ -144,11 +144,11 @@ export default function Apply() {
       const allowedTypes = ['application/pdf', 'application/msword', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'image/jpeg', 'image/png', 'image/webp'];
       
       if (!allowedTypes.includes(selectedFile.type)) {
-        setErrorMsg('Por favor, sube un archivo PDF, Word (doc/docx) o Imagen (jpg/png).');
+        setErrorMsg(file ? 'Ese archivo no es válido; se mantiene tu CV anterior. Formatos: PDF, Word o imagen (JPG, PNG, WebP).' : 'Por favor, sube un archivo PDF, Word (doc/docx) o imagen (JPG, PNG o WebP).');
         return;
       }
       if (selectedFile.size >= 20 * 1024 * 1024) {
-        setErrorMsg('El archivo no debe superar los 20MB.');
+        setErrorMsg('El archivo debe pesar menos de 20MB.');
         return;
       }
       setFile(selectedFile);
@@ -160,6 +160,13 @@ export default function Apply() {
     e.preventDefault();
     if (!name || !phone) {
       setErrorMsg('Por favor completa tu nombre y teléfono.');
+      return;
+    }
+    // The WhatsApp number is our main contact channel — a typo makes the candidate
+    // permanently unreachable. Require a plausible number (8-15 digits).
+    const phoneDigits = phone.replace(/\D/g, '');
+    if (phoneDigits.length < 8 || phoneDigits.length > 15) {
+      setErrorMsg('Revisa tu número de WhatsApp: debe tener entre 8 y 15 dígitos (ej. 809-555-1234).');
       return;
     }
     setErrorMsg('');
@@ -239,7 +246,10 @@ export default function Apply() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-white px-4">
         <div className="bg-white p-8 rounded-lg shadow-md max-w-md w-full text-center border border-slate-100">
-          <p className="text-red-600 font-medium">{errorMsg}</p>
+          <p className="text-red-600 font-medium mb-6">{errorMsg}</p>
+          <a href="/careers" className="inline-block px-6 py-3 bg-violet-700 text-white font-bold rounded-xl hover:bg-violet-800 transition-colors">
+            Ver otras vacantes
+          </a>
         </div>
       </div>
     );
@@ -358,7 +368,7 @@ export default function Apply() {
 
               <div>
                 <label htmlFor="phone" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                  NUMERO DE WHATSAPP <span className="text-red-500">*</span>
+                  NÚMERO DE WHATSAPP <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="tel"
@@ -391,7 +401,7 @@ export default function Apply() {
 
               <div>
                 <label htmlFor="email" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                  CORREO ELECTRONICO <span className="text-red-500">*</span>
+                  CORREO ELECTRÓNICO <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="email"
@@ -405,7 +415,7 @@ export default function Apply() {
 
               <div>
                 <label htmlFor="city" className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                  DONDE VIVES? <span className="text-red-500">*</span>
+                  ¿DÓNDE VIVES? <span className="text-red-500">*</span>
                 </label>
                 <input
                   type="text"
@@ -419,7 +429,7 @@ export default function Apply() {
 
               <div>
                 <label className="block text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">
-                  SUBE TU CURRICULUM AQUI <span className="text-red-500">*</span>
+                  SUBE TU CURRÍCULUM AQUÍ <span className="text-red-500">*</span>
                 </label>
                 
                 <div 
@@ -434,7 +444,7 @@ export default function Apply() {
                       Suelta los archivos aquí o busca
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-2">PDF, Word, JPG, PNG hasta 20MB</p>
+                  <p className="text-xs text-slate-400 mt-2">PDF, Word, JPG, PNG o WebP — menos de 20MB</p>
                   
                   <input
                     ref={fileInputRef}
