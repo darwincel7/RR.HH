@@ -12,14 +12,31 @@ export default function DashboardLayout() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
 
+  // Logging out is an explicit STAFF action → send them back to the staff login,
+  // never to the public careers portal. A short-lived flag makes the post-logout
+  // redirect deterministic despite Firebase's async auth-state update (setting the
+  // flag here and reading it in the !user branch avoids a navigate/render race).
+  const handleLogout = () => {
+    try { sessionStorage.setItem('staffLoggedOut', '1'); } catch { /* storage disabled */ }
+    logout();
+  };
+
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center bg-slate-50">Loading...</div>;
   }
 
-  // The bare domain "/" is where candidates land (links shared on WhatsApp/social).
-  // They must reach the PUBLIC careers portal — never a login wall. Deep panel URLs
-  // (/candidates, /settings…) are only ever used by staff, so those still go to login.
   if (!user) {
+    // Staff who just clicked "Cerrar sesión" go straight to /login.
+    let staffLoggedOut = false;
+    try {
+      staffLoggedOut = sessionStorage.getItem('staffLoggedOut') === '1';
+      if (staffLoggedOut) sessionStorage.removeItem('staffLoggedOut');
+    } catch { /* storage disabled */ }
+    if (staffLoggedOut) return <Navigate to="/login" replace />;
+
+    // The bare domain "/" is where candidates land (links shared on WhatsApp/social).
+    // They must reach the PUBLIC careers portal — never a login wall. Deep panel URLs
+    // (/candidates, /settings…) are only ever used by staff, so those still go to login.
     const isBareRoot = location.pathname === '/';
     return <Navigate to={isBareRoot ? '/careers' : '/login'} state={{ from: location }} replace />;
   }
@@ -70,7 +87,7 @@ export default function DashboardLayout() {
             Iniciaste sesión como <strong className="text-slate-600">{user.email}</strong>.
           </p>
           <button
-            onClick={logout}
+            onClick={handleLogout}
             className="inline-flex items-center px-5 py-2.5 rounded-xl bg-slate-100 text-slate-700 font-bold hover:bg-slate-200 transition-colors"
           >
             <LogOut className="w-4 h-4 mr-2" /> Cerrar sesión
@@ -198,7 +215,7 @@ export default function DashboardLayout() {
               <div className="ml-3 w-full overflow-hidden">
                 <p className="text-sm font-medium text-slate-900 truncate">{user.displayName || 'Usuario'}</p>
                 <button
-                  onClick={logout}
+                  onClick={handleLogout}
                   className="text-xs font-medium text-slate-500 hover:text-red-500 flex items-center mt-1 transition-colors"
                 >
                   <LogOut className="w-3 h-3 mr-1" /> Cerrar sesión
