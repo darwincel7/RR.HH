@@ -98,12 +98,36 @@ let qrCode: string | null = null;
 let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disconnected';
 let isShuttingDown = false; // set on SIGTERM so we don't reconnect WhatsApp mid-shutdown
 
+// Recently sent messages, kept so WhatsApp's decryption-retry mechanism can ask us to
+// re-encrypt and resend one (see getMessage in makeWASocket). When a recipient's phone
+// can't decrypt a message (stale session, key rotation, a past storage failure), it
+// asks the sender to retry; without getMessage the request goes unanswered and the
+// recipient stays on "Esperando el mensaje. Esto puede tomar tiempo" FOREVER.
+const sentMessageStore = new Map<string, any>();
+const rememberSentMessage = (info: any) => {
+  const id = info?.key?.id;
+  if (!id || !info?.message) return;
+  sentMessageStore.set(id, info.message);
+  // FIFO cap — retry requests arrive within seconds/minutes of the send.
+  if (sentMessageStore.size > 500) {
+    const oldest = sentMessageStore.keys().next().value;
+    if (oldest !== undefined) sentMessageStore.delete(oldest);
+  }
+};
+
 // Custom Firestore auth state to ensure persistence across container restarts
 const useFirestoreAuthState = async (collectionName: string) => {
+  // Firestore document ids must not contain '/', but some Baileys key ids do
+  // (e.g. base64 app-state-sync-key ids). Those writes were rejected and only
+  // logged — the key silently never persisted, corrupting the Signal session
+  // (recipients then see an undecryptable "Esperando el mensaje"). Sanitize
+  // consistently on every read/write/delete.
+  const fixId = (id: string) => id.replace(/\//g, '__');
+
   const writeData = async (data: any, id: string) => {
     try {
       const str = JSON.stringify(data, BufferJSON.replacer);
-      await db.setDocData(collectionName, id, { data: str });
+      await db.setDocData(collectionName, fixId(id), { data: str });
     } catch (error) {
       console.error("Error saving WhatsApp auth state to Firestore:", error);
     }
@@ -111,7 +135,7 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const readData = async (id: string) => {
     try {
-      const docData = await db.getDocData(collectionName, id);
+      const docData = await db.getDocData(collectionName, fixId(id));
       if (docData && docData.data) {
         return JSON.parse(docData.data, BufferJSON.reviver);
       }
@@ -123,7 +147,7 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const removeData = async (id: string) => {
     try {
-      await db.deleteDocData(collectionName, id);
+      await db.deleteDocData(collectionName, fixId(id));
     } catch (error) {
       console.error("Error deleting WhatsApp auth state from Firestore:", error);
     }
@@ -184,7 +208,10 @@ async function connectToWhatsApp() {
       keys: makeCacheableSignalKeyStore(state.keys, logger as any),
     },
     logger: logger as any,
-    browser: ["ATS RRHH", "Chrome", "1.0.0"]
+    browser: ["ATS RRHH", "Chrome", "1.0.0"],
+    // Serve decryption-retry requests from the recent-sends store so failed
+    // deliveries heal automatically instead of hanging on "Esperando el mensaje".
+    getMessage: async (key: any) => sentMessageStore.get(key?.id) || undefined,
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -847,8 +874,9 @@ async function startServer() {
       }
 
       const formattedPhone = formatWhatsAppNumber(phone);
-      
-      await sock.sendMessage(formattedPhone, { text: message });
+
+      const info = await sock.sendMessage(formattedPhone, { text: message });
+      rememberSentMessage(info);
       res.json({ success: true });
     } catch (error) {
       console.error("Error sending WhatsApp:", error);
@@ -866,7 +894,8 @@ async function startServer() {
       if (!message) return res.json({ success: true, messageSent: false, reason: "No message provided" });
 
       const jid = formatWhatsAppNumber(phone);
-      await sock.sendMessage(jid, { text: message });
+      const info = await sock.sendMessage(jid, { text: message });
+      rememberSentMessage(info);
       return res.json({ success: true, messageSent: true });
     } catch (error) {
       console.error("Automation error:", error);
