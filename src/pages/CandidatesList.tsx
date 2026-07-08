@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
-import { sendWhatsAppAutomation, stageMayAutoSend, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -303,6 +303,8 @@ export default function CandidatesList() {
       if (failedSends.length > 0) {
         // Show exactly WHO didn't get the message, with one-click retry.
         setSendReport({ stage: newStage, sent: sentCount, failed: failedSends });
+      } else if (stageNeedsScheduling(newStage)) {
+        alert(`Candidatos movidos a "${newStage}". 📅 Para enviarles la invitación por WhatsApp con fecha y hora, agéndala en la página "Entrevistas".`);
       }
     } catch (error) {
       console.error("Error bulk moving candidates:", error);

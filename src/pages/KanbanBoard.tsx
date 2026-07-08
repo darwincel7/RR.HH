@@ -7,7 +7,7 @@ import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText } from 'lucide-react';
 
-import { sendWhatsAppAutomation, stageMayAutoSend, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 
@@ -174,11 +174,14 @@ export default function KanbanBoard() {
     if (failed.length > 0) {
       alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
     }
+    const scheduleNote = stageNeedsScheduling(targetStage)
+      ? `\n\n📅 Para enviarles la invitación por WhatsApp con fecha y hora, agéndala en la página "Entrevistas".`
+      : '';
     if (failedSends.length > 0) {
       // Show exactly WHO didn't get the message, with one-click retry.
       setSendReport({ stage: targetStage, sent: sentCount, failed: failedSends });
     } else if (failed.length === 0) {
-      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${sentCount > 0 ? ` ${sentCount} mensaje(s) de WhatsApp enviados.` : ''}`);
+      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${sentCount > 0 ? ` ${sentCount} mensaje(s) de WhatsApp enviados.` : ''}${scheduleNote}`);
     }
   };
 
@@ -377,6 +380,13 @@ export default function KanbanBoard() {
             alert('El candidato se movió, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
           }
         }
+      }
+
+      // Invitation stages send NOTHING here (they need a real date/hora). Tell the
+      // recruiter exactly where the invitation goes out, so the silent move isn't
+      // mistaken for a bug.
+      if (stageNeedsScheduling(newStage)) {
+        alert(`✅ ${movedApp.candidateName} quedó en "${newStage}".\n\n📅 Para enviarle la invitación por WhatsApp con la fecha y hora, agéndala en la página "Entrevistas" (menú lateral). Ahí se envía automáticamente con todos los datos.`);
       }
     } catch (error) {
       console.error("Error updating stage:", error);

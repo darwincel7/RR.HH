@@ -28,6 +28,14 @@ export function stageMayAutoSend(stage: string): boolean {
   return SEND_STAGES.includes(stage);
 }
 
+// Stages whose WhatsApp message is an INVITATION that needs a real date/time/place.
+// Moving a card here does NOT send anything (the invite goes out from the Entrevistas
+// page once the appointment is scheduled) — callers use this to guide the recruiter
+// there instead of leaving the move looking like nothing happened.
+export function stageNeedsScheduling(stage: string): boolean {
+  return ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'].includes(stage);
+}
+
 // Live connection check against the server socket status.
 export async function isWhatsAppConnected(): Promise<boolean> {
   try {
