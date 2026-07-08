@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Loader2, CheckCircle, Send, Building2 } from 'lucide-react';
+import SubmitOverlay from '../components/SubmitOverlay';
 import { masterTestQuestions, Question } from '../data/testQuestions';
 
 export default function CandidateTest() {
@@ -88,31 +89,42 @@ export default function CandidateTest() {
   useEffect(() => {
     async function fetchAppAndSettings() {
       if (!applicationId) return;
+      // FAST PATH: one warm server call — no client Firestore cold-start, no auth.
       try {
-        // Fetch Company Branding
-        const companyRef = doc(db, 'settings', 'company');
-        const companySnap = await getDoc(companyRef);
-        if (companySnap.exists()) {
-          setCompany({
-            name: companySnap.data().name || 'AuraATS',
-            logoUrl: companySnap.data().logoUrl || ''
-          });
+        const res = await fetch(`/api/public/form-data/test/${encodeURIComponent(applicationId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!data.valid) {
+            setErrorMsg('El link del test no es válido.');
+          } else {
+            if (data.company) setCompany({ name: data.company.name || 'AuraATS', logoUrl: data.company.logoUrl || '' });
+            setApplication({ testResults: data.completed ? true : undefined });
+            if (data.completed) setSuccess(true);
+            // null → use the bundled master question set (kept off the wire).
+            setQuestions(Array.isArray(data.questions) && data.questions.length > 0 ? data.questions : masterTestQuestions);
+          }
+          setLoading(false);
+          return;
         }
+      } catch (err) {
+        console.warn('form-data endpoint failed, falling back to Firestore:', err);
+      }
 
-        const docRef = doc(db, 'applications', applicationId);
-        const docSnap = await getDoc(docRef);
+      // FALLBACK: direct Firestore reads (e.g. server restarting).
+      try {
+        const companySnap = await getDoc(doc(db, 'settings', 'company'));
+        if (companySnap.exists()) {
+          setCompany({ name: companySnap.data().name || 'AuraATS', logoUrl: companySnap.data().logoUrl || '' });
+        }
+        const docSnap = await getDoc(doc(db, 'applications', applicationId));
         if (docSnap.exists()) {
           const appData = docSnap.data();
           setApplication(appData);
-          if (appData.testResults) {
-            setSuccess(true); // Show success screen if already completed
-          }
+          if (appData.testResults) setSuccess(true);
         } else {
           setErrorMsg('El link del test no es válido.');
         }
-
-        const settingsRef = doc(db, 'settings', 'forms');
-        const settingsSnap = await getDoc(settingsRef);
+        const settingsSnap = await getDoc(doc(db, 'settings', 'forms'));
         if (settingsSnap.exists() && settingsSnap.data().testQuestions && !settingsSnap.data().testQuestions.some((q: any) => q.id === 'C1' || q.id === 'q1')) {
           setQuestions(settingsSnap.data().testQuestions);
         } else {
@@ -126,6 +138,7 @@ export default function CandidateTest() {
       }
     }
     fetchAppAndSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applicationId]);
 
   const handleNext = () => {
@@ -268,7 +281,12 @@ export default function CandidateTest() {
     }
   };
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (loading) return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 gap-4">
+      <Loader2 className="w-10 h-10 animate-spin text-violet-600" />
+      <p className="text-sm text-slate-500 font-medium">Cargando tu test…</p>
+    </div>
+  );
   if (success) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="bg-white p-8 rounded-lg shadow-md text-center max-w-md">
@@ -281,6 +299,11 @@ export default function CandidateTest() {
 
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
+      <SubmitOverlay
+        show={submitting}
+        title="Enviando tu test…"
+        subtitle="Estamos evaluando tus respuestas con IA. Esto puede tardar unos segundos — no cierres esta página."
+      />
       <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-8">
         {/* Company Header */}
         <div className="flex items-center justify-center mb-8 pb-6 border-b border-gray-100">

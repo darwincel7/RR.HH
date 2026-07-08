@@ -3,6 +3,7 @@ import { useParams } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Loader2, CheckCircle, Send, Building2 } from 'lucide-react';
+import SubmitOverlay from '../components/SubmitOverlay';
 
 type QuestionType = 'text' | 'textarea' | 'multiple_choice' | 'scale';
 
@@ -26,47 +27,59 @@ export default function Stage2Form() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [currentStep, setCurrentStep] = useState(0);
 
+  // Built-in fallback question set (used when settings has no custom stage-2 questions).
+  const FALLBACK_QUESTIONS: Question[] = [
+    { id: 'q1', text: '👤 Nombre y Apellido', type: 'text' },
+    { id: 'q2', text: '📱 Número de Teléfono (Whatsapp)', type: 'text' },
+    { id: 'q3', text: '🏆 Menciona dos logros importantes y por qué te enorgullecen', type: 'textarea' },
+    { id: 'q4', text: '🔄 Si pudieras cambiar algo de tu trabajo anterior ¿Qué sería y por qué?', type: 'textarea' },
+    { id: 'q5', text: '🎯 ¿Hacia dónde te gustaría que fuera tu carrera en cinco años?', type: 'textarea' },
+    { id: 'q6', text: '🧗 Cuéntame sobre algún reto difícil que hayas enfrentado en el trabajo y cómo lo superaste.', type: 'textarea' },
+    { id: 'q7', text: '⚖️ ¿Qué harías si ves a un compañero haciendo trampa o un acto anti ético, como cogerse un artículo de la tienda?', type: 'textarea' },
+  ];
+
   useEffect(() => {
     async function fetchAppAndSettings() {
       if (!applicationId) return;
+      // FAST PATH: one warm server call — no client Firestore cold-start, no auth.
       try {
-        // Fetch Company Branding
-        const companyRef = doc(db, 'settings', 'company');
-        const companySnap = await getDoc(companyRef);
-        if (companySnap.exists()) {
-          setCompany({
-            name: companySnap.data().name || 'AuraATS',
-            logoUrl: companySnap.data().logoUrl || ''
-          });
+        const res = await fetch(`/api/public/form-data/eval/${encodeURIComponent(applicationId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (!data.valid) {
+            setErrorMsg('El link de evaluación no es válido.');
+          } else {
+            if (data.company) setCompany({ name: data.company.name || 'AuraATS', logoUrl: data.company.logoUrl || '' });
+            setApplication({ stage2Answers: data.completed ? true : undefined });
+            if (data.completed) setSuccess(true);
+            setQuestions(Array.isArray(data.questions) && data.questions.length > 0 ? data.questions : FALLBACK_QUESTIONS);
+          }
+          setLoading(false);
+          return;
         }
+      } catch (err) {
+        console.warn('form-data endpoint failed, falling back to Firestore:', err);
+      }
 
-        const docRef = doc(db, 'applications', applicationId);
-        const docSnap = await getDoc(docRef);
+      // FALLBACK: direct Firestore reads (e.g. server restarting).
+      try {
+        const companySnap = await getDoc(doc(db, 'settings', 'company'));
+        if (companySnap.exists()) {
+          setCompany({ name: companySnap.data().name || 'AuraATS', logoUrl: companySnap.data().logoUrl || '' });
+        }
+        const docSnap = await getDoc(doc(db, 'applications', applicationId));
         if (docSnap.exists()) {
           const appData = docSnap.data();
           setApplication(appData);
-          if (appData.stage2Answers) {
-            setSuccess(true); // Show success screen if already completed
-          }
+          if (appData.stage2Answers) setSuccess(true);
         } else {
           setErrorMsg('El link de evaluación no es válido.');
         }
-
-        const settingsRef = doc(db, 'settings', 'forms');
-        const settingsSnap = await getDoc(settingsRef);
+        const settingsSnap = await getDoc(doc(db, 'settings', 'forms'));
         if (settingsSnap.exists() && settingsSnap.data().stage2Questions && settingsSnap.data().stage2Questions.length > 0) {
           setQuestions(settingsSnap.data().stage2Questions);
         } else {
-          // Fallback to the requested template
-          setQuestions([
-            { id: 'q1', text: '👤 Nombre y Apellido', type: 'text' },
-            { id: 'q2', text: '📱 Número de Teléfono (Whatsapp)', type: 'text' },
-            { id: 'q3', text: '🏆 Menciona dos logros importantes y por qué te enorgullecen', type: 'textarea' },
-            { id: 'q4', text: '🔄 Si pudieras cambiar algo de tu trabajo anterior ¿Qué sería y por qué?', type: 'textarea' },
-            { id: 'q5', text: '🎯 ¿Hacia dónde te gustaría que fuera tu carrera en cinco años?', type: 'textarea' },
-            { id: 'q6', text: '🧗 Cuéntame sobre algún reto difícil que hayas enfrentado en el trabajo y cómo lo superaste.', type: 'textarea' },
-            { id: 'q7', text: '⚖️ ¿Qué harías si ves a un compañero haciendo trampa o un acto anti ético, como cogerse un artículo de la tienda?', type: 'textarea' }
-          ]);
+          setQuestions(FALLBACK_QUESTIONS);
         }
       } catch (error) {
         console.error("Error fetching data:", error);
@@ -76,6 +89,7 @@ export default function Stage2Form() {
       }
     }
     fetchAppAndSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applicationId]);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -210,7 +224,12 @@ export default function Stage2Form() {
     }
   };
 
-  if (loading) return <div className="min-h-screen flex items-center justify-center"><Loader2 className="animate-spin" /></div>;
+  if (loading) return (
+    <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50 gap-4">
+      <Loader2 className="w-10 h-10 animate-spin text-violet-600" />
+      <p className="text-sm text-slate-500 font-medium">Cargando tu formulario…</p>
+    </div>
+  );
   if (success) return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
       <div className="bg-white p-8 rounded-lg shadow-md text-center max-w-md">
@@ -223,6 +242,11 @@ export default function Stage2Form() {
 
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
+      <SubmitOverlay
+        show={submitting}
+        title="Enviando tus respuestas…"
+        subtitle="Estamos procesando y evaluando tu formulario. Esto puede tardar unos segundos — no cierres esta página."
+      />
       <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-8">
         {/* Company Header */}
         <div className="flex items-center justify-center mb-8 pb-6 border-b border-gray-100">

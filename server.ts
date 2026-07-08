@@ -739,6 +739,64 @@ async function startServer() {
     }
   });
 
+  // Fast, NO-AUTH data for the candidate forms (stage-2 eval + test). Serves the branding
+  // and questions from the warm Admin SDK in ONE request, so the candidate page doesn't
+  // pay the client Firestore SDK's cold-start connection (the "took a while to load"). The
+  // global settings are cached; only the per-link application doc is read each time.
+  let formSettingsCache: { company: any; forms: any; at: number } | null = null;
+  const FORM_SETTINGS_TTL = 60_000;
+  const getFormSettings = async () => {
+    if (formSettingsCache && Date.now() - formSettingsCache.at < FORM_SETTINGS_TTL) return formSettingsCache;
+    const [company, forms] = await Promise.all([
+      db.getDocData('settings', 'company'),
+      db.getDocData('settings', 'forms'),
+    ]);
+    formSettingsCache = { company, forms, at: Date.now() };
+    return formSettingsCache;
+  };
+  app.get("/api/public/form-data/:kind/:applicationId", async (req, res) => {
+    try {
+      const { kind, applicationId } = req.params;
+      if (kind !== 'eval' && kind !== 'test') return res.status(400).json({ error: 'Tipo inválido' });
+      if (!applicationId || applicationId.includes('/') || applicationId.length > 200) {
+        return res.status(400).json({ error: 'Link inválido' });
+      }
+      const [settings, application] = await Promise.all([
+        getFormSettings(),
+        db.getDocData('applications', applicationId),
+      ]);
+      if (!application) return res.json({ valid: false });
+
+      const company = settings.company
+        ? { name: settings.company.name || '', logoUrl: settings.company.logoUrl || '' }
+        : null;
+
+      if (kind === 'eval') {
+        const q = settings.forms?.stage2Questions;
+        return res.json({
+          valid: true,
+          completed: !!application.stage2Answers,
+          company,
+          // null → the client uses its built-in fallback question set.
+          questions: Array.isArray(q) && q.length > 0 ? q : null,
+        });
+      }
+      // kind === 'test'
+      const custom = settings.forms?.testQuestions;
+      const useCustom = Array.isArray(custom) && custom.length > 0 && !custom.some((x: any) => x.id === 'C1' || x.id === 'q1');
+      return res.json({
+        valid: true,
+        completed: !!application.testResults,
+        company,
+        // null → the client uses the bundled masterTestQuestions (kept off the wire).
+        questions: useCustom ? custom : null,
+      });
+    } catch (err) {
+      console.error('[form-data] error:', (err as any)?.message || err);
+      res.status(503).json({ error: 'No disponible temporalmente. Intenta de nuevo en unos segundos.' });
+    }
+  });
+
   // Public (rate-limited): create a job application. Deduplicates by normalized
   // phone/email so the same person can't flood the pipeline, writes candidate +
   // application atomically (no orphans), and sends the confirmation email.
