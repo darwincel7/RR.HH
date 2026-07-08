@@ -5,7 +5,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
-import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText } from 'lucide-react';
+import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle } from 'lucide-react';
 
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
@@ -34,6 +34,63 @@ export default function KanbanBoard() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  // Interview schedule for THIS vacancy (date + time + place). Set here once, then used
+  // to build the WhatsApp invitation and to block convoking with a past date.
+  const [schedDate, setSchedDate] = useState('');
+  const [schedTime, setSchedTime] = useState('');
+  const [schedLocation, setSchedLocation] = useState('');
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  // These stages send a dated interview invitation built from the schedule above.
+  const INTERVIEW_STAGES = ['Convocado a entrevista', 'Entrevista presencial'];
+  const isInterviewStage = (s: string) => INTERVIEW_STAGES.includes(s);
+
+  const scheduleDateTime = (): Date | null => {
+    if (!schedDate || !schedTime) return null;
+    const dt = new Date(`${schedDate}T${schedTime}`);
+    return isNaN(dt.getTime()) ? null : dt;
+  };
+  const scheduleStatus = () => {
+    const dt = scheduleDateTime();
+    if (!dt) return { isSet: false, isPast: false, valid: false, dt: null as Date | null };
+    const isPast = dt.getTime() <= Date.now();
+    return { isSet: true, isPast, valid: !isPast, dt };
+  };
+  const fmtFecha = (dt: Date) => dt.toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  const fmtHora = (dt: Date) => dt.toLocaleTimeString('es-DO', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const todayStr = new Date().toISOString().split('T')[0];
+
+  useEffect(() => {
+    const s = vacancy?.interviewSchedule;
+    if (s) {
+      setSchedDate(s.date || '');
+      setSchedTime(s.time || '');
+      setSchedLocation(s.location || '');
+    }
+  }, [vacancy]);
+
+  const saveSchedule = async () => {
+    if (!vacancyId) return;
+    setSavingSchedule(true);
+    try {
+      const interviewSchedule = { date: schedDate, time: schedTime, location: schedLocation };
+      await updateDoc(doc(db, 'vacancies', vacancyId), { interviewSchedule });
+      setVacancy((v: any) => ({ ...(v || {}), interviewSchedule }));
+    } catch (e) {
+      console.error('No se pudo guardar la agenda:', e);
+      alert('No se pudo guardar la agenda de entrevista.');
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
+
+  // Interview-schedule variables for the invitation message (empty for non-interview stages).
+  const interviewVarsFor = (stage: string) => {
+    if (!isInterviewStage(stage)) return {};
+    const st = scheduleStatus();
+    if (!st.dt) return {};
+    return { fecha: fmtFecha(st.dt), hora: fmtHora(st.dt), ubicacion: schedLocation };
+  };
 
   useEffect(() => {
     if (!vacancyId) return;
@@ -99,6 +156,18 @@ export default function KanbanBoard() {
     const appsToMove = applications.filter(a => selectedApps.has(a.id) && a.stage !== targetStage);
     if (appsToMove.length === 0) { setBulkActionLoading(false); return; }
 
+    // PRE-FLIGHT: convoking to an interview requires a future schedule set above.
+    if (isInterviewStage(targetStage)) {
+      const st = scheduleStatus();
+      if (!st.valid) {
+        alert(st.isPast
+          ? '⚠️ La fecha de entrevista de arriba YA PASÓ. Actualízala a una fecha futura antes de convocar.'
+          : '📅 Antes de convocar a entrevista, indica ARRIBA la fecha, hora y lugar (deben ser a futuro).');
+        setBulkActionLoading(false);
+        return;
+      }
+    }
+
     // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
     // BEFORE moving anyone. Better to stop the whole batch than to move candidates
     // whose messages will silently fail (a half-notified batch confuses the process).
@@ -145,7 +214,8 @@ export default function KanbanBoard() {
               nombre: movedApp.candidateName,
               vacante: vacancy?.title,
               link,
-              email: candSnap.data().email
+              email: candSnap.data().email,
+              ...interviewVarsFor(targetStage)
             };
             const r = await sendWhatsAppAutomation(phone, targetStage, vars);
             if (r.status === 'sent') sentCount++;
@@ -174,7 +244,7 @@ export default function KanbanBoard() {
     if (failed.length > 0) {
       alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
     }
-    const scheduleNote = stageNeedsScheduling(targetStage)
+    const scheduleNote = (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage))
       ? `\n\n📅 Para enviarles la invitación por WhatsApp con fecha y hora, agéndala en la página "Entrevistas".`
       : '';
     if (failedSends.length > 0) {
@@ -317,6 +387,18 @@ export default function KanbanBoard() {
     const movedApp = applications.find(a => a.id === draggableId);
     if (!movedApp) return;
 
+    // BLOCK convoking to an interview when the schedule above is missing or already past.
+    // Returning before the optimistic update makes the card snap back to its origin.
+    if (!sameColumn && isInterviewStage(newStage)) {
+      const st = scheduleStatus();
+      if (!st.valid) {
+        alert(st.isPast
+          ? '⚠️ La fecha de entrevista de arriba YA PASÓ.\n\nActualízala a una fecha y hora futuras antes de convocar candidatos a entrevista.'
+          : '📅 Antes de convocar a entrevista, indica ARRIBA la fecha, hora y lugar (deben ser a futuro). Así la invitación por WhatsApp saldrá con esos datos.');
+        return;
+      }
+    }
+
     // The card takes the exact slot where it was dropped: its new order is the
     // midpoint between its two neighbors in the destination column AS RENDERED
     // (filteredApplications — same list the Draggables index against — without the
@@ -373,20 +455,22 @@ export default function KanbanBoard() {
             nombre: movedApp.candidateName,
             vacante: vacancy?.title,
             link,
-            email: candSnap.data().email
+            email: candSnap.data().email,
+            ...interviewVarsFor(newStage)
           });
           // The move already succeeded; only warn (don't revert) if the message failed.
           if (r.status === 'failed') {
             alert('El candidato se movió, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+          } else if (r.status === 'sent' && isInterviewStage(newStage)) {
+            const st = scheduleStatus();
+            alert(`✅ Invitación enviada a ${movedApp.candidateName} por WhatsApp${st.dt ? `\n\n🗓️ ${fmtFecha(st.dt)} · 🕒 ${fmtHora(st.dt)}${schedLocation ? ` · 📍 ${schedLocation}` : ''}` : ''}`);
           }
         }
       }
 
-      // Invitation stages send NOTHING here (they need a real date/hora). Tell the
-      // recruiter exactly where the invitation goes out, so the silent move isn't
-      // mistaken for a bug.
-      if (stageNeedsScheduling(newStage)) {
-        alert(`✅ ${movedApp.candidateName} quedó en "${newStage}".\n\n📅 Para enviarle la invitación por WhatsApp con la fecha y hora, agéndala en la página "Entrevistas" (menú lateral). Ahí se envía automáticamente con todos los datos.`);
+      // "Oferta" still schedules from the Entrevistas page (a different meeting).
+      if (stageNeedsScheduling(newStage) && !isInterviewStage(newStage)) {
+        alert(`✅ ${movedApp.candidateName} quedó en "${newStage}".\n\n📅 Para enviarle la invitación por WhatsApp con la fecha y hora, agéndala en la página "Entrevistas" (menú lateral).`);
       }
     } catch (error) {
       console.error("Error updating stage:", error);
@@ -458,7 +542,7 @@ export default function KanbanBoard() {
             />
             <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
           </div>
-          <Link 
+          <Link
             to={`/vacancies/${vacancyId}/ranking`}
             className="px-4 py-2 bg-slate-900 text-white text-xs lg:text-sm font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg shadow-slate-900/20 hover:-translate-y-0.5 whitespace-nowrap text-center"
           >
@@ -466,6 +550,57 @@ export default function KanbanBoard() {
           </Link>
         </div>
       </div>
+
+      {/* Interview schedule for this vacancy — the invitation sent when convoking a
+          candidate uses this date/time/place, and a past date blocks the move. */}
+      {(() => {
+        const st = scheduleStatus();
+        return (
+          <div className="mb-4 bg-white rounded-2xl border border-slate-200 p-3 lg:p-4 shadow-sm">
+            <div className="flex items-center gap-2 mb-2.5">
+              <Calendar className="w-4 h-4 text-violet-600" />
+              <h3 className="text-xs lg:text-sm font-bold text-slate-700">Agenda de entrevista para esta vacante</h3>
+              <span className="text-[10px] text-slate-400 hidden sm:inline">— se usa al convocar candidatos a entrevista</span>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Fecha</label>
+                <input type="date" min={todayStr} value={schedDate} onChange={(e) => setSchedDate(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Hora</label>
+                <input type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
+              </div>
+              <div>
+                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Lugar / Modalidad</label>
+                <input type="text" value={schedLocation} onChange={(e) => setSchedLocation(e.target.value)}
+                  placeholder="Ej: Tienda Baní, o Google Meet"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
+              </div>
+              <div className="flex items-end">
+                <button onClick={saveSchedule} disabled={savingSchedule}
+                  className="w-full px-4 py-2 bg-violet-600 text-white text-sm font-bold rounded-lg hover:bg-violet-700 transition-colors disabled:opacity-50">
+                  {savingSchedule ? 'Guardando…' : 'Guardar agenda'}
+                </button>
+              </div>
+            </div>
+            {st.isSet && (
+              st.isPast ? (
+                <p className="mt-2.5 text-xs font-bold text-rose-600 flex items-center">
+                  <AlertTriangle className="w-3.5 h-3.5 mr-1.5" /> Esta fecha y hora YA PASARON. Ponla a futuro — no podrás convocar candidatos con una fecha vencida.
+                </p>
+              ) : (
+                <p className="mt-2.5 text-xs font-medium text-emerald-600 flex items-center flex-wrap">
+                  <CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Entrevista: {st.dt && fmtFecha(st.dt)} · {st.dt && fmtHora(st.dt)}
+                  {schedLocation && <span className="flex items-center ml-1"><MapPin className="w-3 h-3 mx-1" /> {schedLocation}</span>}
+                </p>
+              )
+            )}
+          </div>
+        );
+      })()}
 
       <div className="flex-1 overflow-x-auto overflow-y-hidden pb-2">
         <DragDropContext onDragEnd={onDragEnd}>
