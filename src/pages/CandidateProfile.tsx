@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc, serverTimestamp, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../lib/firebase';
@@ -44,103 +44,110 @@ export default function CandidateProfile() {
 
   const [scorecardTemplate, setScorecardTemplate] = useState<any>(null);
 
-  useEffect(() => {
-    let unsubscribeMessages: (() => void) | undefined;
-    async function fetchCandidate() {
-      if (!candidateId) return;
-      try {
-        const candRef = doc(db, 'candidates', candidateId);
-        const candSnap = await getDoc(candRef);
-        if (candSnap.exists()) {
-          setCandidate(candSnap.data());
-        }
+  // Refs so the LIVE applications listener can keep the recruiter's chosen application
+  // and in-progress edits without re-initializing on every real-time update.
+  const selectedAppIdRef = useRef<string | null>(null);
+  const initedAppRef = useRef<string | null>(null);
+  const scorecardTemplateRef = useRef<any>(null);
+  const vacTitlesRef = useRef<Record<string, string>>({});
 
-        const q = query(collection(db, 'applications'), where('candidateId', '==', candidateId));
-        const appSnap = await getDocs(q);
-        let primaryApp: any = null;
-        if (!appSnap.empty) {
-          // ALL of the candidate's applications, newest first, enriched with the
-          // vacancy title. Previously docs[0] was an ARBITRARY application when the
-          // candidate applied to several vacancies — the profile could show (and
-          // stage-change!) the wrong one. Now the newest is default and a selector
-          // lets the recruiter switch explicitly.
-          const apps = appSnap.docs.map(d => ({ id: d.id, ...d.data() } as any));
+  useEffect(() => {
+    if (!candidateId) return;
+    // Reset per-candidate tracking so navigating A → B never carries A's selection/edits.
+    selectedAppIdRef.current = null;
+    initedAppRef.current = null;
+    setLoading(true);
+    let cancelled = false;
+    let firstLoad = true;
+    const unsubs: Array<() => void> = [];
+
+    (async () => {
+      // One-time reads FIRST (rarely change): the scorecard template + vacancy titles,
+      // so the live listeners below can label/initialize correctly on their first fire.
+      try {
+        const s = await getDoc(doc(db, 'settings', 'forms'));
+        if (s.exists() && s.data().scorecard) {
+          scorecardTemplateRef.current = s.data().scorecard;
+          setScorecardTemplate(s.data().scorecard);
+        }
+      } catch { /* scorecard es opcional */ }
+      try {
+        const vsnap = await getDocs(collection(db, 'vacancies'));
+        vsnap.docs.forEach(d => { vacTitlesRef.current[d.id] = d.data().title; });
+      } catch { /* títulos opcionales */ }
+      if (cancelled) return;
+
+      // Candidate doc — LIVE: name, CV analysis, contact info update in place.
+      unsubs.push(onSnapshot(doc(db, 'candidates', candidateId),
+        (s) => { if (s.exists()) setCandidate(s.data()); if (firstLoad) { firstLoad = false; setLoading(false); } },
+        (e) => { console.error('candidate snapshot error:', e); setLoading(false); }
+      ));
+
+      // Applications — LIVE: a stage move, a completed form, or a new AI score appears
+      // instantly (no refresh). Keeps the selected application + in-progress edits.
+      unsubs.push(onSnapshot(
+        query(collection(db, 'applications'), where('candidateId', '==', candidateId)),
+        (snap) => {
+          const apps = snap.docs.map(d => ({ id: d.id, ...d.data() } as any));
           const ms = (t: any) => (t?.toMillis ? t.toMillis() : 0);
           apps.sort((a, b) => ms(b.submittedAt) - ms(a.submittedAt));
-          const vacIds = [...new Set(apps.map(a => a.vacancyId).filter(Boolean))];
-          const vacMap: Record<string, string> = {};
-          await Promise.all(vacIds.map(async (vid: string) => {
-            try {
-              const vs = await getDoc(doc(db, 'vacancies', vid));
-              if (vs.exists()) vacMap[vid] = vs.data().title;
-            } catch { /* el título es opcional */ }
-          }));
-          apps.forEach(a => { a.vacancyTitle = vacMap[a.vacancyId] || (a.vacancyId === 'bulk_upload' ? 'Subida masiva de CVs' : 'Vacante'); });
+          apps.forEach(a => { a.vacancyTitle = vacTitlesRef.current[a.vacancyId] || (a.vacancyId === 'bulk_upload' ? 'Subida masiva de CVs' : 'Vacante'); });
           setAllApplications(apps);
-          primaryApp = apps[0];
-          setApplication(primaryApp);
-          if (primaryApp.interviewObservation) {
-            setInterviewObs(primaryApp.interviewObservation);
-          }
-          if (primaryApp.interviewScorecard) {
-            setScorecardData(primaryApp.interviewScorecard);
-          }
-        }
+          if (apps.length === 0) { setApplication(null); return; }
 
-        // Fetch Scorecard Template
-        const settingsRef = doc(db, 'settings', 'forms');
-        const settingsSnap = await getDoc(settingsRef);
-        if (settingsSnap.exists() && settingsSnap.data().scorecard) {
-          const template = settingsSnap.data().scorecard;
-          setScorecardTemplate(template);
-          
-          // If no existing scorecard data, initialize metrics from template
-          if (primaryApp && !primaryApp.interviewScorecard && template.metrics) {
-            const initialMetrics: Record<string, number> = {};
-            template.metrics.forEach((m: string) => {
-              initialMetrics[m] = 30;
-            });
-            setScorecardData(prev => ({ ...prev, metrics: initialMetrics }));
-          }
-        }
+          const wantId = selectedAppIdRef.current || apps[0].id;
+          const found = apps.find(a => a.id === wantId) || apps[0];
+          selectedAppIdRef.current = found.id;
+          setApplication(found);
 
-        // Fetch WhatsApp messages in real-time
-        const msgRef = collection(db, 'whatsapp_messages');
-        const msgQ = query(msgRef, where('candidateId', '==', candidateId));
-        
-        unsubscribeMessages = onSnapshot(msgQ, (snapshot) => {
+          // Initialize editable fields ONCE per application id — never clobber the
+          // recruiter's unsaved interview notes/scorecard on a live update.
+          if (initedAppRef.current !== found.id) {
+            initedAppRef.current = found.id;
+            setInterviewObs(found.interviewObservation || { score: 0, notes: '', redFlags: '' });
+            if (found.interviewScorecard) {
+              setScorecardData(found.interviewScorecard);
+            } else if (scorecardTemplateRef.current?.metrics) {
+              const initialMetrics: Record<string, number> = {};
+              scorecardTemplateRef.current.metrics.forEach((m: string) => { initialMetrics[m] = 30; });
+              setScorecardData(prev => ({ ...prev, metrics: initialMetrics }));
+            }
+          }
+        },
+        (e) => { console.error('applications snapshot error:', e); }
+      ));
+
+      // WhatsApp chat — LIVE (already was).
+      unsubs.push(onSnapshot(
+        query(collection(db, 'whatsapp_messages'), where('candidateId', '==', candidateId)),
+        (snapshot) => {
           const msgs = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-          msgs.sort((a: any, b: any) => {
-            const timeA = a.sentAt?.toMillis() || 0;
-            const timeB = b.sentAt?.toMillis() || 0;
-            return timeA - timeB;
-          });
+          msgs.sort((a: any, b: any) => (a.sentAt?.toMillis() || 0) - (b.sentAt?.toMillis() || 0));
           setChatMessages(msgs);
-        });
-      } catch (error) {
-        console.error("Error fetching candidate:", error);
-      } finally {
-        setLoading(false);
-      }
-    }
-    fetchCandidate();
-
-    // Check WhatsApp status
-    apiFetch('/api/whatsapp/status')
-      .then(res => {
-        const contentType = res.headers.get("content-type");
-        if (contentType && contentType.indexOf("application/json") !== -1) {
-          return res.json();
         }
-        throw new Error("Received non-JSON response");
-      })
-      .then(setWsStatus)
-      .catch(err => console.error("Error fetching WhatsApp status:", err));
+      ));
+    })();
 
-    // Clean up the real-time WhatsApp messages listener on unmount / candidate change
-    // to avoid leaking Firestore listeners across navigation.
+    // WhatsApp connection status — poll every 15s so the chat's status dot stays fresh
+    // without a manual refresh.
+    const checkWs = () => {
+      apiFetch('/api/whatsapp/status')
+        .then(res => {
+          const contentType = res.headers.get("content-type");
+          if (contentType && contentType.indexOf("application/json") !== -1) return res.json();
+          throw new Error("Received non-JSON response");
+        })
+        .then(setWsStatus)
+        .catch(err => console.error("Error fetching WhatsApp status:", err));
+    };
+    checkWs();
+    const wsInterval = setInterval(checkWs, 15000);
+
+    // Tear down all live listeners + the poll on unmount / candidate change.
     return () => {
-      if (unsubscribeMessages) unsubscribeMessages();
+      cancelled = true;
+      clearInterval(wsInterval);
+      unsubs.forEach(u => u());
     };
   }, [candidateId]);
 
@@ -539,8 +546,12 @@ export default function CandidateProfile() {
                     onChange={(e) => {
                       const next = allApplications.find(a => a.id === e.target.value);
                       if (!next) return;
+                      // Tell the live listener this is now the managed application, and
+                      // re-initialize its editable fields.
+                      selectedAppIdRef.current = next.id;
+                      initedAppRef.current = next.id;
                       setApplication(next);
-                      setInterviewObs(next.interviewObservation || { score: 0, notes: '' });
+                      setInterviewObs(next.interviewObservation || { score: 0, notes: '', redFlags: '' });
                       if (next.interviewScorecard) setScorecardData(next.interviewScorecard);
                     }}
                     className="w-full p-2.5 bg-amber-50 border border-amber-200 rounded-xl font-bold text-slate-700 text-sm focus:ring-2 focus:ring-amber-400 outline-none"
