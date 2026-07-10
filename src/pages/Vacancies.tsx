@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { collection, query, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, CheckCircle, Star } from 'lucide-react';
 
@@ -22,6 +22,7 @@ export default function Vacancies() {
   
   const [vacancyToDelete, setVacancyToDelete] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null); // which vacancy's details are open
+  const [newCounts, setNewCounts] = useState<Record<string, number>>({}); // vacancyId -> # of "Nuevo" applicants
 
   useEffect(() => {
     const q = query(collection(db, 'vacancies'));
@@ -33,6 +34,21 @@ export default function Vacancies() {
     });
 
     return () => unsubscribe();
+  }, []);
+
+  // LIVE count of applicants sitting in the first stage ("Nuevo") per vacancy — the
+  // badge updates the moment a new candidate applies, no refresh needed.
+  useEffect(() => {
+    const qNew = query(collection(db, 'applications'), where('stage', '==', 'Nuevo'));
+    const unsub = onSnapshot(qNew, (snapshot) => {
+      const counts: Record<string, number> = {};
+      snapshot.docs.forEach(d => {
+        const vid = d.data().vacancyId;
+        if (vid) counts[vid] = (counts[vid] || 0) + 1;
+      });
+      setNewCounts(counts);
+    }, (error) => console.error('Error contando nuevos:', error));
+    return () => unsub();
   }, []);
 
   const resetForm = () => {
@@ -132,8 +148,16 @@ export default function Vacancies() {
 
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 cursor-pointer" onClick={() => navigate(`/vacancies/${vacancy.id}/kanban`)}>
             <div className="flex items-center gap-4 relative z-10 flex-1">
-              <div className="p-3 bg-violet-50 text-violet-600 rounded-2xl shrink-0">
+              <div className="relative p-3 bg-violet-50 text-violet-600 rounded-2xl shrink-0">
                 <Briefcase className="w-6 h-6" />
+                {newCounts[vacancy.id] > 0 && (
+                  <span
+                    title={`${newCounts[vacancy.id]} candidato(s) nuevo(s) sin revisar`}
+                    className="absolute -top-2 -right-2 min-w-[22px] h-[22px] px-1 bg-rose-500 text-white text-[11px] font-bold rounded-full flex items-center justify-center shadow-md ring-2 ring-white animate-fade-in"
+                  >
+                    {newCounts[vacancy.id] > 99 ? '99+' : newCounts[vacancy.id]}
+                  </span>
+                )}
               </div>
               <div>
                 <div className="flex items-center gap-3 mb-1">
@@ -274,7 +298,7 @@ export default function Vacancies() {
       {(isCreating || isEditing) && createPortal(
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto">
           <div className="flex min-h-full items-center justify-center p-4">
-            <div className="bg-white rounded-3xl p-8 w-full max-w-3xl shadow-2xl animate-slide-up">
+            <div className="bg-white rounded-3xl p-8 w-full max-w-5xl shadow-2xl animate-slide-up">
             <div className="flex items-center mb-6">
               <div className="p-2 bg-violet-100 text-violet-600 rounded-xl mr-3">
                 {isEditing ? <Edit3 className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
@@ -339,8 +363,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Funciones principales (una por línea)</label>
                 <textarea
                   required
-                  rows={7}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
+                  rows={9}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[190px]"
                   value={functions}
                   onChange={(e) => setFunctions(e.target.value)}
                 />
@@ -350,8 +374,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Requisitos (uno por línea)</label>
                 <textarea
                   required
-                  rows={7}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
+                  rows={9}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[190px]"
                   value={requirements}
                   onChange={(e) => setRequirements(e.target.value)}
                 />
@@ -361,8 +385,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Ofrecemos (uno por línea)</label>
                 <textarea
                   required
-                  rows={7}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
+                  rows={9}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[190px]"
                   value={offers}
                   onChange={(e) => setOffers(e.target.value)}
                 />
