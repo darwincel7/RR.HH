@@ -229,7 +229,7 @@ export default function Vacancies() {
       {(isCreating || isEditing) && createPortal(
         <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 animate-fade-in overflow-y-auto">
           <div className="flex min-h-full items-center justify-center p-4">
-            <div className="bg-white rounded-3xl p-8 w-full max-w-2xl shadow-2xl animate-slide-up">
+            <div className="bg-white rounded-3xl p-8 w-full max-w-3xl shadow-2xl animate-slide-up">
             <div className="flex items-center mb-6">
               <div className="p-2 bg-violet-100 text-violet-600 rounded-xl mr-3">
                 {isEditing ? <Edit3 className="w-5 h-5" /> : <Sparkles className="w-5 h-5" />}
@@ -294,8 +294,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Funciones principales (una por línea)</label>
                 <textarea
                   required
-                  rows={3}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-none"
+                  rows={7}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
                   value={functions}
                   onChange={(e) => setFunctions(e.target.value)}
                 />
@@ -305,8 +305,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Requisitos (uno por línea)</label>
                 <textarea
                   required
-                  rows={3}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-none"
+                  rows={7}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
                   value={requirements}
                   onChange={(e) => setRequirements(e.target.value)}
                 />
@@ -316,8 +316,8 @@ export default function Vacancies() {
                 <label className="block text-sm font-semibold text-slate-700 mb-1.5">Ofrecemos (uno por línea)</label>
                 <textarea
                   required
-                  rows={3}
-                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-none"
+                  rows={7}
+                  className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none resize-y min-h-[130px]"
                   value={offers}
                   onChange={(e) => setOffers(e.target.value)}
                 />
