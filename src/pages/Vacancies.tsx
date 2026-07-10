@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import { collection, query, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3 } from 'lucide-react';
+import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, CheckCircle, Star } from 'lucide-react';
 
 export default function Vacancies() {
   const navigate = useNavigate();
@@ -21,6 +21,7 @@ export default function Vacancies() {
   const [offers, setOffers] = useState('Sueldo competitivo de $20.000 a $30.000\nCapacitación inicial y continua.\nOportunidad de crecimiento dentro de la empresa.\nCrecimiento profesional con capacitaciones externas constantes.');
   
   const [vacancyToDelete, setVacancyToDelete] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null); // which vacancy's details are open
 
   useEffect(() => {
     const q = query(collection(db, 'vacancies'));
@@ -123,13 +124,13 @@ export default function Vacancies() {
 
       <div className="flex flex-col space-y-4">
         {vacancies.map((vacancy) => (
-          <div 
-            key={vacancy.id} 
-            onClick={() => navigate(`/vacancies/${vacancy.id}/kanban`)}
-            className="glass-card rounded-2xl p-5 group relative overflow-hidden cursor-pointer hover:shadow-xl transition-all duration-300 hover:-translate-y-0.5 flex flex-col md:flex-row md:items-center justify-between gap-4"
+          <div
+            key={vacancy.id}
+            className="glass-card rounded-2xl p-5 group relative overflow-hidden hover:shadow-xl transition-all duration-300 flex flex-col gap-4"
           >
             <div className="absolute top-0 right-0 w-32 h-32 bg-gradient-ai opacity-5 blur-3xl group-hover:opacity-20 transition-opacity duration-500 rounded-full -mr-10 -mt-10"></div>
-            
+
+            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 cursor-pointer" onClick={() => navigate(`/vacancies/${vacancy.id}/kanban`)}>
             <div className="flex items-center gap-4 relative z-10 flex-1">
               <div className="p-3 bg-violet-50 text-violet-600 rounded-2xl shrink-0">
                 <Briefcase className="w-6 h-6" />
@@ -173,7 +174,14 @@ export default function Vacancies() {
             
             <div className="relative z-10 flex items-center gap-4 md:border-l md:border-slate-100 md:pl-6" onClick={e => e.stopPropagation()}>
               <div className="flex space-x-2">
-                <button 
+                <button
+                  onClick={(e) => { e.stopPropagation(); setExpandedId(expandedId === vacancy.id ? null : vacancy.id); }}
+                  className="text-sm font-bold text-slate-600 hover:text-slate-900 transition-colors flex items-center bg-slate-100 px-3 py-1.5 rounded-lg hover:bg-slate-200"
+                  title="Ver la descripción completa del puesto"
+                >
+                  Detalles <ChevronDown className={`w-3.5 h-3.5 ml-1 transition-transform ${expandedId === vacancy.id ? 'rotate-180' : ''}`} />
+                </button>
+                <button
                   onClick={() => navigate(`/vacancies/${vacancy.id}/kanban`)}
                   className="text-sm font-bold text-violet-600 hover:text-violet-800 transition-colors flex items-center bg-violet-50 px-3 py-1.5 rounded-lg hover:bg-violet-100"
                 >
@@ -214,6 +222,43 @@ export default function Vacancies() {
                 </button>
               </div>
             </div>
+            </div>
+
+            {/* Expandable full description of the position (view + quick edit). */}
+            {expandedId === vacancy.id && (
+              <div className="relative z-10 border-t border-slate-100 pt-4 grid grid-cols-1 md:grid-cols-3 gap-5 text-sm animate-fade-in">
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2 text-[11px] uppercase tracking-wider flex items-center"><Briefcase className="w-3.5 h-3.5 mr-1.5 text-violet-500" />Funciones</h4>
+                  <ul className="space-y-1 text-slate-600 list-disc list-inside">
+                    {(vacancy.functions || '').split('\n').map((s: string) => s.trim()).filter(Boolean).map((l: string, i: number) => <li key={i}>{l}</li>)}
+                    {!(vacancy.functions || '').trim() && <li className="list-none text-slate-400 italic">Sin descripción</li>}
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2 text-[11px] uppercase tracking-wider flex items-center"><CheckCircle className="w-3.5 h-3.5 mr-1.5 text-emerald-500" />Requisitos</h4>
+                  <ul className="space-y-1 text-slate-600 list-disc list-inside">
+                    {(vacancy.requirements || '').split('\n').map((s: string) => s.trim()).filter(Boolean).map((l: string, i: number) => <li key={i}>{l}</li>)}
+                    {!(vacancy.requirements || '').trim() && <li className="list-none text-slate-400 italic">Sin requisitos</li>}
+                  </ul>
+                </div>
+                <div>
+                  <h4 className="font-bold text-slate-700 mb-2 text-[11px] uppercase tracking-wider flex items-center"><Star className="w-3.5 h-3.5 mr-1.5 text-amber-500" />Ofrecemos</h4>
+                  <ul className="space-y-1 text-slate-600 list-disc list-inside">
+                    {(vacancy.offers || '').split('\n').map((s: string) => s.trim()).filter(Boolean).map((l: string, i: number) => <li key={i}>{l}</li>)}
+                    {!(vacancy.offers || '').trim() && <li className="list-none text-slate-400 italic">Sin beneficios</li>}
+                  </ul>
+                </div>
+                <div className="md:col-span-3 flex flex-wrap gap-3 justify-between items-center pt-3 border-t border-slate-100">
+                  <span className="text-xs text-slate-400">📍 {vacancy.location || '—'}  ·  🕒 {vacancy.schedule || '—'}</span>
+                  <button
+                    onClick={() => openEditModal(vacancy)}
+                    className="flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
+                  >
+                    <Edit3 className="w-4 h-4 mr-1.5" /> Editar estos detalles
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         ))}
         {vacancies.length === 0 && !isCreating && (
