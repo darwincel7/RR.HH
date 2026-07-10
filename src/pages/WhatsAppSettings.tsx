@@ -126,6 +126,16 @@ export default function WhatsAppSettings() {
 
   const isRecruiterUser = (u: any) => Array.isArray(u.roleIds) && (u.roleIds.includes('recruiter') || u.roleIds.includes('admin'));
 
+  // Friendly date+time for when a person requested access (createdAt). Older accounts
+  // created before this was tracked simply have no date.
+  const fmtDate = (ts: any): string | null => {
+    try {
+      const d = ts?.toDate ? ts.toDate() : (ts ? new Date(ts) : null);
+      if (!d || isNaN(d.getTime())) return null;
+      return d.toLocaleString('es-DO', { day: '2-digit', month: 'short', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+    } catch { return null; }
+  };
+
   const approveUser = async (id: string) => {
     setTeamBusy(id);
     try {
@@ -288,7 +298,10 @@ export default function WhatsAppSettings() {
           isSelf: u.id === user?.uid,
           isOwnerAdmin: (u.email || '').toLowerCase() === 'daruingmejia@gmail.com',
         })).map(u => ({ ...u, hasAccess: isRecruiterUser(u) || u.isOwnerAdmin }));
-        const pending = decorated.filter(u => !u.hasAccess && u.status !== 'blocked');
+        const reqMs = (u: any) => (u.createdAt?.toMillis ? u.createdAt.toMillis() : 0);
+        const pending = decorated
+          .filter(u => !u.hasAccess && u.status !== 'blocked')
+          .sort((a, b) => reqMs(b) - reqMs(a)); // newest requests first
         const blocked = decorated.filter(u => !u.hasAccess && u.status === 'blocked');
         const active = decorated.filter(u => u.hasAccess);
         return (
@@ -320,6 +333,10 @@ export default function WhatsAppSettings() {
                       <div className="min-w-0">
                         <p className="text-sm font-bold text-slate-800 truncate">{u.name || 'Sin nombre'}</p>
                         <p className="text-xs text-slate-500 truncate">{u.email}</p>
+                        <p className="text-[11px] text-amber-600 font-medium flex items-center mt-1">
+                          <Clock className="w-3 h-3 mr-1 shrink-0" />
+                          {fmtDate(u.createdAt) ? `Solicitó acceso: ${fmtDate(u.createdAt)}` : 'Fecha no registrada'}
+                        </p>
                       </div>
                       <div className="flex items-center gap-2 shrink-0">
                         <button onClick={() => approveUser(u.id)} disabled={teamBusy === u.id}
@@ -352,6 +369,11 @@ export default function WhatsAppSettings() {
                         {u.isOwnerAdmin && <span className="ml-2 px-2 py-0.5 text-[10px] font-bold bg-violet-100 text-violet-700 rounded-full">ADMIN</span>}
                       </p>
                       <p className="text-xs text-slate-500 truncate">{u.email}</p>
+                      {fmtDate(u.createdAt) && (
+                        <p className="text-[11px] text-slate-400 flex items-center mt-1">
+                          <Clock className="w-3 h-3 mr-1 shrink-0" /> Se unió: {fmtDate(u.createdAt)}
+                        </p>
+                      )}
                     </div>
                     {!u.isSelf && !u.isOwnerAdmin && (
                       <button onClick={() => revokeUser(u.id)} disabled={teamBusy === u.id}

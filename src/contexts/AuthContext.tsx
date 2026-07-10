@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useEffect, useState } from 'react';
 import { User, onAuthStateChanged, signInWithPopup, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { auth, db, googleProvider } from '../lib/firebase';
 
 interface AuthContextType {
@@ -63,6 +63,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
             email: currentUser.email || '',
             roleIds: [] as string[],
             status: 'pending',
+            // When the person requested access — shown in "Equipo y Accesos".
+            createdAt: serverTimestamp(),
           });
         }
       } catch (e) {
