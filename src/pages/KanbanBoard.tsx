@@ -403,15 +403,18 @@ export default function KanbanBoard() {
     // midpoint between its two neighbors in the destination column AS RENDERED
     // (filteredApplications — same list the Draggables index against — without the
     // dragged card, matching how the library reports destination.index).
+    // Columns render NEWEST FIRST (descending order), so the card above the drop slot
+    // has the HIGHER order and the one below has the LOWER one — the mirror of an
+    // ascending board.
     const destItems = filteredApplications
       .filter(app => app.stage === newStage && app.id !== draggableId)
-      .sort((a, b) => getKanbanOrder(a) - getKanbanOrder(b));
-    const prevItem = destItems[destination.index - 1];
-    const nextItem = destItems[destination.index];
+      .sort((a, b) => getKanbanOrder(b) - getKanbanOrder(a));
+    const prevItem = destItems[destination.index - 1]; // card ABOVE the slot (higher order)
+    const nextItem = destItems[destination.index];     // card BELOW the slot (lower order)
     let newOrder: number;
     if (prevItem && nextItem) newOrder = (getKanbanOrder(prevItem) + getKanbanOrder(nextItem)) / 2;
-    else if (prevItem) newOrder = getKanbanOrder(prevItem) + 100000;
-    else if (nextItem) newOrder = getKanbanOrder(nextItem) - 100000;
+    else if (prevItem) newOrder = getKanbanOrder(prevItem) - 100000; // dropped at the bottom
+    else if (nextItem) newOrder = getKanbanOrder(nextItem) + 100000; // dropped at the top
     else newOrder = Date.now();
 
     // Optimistic UI update
@@ -511,7 +514,8 @@ export default function KanbanBoard() {
     title: stage,
     items: filteredApplications
       .filter(app => app.stage === stage)
-      .sort((a, b) => getKanbanOrder(a) - getKanbanOrder(b))
+      // NEWEST FIRST: the most recent CVs sit at the top of every column.
+      .sort((a, b) => getKanbanOrder(b) - getKanbanOrder(a))
   })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
