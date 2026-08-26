@@ -32,9 +32,8 @@ jobs:
       - name: Install Firebase CLI
         run: npm install -g firebase-tools
 
-      - name: Deploy Firestore & Storage rules
+      - name: Write service-account credentials
         env:
-          # firebase-tools authenticates with this service-account file.
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
         run: |
           if [ -z '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' ]; then
@@ -42,8 +41,32 @@ jobs:
             exit 1
           fi
           printf '%s' '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      # Firestore rules are the security-critical piece — this step MUST succeed.
+      # Deployed on its own because the Storage deploy performs a serviceusage API
+      # pre-check that needs an extra IAM role the deploy key may not have.
+      - name: Deploy Firestore rules
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
           firebase deploy \
-            --only firestore:rules,storage \
+            --only firestore:rules \
             --project gen-lang-client-0929279196 \
             --non-interactive
-          rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
+
+      # Best-effort: Storage rules change rarely. If the key lacks the serviceusage
+      # permission this is skipped with a warning instead of failing the whole run.
+      - name: Deploy Storage rules (best effort)
+        continue-on-error: true
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          firebase deploy \
+            --only storage \
+            --project gen-lang-client-0929279196 \
+            --non-interactive \
+          || echo "::warning::No se pudieron desplegar las reglas de Storage (falta permiso serviceusage). Las de Firestore SÍ se desplegaron."
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f "${{ runner.temp }}/firebase-sa.json"
