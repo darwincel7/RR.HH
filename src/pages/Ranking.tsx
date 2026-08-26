@@ -116,14 +116,17 @@ export default function Ranking() {
   };
 
   const exportToCSV = () => {
+    // Proper CSV escaping: wrap in quotes and double any embedded quote, so names or
+    // reasons containing " , or newlines don't shift columns or break rows.
+    const cell = (v: any) => `"${String(v ?? '').replace(/"/g, '""')}"`;
     const headers = ['Candidato', 'Score Total', 'Etapa Actual', 'Motivo de Decisión'];
     const csvContent = [
       headers.join(','),
       ...candidates.map(c => [
-        `"${c.candidateName}"`,
+        cell(c.candidateName || 'Sin nombre'),
         c.calculatedTotalScore,
-        `"${c.stage}"`,
-        `"${c.decisionReason || ''}"`
+        cell(c.stage),
+        cell(c.decisionReason || '')
       ].join(','))
     ].join('\n');
 
@@ -268,9 +271,9 @@ export default function Ranking() {
                   <div key={candidate.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
                     <div className="p-5 border-b border-slate-100 bg-slate-50 text-center">
                       <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-2xl font-black mx-auto mb-3">
-                        {candidate.candidateName.charAt(0)}
+                        {(candidate.candidateName || '?').charAt(0)}
                       </div>
-                      <h3 className="text-lg font-bold text-slate-800">{candidate.candidateName}</h3>
+                      <h3 className="text-lg font-bold text-slate-800">{candidate.candidateName || 'Sin nombre'}</h3>
                       <div className="mt-2 inline-flex items-center px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-sm font-black">
                         <Star className="w-4 h-4 mr-1 fill-current" />
                         {candidate.calculatedTotalScore} / 100

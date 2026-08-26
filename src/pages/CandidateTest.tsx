@@ -297,6 +297,14 @@ export default function CandidateTest() {
     </div>
   );
 
+  // RENDER-SAFE index: never past the loaded question set. The state-clamp effect runs
+  // only AFTER render, so without this a restored index that outlives a now-shorter test
+  // would evaluate questions[i].id on undefined and white-screen the candidate for good.
+  const qIndex = questions.length > 0
+    ? Math.min(Math.max(currentQuestionIndex, -1), questions.length - 1)
+    : currentQuestionIndex;
+  const currentQuestion = qIndex >= 0 ? questions[qIndex] : null;
+
   return (
     <div className="min-h-screen bg-gray-50 py-12 px-4">
       <SubmitOverlay
@@ -323,7 +331,7 @@ export default function CandidateTest() {
           <div className="text-center py-8 text-gray-500">
             {!errorMsg && <p>Cargando el test…</p>}
           </div>
-        ) : currentQuestionIndex === -1 ? (
+        ) : qIndex === -1 ? (
           <div className="text-center space-y-6">
             <h1 className="text-2xl font-bold text-gray-900">Test de Juicio Situacional</h1>
             <div className="bg-blue-50 p-6 rounded-lg text-blue-800 text-left">
@@ -340,11 +348,11 @@ export default function CandidateTest() {
         ) : (
           <div className="space-y-8">
             <div className="flex justify-between items-center text-sm text-gray-500 mb-4">
-              <span>Pregunta {currentQuestionIndex + 1} de {questions.length}</span>
+              <span>Pregunta {qIndex + 1} de {questions.length}</span>
               <div className="w-32 bg-gray-200 rounded-full h-2">
-                <div 
-                  className="bg-blue-600 h-2 rounded-full transition-all duration-300" 
-                  style={{ width: `${((currentQuestionIndex + 1) / questions.length) * 100}%` }}
+                <div
+                  className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${((qIndex + 1) / questions.length) * 100}%` }}
                 ></div>
               </div>
             </div>
@@ -366,11 +374,11 @@ export default function CandidateTest() {
             ) : (
               <div>
                 <label className="block text-lg font-medium text-gray-900 mb-4">
-                  {(questions[currentQuestionIndex].id === 'A11' || questions[currentQuestionIndex].id === 'C11')
+                  {currentQuestion && (currentQuestion.id === 'A11' || currentQuestion.id === 'C11')
                     ? '¿Cuáles de estas palabras recuerdas haber visto? Selecciona las que viste.'
-                    : questions[currentQuestionIndex].text}
+                    : currentQuestion?.text}
                 </label>
-                {renderInput(questions[currentQuestionIndex])}
+                {currentQuestion && renderInput(currentQuestion)}
               </div>
             )}
 
@@ -378,7 +386,7 @@ export default function CandidateTest() {
               <button
                 type="button"
                 onClick={handlePrev}
-                disabled={currentQuestionIndex === 0 || showMemoryWords || submitting}
+                disabled={qIndex === 0 || showMemoryWords || submitting}
                 className="py-2 px-4 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
               >
                 Anterior
@@ -386,7 +394,7 @@ export default function CandidateTest() {
               <button
                 type="button"
                 onClick={handleNext}
-                disabled={submitting || showMemoryWords || !questions[currentQuestionIndex] || (Array.isArray(answers[questions[currentQuestionIndex].id]) ? (answers[questions[currentQuestionIndex].id] as any[]).length === 0 : !answers[questions[currentQuestionIndex].id])}
+                disabled={submitting || showMemoryWords || !currentQuestion || (Array.isArray(answers[currentQuestion.id]) ? (answers[currentQuestion.id] as any[]).length === 0 : !answers[currentQuestion.id])}
                 className="flex justify-center py-2 px-6 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50"
               >
                 {submitting ? (
@@ -395,7 +403,7 @@ export default function CandidateTest() {
                     Evaluando respuestas...
                   </>
                 ) : (
-                  currentQuestionIndex === questions.length - 1 ? 'Finalizar Test' : 'Siguiente'
+                  qIndex === questions.length - 1 ? 'Finalizar Test' : 'Siguiente'
                 )}
               </button>
             </div>

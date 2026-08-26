@@ -51,6 +51,16 @@ export default function CandidateProfile() {
   const scorecardTemplateRef = useRef<any>(null);
   const vacTitlesRef = useRef<Record<string, string>>({});
 
+  // A fresh, empty scorecard for an application that has none yet. Used when loading /
+  // switching applications so one candidate's scorecard NEVER bleeds into another.
+  const buildBlankScorecard = () => {
+    const keys: string[] = scorecardTemplateRef.current?.metrics
+      || ['Puntualidad', 'Presentación personal', 'Contacto visual', 'Claridad al hablar', 'Energía', 'Cortesía y escucha activa'];
+    const metrics: Record<string, number> = {};
+    keys.forEach(m => { metrics[m] = 30; });
+    return { positiveSignals: [] as string[], redFlags: [] as string[], metrics };
+  };
+
   useEffect(() => {
     if (!candidateId) return;
     // Reset per-candidate tracking so navigating A → B never carries A's selection/edits.
@@ -105,13 +115,9 @@ export default function CandidateProfile() {
           if (initedAppRef.current !== found.id) {
             initedAppRef.current = found.id;
             setInterviewObs(found.interviewObservation || { score: 0, notes: '', redFlags: '' });
-            if (found.interviewScorecard) {
-              setScorecardData(found.interviewScorecard);
-            } else if (scorecardTemplateRef.current?.metrics) {
-              const initialMetrics: Record<string, number> = {};
-              scorecardTemplateRef.current.metrics.forEach((m: string) => { initialMetrics[m] = 30; });
-              setScorecardData(prev => ({ ...prev, metrics: initialMetrics }));
-            }
+            // Reset to a BLANK scorecard when this application has none — never keep the
+            // previously-viewed application's signals/flags/metrics.
+            setScorecardData(found.interviewScorecard || buildBlankScorecard());
           }
         },
         (e) => { console.error('applications snapshot error:', e); }
@@ -273,6 +279,9 @@ export default function CandidateProfile() {
       // The stage change already saved; only warn (don't revert) if the message failed.
       if (r.status === 'failed') {
         alert('La etapa se actualizó, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+      } else if (r.status === 'skipped' && r.reason === 'falta_fecha_hora') {
+        // Interview/offer stages need a real date/time — no invitation was sent from here.
+        alert('La etapa se actualizó, pero NO se envió la invitación: falta la fecha y hora.\n\nPara enviarla por WhatsApp con los datos completos, agenda la cita desde la página "Entrevistas".');
       }
     } catch (error) {
       console.error("Error updating stage:", error);
@@ -315,11 +324,16 @@ export default function CandidateProfile() {
     }
   };
 
-  const copyTestLink = () => {
+  const copyTestLink = async () => {
     if (!application) return;
     const url = `${window.location.origin}/test/${application.id}`;
-    navigator.clipboard.writeText(url);
-    alert('Link de test copiado');
+    try {
+      await navigator.clipboard.writeText(url);
+      alert('Link de test copiado');
+    } catch {
+      // Clipboard can be blocked (permissions / insecure context) — show the link to copy manually.
+      window.prompt('Copia este link de test manualmente:', url);
+    }
   };
 
   const [reEvaluatingTest, setReEvaluatingTest] = useState(false);
@@ -552,7 +566,9 @@ export default function CandidateProfile() {
                       initedAppRef.current = next.id;
                       setApplication(next);
                       setInterviewObs(next.interviewObservation || { score: 0, notes: '', redFlags: '' });
-                      if (next.interviewScorecard) setScorecardData(next.interviewScorecard);
+                      // Blank scorecard if this application has none — don't carry the
+                      // previous application's scorecard over.
+                      setScorecardData(next.interviewScorecard || buildBlankScorecard());
                     }}
                     className="w-full p-2.5 bg-amber-50 border border-amber-200 rounded-xl font-bold text-slate-700 text-sm focus:ring-2 focus:ring-amber-400 outline-none"
                   >
@@ -1045,10 +1061,14 @@ export default function CandidateProfile() {
                     </div>
                     <p className="text-[10px] lg:text-sm font-medium text-slate-500">Formulario pendiente.</p>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         const url = `${window.location.origin}/eval/${application.id}`;
-                        navigator.clipboard.writeText(url);
-                        alert('Link del formulario copiado al portapapeles');
+                        try {
+                          await navigator.clipboard.writeText(url);
+                          alert('Link del formulario copiado al portapapeles');
+                        } catch {
+                          window.prompt('Copia este link del formulario manualmente:', url);
+                        }
                       }}
                       className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
                     >

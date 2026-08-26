@@ -34,15 +34,16 @@ export default function Interviews() {
     const qSessions = query(collection(db, 'interview_sessions'));
     const unsubSessions = onSnapshot(qSessions, (snapshot) => {
       const sessData = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
-      // Sort by date and time
-      sessData.sort((a: any, b: any) => {
-        const dateA = new Date(`${a.date}T${a.time}`);
-        const dateB = new Date(`${b.date}T${b.time}`);
-        return dateA.getTime() - dateB.getTime();
-      });
+      // Sort by date and time. Sessions with a missing/invalid date sort to the end
+      // (instead of scrambling the whole list with NaN comparisons).
+      const ms = (s: any) => {
+        const t = new Date(`${s.date}T${s.time || '00:00'}`).getTime();
+        return isNaN(t) ? Infinity : t;
+      };
+      sessData.sort((a: any, b: any) => ms(a) - ms(b));
       setSessions(sessData);
       setLoading(false);
-    });
+    }, (err) => { console.error('interview_sessions snapshot error:', err); setLoading(false); });
 
     // Listen to participants
     const qParts = query(collection(db, 'interview_participants'));
@@ -54,7 +55,7 @@ export default function Interviews() {
         partsBySession[data.sessionId].push(data);
       });
       setParticipants(partsBySession);
-    });
+    }, (err) => { console.error('interview_participants snapshot error:', err); });
 
     return () => {
       unsubSessions();
@@ -269,10 +270,10 @@ export default function Interviews() {
                         <div key={part.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
                           <div className="flex items-center">
                             <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs mr-3">
-                              {part.candidateName.charAt(0)}
+                              {(part.candidateName || '?').charAt(0)}
                             </div>
                             <div>
-                              <p className="text-sm font-bold text-slate-800">{part.candidateName}</p>
+                              <p className="text-sm font-bold text-slate-800">{part.candidateName || 'Sin nombre'}</p>
                               <select
                                 value={part.status}
                                 onChange={(e) => updateParticipantStatus(part.id, e.target.value)}

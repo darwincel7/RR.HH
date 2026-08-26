@@ -55,8 +55,13 @@ service cloud.firestore {
 
     match /candidates/{candidateId} {
       allow read: if isRecruiter() || isOwner(candidateId);
-      allow create: if isAuthenticated(); // Anonymous applicants create their profile
-      allow update: if isRecruiter() || isOwner(candidateId);
+      // Candidate profiles are now created ONLY server-side (Admin SDK via /api/apply,
+      // which dedupes and bypasses these rules) or by a recruiter (bulk upload / CV
+      // worker). Anonymous applicants can no longer mint arbitrary candidate docs — that
+      // previously let anyone forge the AI screening result (aiExtraction) or plant a
+      // pending doc with an attacker-controlled cvUrl the CV worker would then fetch (SSRF).
+      allow create, update: if isRecruiter();
+      allow delete: if isRecruiter();
     }
 
     match /applications/{applicationId} {
