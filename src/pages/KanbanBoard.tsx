@@ -4,7 +4,7 @@ import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTim
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
-import { PIPELINE_STAGES } from '../constants/stages';
+import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle } from 'lucide-react';
 
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
@@ -28,6 +28,20 @@ export default function KanbanBoard() {
   // Post-bulk-move WhatsApp delivery report (who did NOT get the automated message).
   const [sendReport, setSendReport] = useState<{ stage: string; sent: number; failed: any[] } | null>(null);
   const [retryingSends, setRetryingSends] = useState(false);
+
+  // Non-blocking floating notices (replace the old alert() popups): they appear at the
+  // right-middle edge, never intercept clicks elsewhere, and fade out on their own —
+  // so the recruiter can keep dragging card after card without dismissing anything.
+  type Toast = { id: number; kind: 'success' | 'error' | 'warning'; text: string; leaving: boolean };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toastSeq = React.useRef(0);
+  const showToast = (kind: Toast['kind'], text: string, ms = 3200) => {
+    const id = ++toastSeq.current;
+    setToasts(prev => [...prev, { id, kind, text, leaving: false }]);
+    window.setTimeout(() => setToasts(prev => prev.map(t => t.id === id ? { ...t, leaving: true } : t)), ms);
+    window.setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), ms + 400);
+  };
+  const dismissToast = (id: number) => setToasts(prev => prev.filter(t => t.id !== id));
 
   // Bulk upload state
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
@@ -160,9 +174,9 @@ export default function KanbanBoard() {
     if (isInterviewStage(targetStage)) {
       const st = scheduleStatus();
       if (!st.valid) {
-        alert(st.isPast
-          ? '⚠️ La fecha de entrevista de arriba YA PASÓ. Actualízala a una fecha futura antes de convocar.'
-          : '📅 Antes de convocar a entrevista, indica ARRIBA la fecha, hora y lugar (deben ser a futuro).');
+        showToast('warning', st.isPast
+          ? '⚠️ La fecha de entrevista de arriba YA PASÓ. Ponla a futuro antes de convocar.'
+          : '📅 Antes de convocar, indica arriba la fecha, hora y lugar de la entrevista.', 6000);
         setBulkActionLoading(false);
         return;
       }
@@ -242,16 +256,16 @@ export default function KanbanBoard() {
     setBulkActionLoading(false);
 
     if (failed.length > 0) {
-      alert(`Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`);
+      showToast('error', `Movidos ${movedCount}. No se pudieron mover ${failed.length}: ${failed.slice(0, 5).join(', ')}${failed.length > 5 ? '…' : ''}. Revisa tus permisos.`, 7000);
     }
-    const scheduleNote = (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage))
-      ? `\n\n📅 Para enviarles la invitación por WhatsApp con fecha y hora, agéndala en la página "Entrevistas".`
-      : '';
     if (failedSends.length > 0) {
       // Show exactly WHO didn't get the message, with one-click retry.
       setSendReport({ stage: targetStage, sent: sentCount, failed: failedSends });
     } else if (failed.length === 0) {
-      alert(`✅ ${movedCount} candidato(s) movidos exitosamente a "${targetStage}".${sentCount > 0 ? ` ${sentCount} mensaje(s) de WhatsApp enviados.` : ''}${scheduleNote}`);
+      showToast('success', `${movedCount} candidato(s) movidos a "${targetStage}"${sentCount > 0 ? ` · ${sentCount} WhatsApp enviados` : ''}`, 4000);
+      if (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage)) {
+        showToast('warning', '📅 Para enviarles la invitación con fecha y hora, agéndala en la página Entrevistas.', 6500);
+      }
     }
   };
 
@@ -392,9 +406,9 @@ export default function KanbanBoard() {
     if (!sameColumn && isInterviewStage(newStage)) {
       const st = scheduleStatus();
       if (!st.valid) {
-        alert(st.isPast
-          ? '⚠️ La fecha de entrevista de arriba YA PASÓ.\n\nActualízala a una fecha y hora futuras antes de convocar candidatos a entrevista.'
-          : '📅 Antes de convocar a entrevista, indica ARRIBA la fecha, hora y lugar (deben ser a futuro). Así la invitación por WhatsApp saldrá con esos datos.');
+        showToast('warning', st.isPast
+          ? '⚠️ La fecha de entrevista de arriba YA PASÓ. Ponla a futuro antes de convocar.'
+          : '📅 Antes de convocar, indica arriba la fecha, hora y lugar de la entrevista.', 6000);
         return;
       }
     }
@@ -422,6 +436,10 @@ export default function KanbanBoard() {
     setApplications(prev => prev.map(app =>
       app.id === draggableId ? { ...app, stage: newStage, kanbanOrder: newOrder } : app
     ));
+
+    // Instant green check — the Firestore write and WhatsApp automation continue in the
+    // background, so the recruiter can immediately drag the next card.
+    if (!sameColumn) showToast('success', `${movedApp.candidateName} → ${newStage}`, 2600);
 
     // Update in Firestore
     try {
@@ -463,23 +481,39 @@ export default function KanbanBoard() {
           });
           // The move already succeeded; only warn (don't revert) if the message failed.
           if (r.status === 'failed') {
-            alert('El candidato se movió, pero NO se pudo enviar el WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+            showToast('error', `${movedApp.candidateName} se movió, pero NO se envió el WhatsApp. Revisa la conexión en Configuración.`, 6500);
           } else if (r.status === 'sent' && isInterviewStage(newStage)) {
             const st = scheduleStatus();
-            alert(`✅ Invitación enviada a ${movedApp.candidateName} por WhatsApp${st.dt ? `\n\n🗓️ ${fmtFecha(st.dt)} · 🕒 ${fmtHora(st.dt)}${schedLocation ? ` · 📍 ${schedLocation}` : ''}` : ''}`);
+            showToast('success', `📩 Invitación enviada a ${movedApp.candidateName}${st.dt ? ` · ${fmtFecha(st.dt)}, ${fmtHora(st.dt)}` : ''}${schedLocation ? ` · ${schedLocation}` : ''}`, 5000);
+          } else if (r.status === 'sent') {
+            showToast('success', `📩 WhatsApp de "${newStage}" enviado a ${movedApp.candidateName}`, 3600);
           }
         }
       }
 
       // "Oferta" still schedules from the Entrevistas page (a different meeting).
       if (stageNeedsScheduling(newStage) && !isInterviewStage(newStage)) {
-        alert(`✅ ${movedApp.candidateName} quedó en "${newStage}".\n\n📅 Para enviarle la invitación por WhatsApp con la fecha y hora, agéndala en la página "Entrevistas" (menú lateral).`);
+        showToast('warning', `📅 ${movedApp.candidateName} está en "${newStage}": agenda la cita en la página Entrevistas para enviarle la invitación.`, 6500);
       }
     } catch (error) {
       console.error("Error updating stage:", error);
       setApplications(previousApps); // Revert UI
-      alert("Error al mover el candidato. Verifica tus permisos.");
+      showToast('error', `No se pudo mover a ${movedApp.candidateName}. Verifica tu conexión o permisos.`, 6500);
     }
+  };
+
+  // When the application ARRIVED (short form for the card chip + full form for its tooltip).
+  const toJsDate = (t: any): Date | null => {
+    const d = t?.toDate ? t.toDate() : (t ? new Date(t) : null);
+    return d && !isNaN(d.getTime()) ? d : null;
+  };
+  const fmtArrivalShort = (t: any) => {
+    const d = toJsDate(t);
+    return d ? d.toLocaleDateString('es-DO', { day: 'numeric', month: 'short' }) : null;
+  };
+  const fmtArrivalFull = (t: any) => {
+    const d = toJsDate(t);
+    return d ? d.toLocaleString('es-DO', { day: 'numeric', month: 'long', year: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true }) : '';
   };
 
   const getDaysInStage = (lastUpdate: any, submittedAt: any) => {
@@ -519,7 +553,7 @@ export default function KanbanBoard() {
   })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
-    <div className="h-[calc(100vh-5rem)] lg:h-[calc(100vh-8rem)] flex flex-col animate-fade-in relative">
+    <div className="min-h-[calc(100vh-8rem)] flex flex-col animate-fade-in relative">
       <div className="mb-4 lg:mb-8 flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
           <h1 className="text-xl lg:text-3xl font-display font-bold text-slate-900 tracking-tight flex items-center">
@@ -606,14 +640,15 @@ export default function KanbanBoard() {
         );
       })()}
 
-      <div className="flex-1 overflow-x-auto overflow-y-hidden pb-2">
+      {/* Columns grow with their content and the PAGE scrolls vertically — no tiny
+          per-column scrollbar. Sibling columns still stretch to the tallest one so
+          the drop zone keeps covering the whole column. */}
+      <div className="flex-1 overflow-x-auto pb-4">
         <DragDropContext onDragEnd={onDragEnd}>
-          {/* Columns stretch to full height so the drop zone covers the WHOLE column —
-              a card can be dropped at the top, middle, bottom or on the empty area. */}
-          <div className="flex h-full space-x-4 lg:space-x-6 min-w-max px-1">
+          <div className="flex items-stretch space-x-4 lg:space-x-6 min-w-max px-1">
             {columns.map(column => (
-              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col h-full">
-                <div className="mb-3 flex justify-between items-center px-1">
+              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col">
+                <div className="mb-1.5 flex justify-between items-center px-1">
                   <h3 className="font-display font-bold text-slate-700 text-[10px] lg:text-xs uppercase tracking-widest">{column.title}</h3>
                   <div className="flex items-center gap-2">
                     <button
@@ -642,13 +677,18 @@ export default function KanbanBoard() {
                     </span>
                   </div>
                 </div>
-                
+
+                {/* Subtle one-liner: what this stage means and why it exists. */}
+                <p className="mb-2.5 px-1 text-[9px] lg:text-[10px] text-slate-400 leading-snug" title={STAGE_INFO[column.id]}>
+                  {STAGE_INFO[column.id]}
+                </p>
+
                 <Droppable droppableId={column.id}>
                   {(provided, snapshot) => (
                     <div
                       ref={provided.innerRef}
                       {...provided.droppableProps}
-                      className={`flex-1 overflow-y-auto p-2 lg:p-3 min-h-[150px] rounded-2xl lg:rounded-3xl transition-all duration-300 ${
+                      className={`flex-1 p-2 lg:p-3 min-h-[300px] rounded-2xl lg:rounded-3xl transition-all duration-300 ${
                         snapshot.isDraggingOver ? 'bg-violet-50/50 border-2 border-dashed border-violet-300' : 'bg-slate-100/50 border-2 border-transparent'
                       }`}
                     >
@@ -710,10 +750,22 @@ export default function KanbanBoard() {
                                     {item.recommendation === 'review' && <span className="w-2 h-2 rounded-full bg-amber-500" title="Revisar"></span>}
                                     {item.recommendation === 'low_priority' && <span className="w-2 h-2 rounded-full bg-rose-500" title="Baja prioridad"></span>}
                                     
-                                    <div className={`flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded-md ${isStale ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}>
+                                    <div
+                                      title={`Lleva ${daysInStage} día(s) en la etapa "${item.stage}"`}
+                                      className={`flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded-md ${isStale ? 'bg-orange-100 text-orange-700' : 'bg-slate-100 text-slate-500'}`}
+                                    >
                                       <Clock className="w-2.5 h-2.5 mr-1" />
-                                      {daysInStage}d
+                                      {daysInStage}d aquí
                                     </div>
+                                    {fmtArrivalShort(item.submittedAt) && (
+                                      <div
+                                        title={`Postulación recibida el ${fmtArrivalFull(item.submittedAt)}`}
+                                        className="flex items-center text-[9px] font-bold px-1.5 py-0.5 rounded-md bg-sky-50 text-sky-600"
+                                      >
+                                        <Calendar className="w-2.5 h-2.5 mr-1" />
+                                        {fmtArrivalShort(item.submittedAt)}
+                                      </div>
+                                    )}
                                   </div>
                                   <div className="text-[10px] text-violet-600 font-bold flex items-center bg-violet-50 px-2 py-1 rounded-md">
                                     <User className="w-2.5 h-2.5 mr-1" />
@@ -909,6 +961,30 @@ export default function KanbanBoard() {
           </div>
         </div>
       </Modal>
+
+      {/* Floating notices: right-middle, never block clicks elsewhere (pointer-events-none
+          on the rail), fade out on their own; click one to dismiss it early. */}
+      <div className="fixed right-3 lg:right-5 top-1/2 -translate-y-1/2 z-[120] flex flex-col items-end gap-2 pointer-events-none max-w-[85vw] sm:max-w-sm">
+        {toasts.map(t => (
+          <div
+            key={t.id}
+            onClick={() => dismissToast(t.id)}
+            role="status"
+            className={`pointer-events-auto cursor-pointer flex items-start gap-2.5 pl-3.5 pr-4 py-3 rounded-xl shadow-xl border text-xs lg:text-sm font-semibold transition-all duration-300 ${
+              t.leaving ? 'opacity-0 translate-x-4' : 'opacity-100 translate-x-0'
+            } ${
+              t.kind === 'success' ? 'bg-white border-emerald-200 text-slate-700'
+              : t.kind === 'warning' ? 'bg-amber-50 border-amber-200 text-amber-800'
+              : 'bg-rose-50 border-rose-200 text-rose-700'
+            }`}
+          >
+            {t.kind === 'success' && <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0" />}
+            {t.kind === 'warning' && <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />}
+            {t.kind === 'error' && <X className="w-5 h-5 text-rose-500 shrink-0" />}
+            <span className="leading-snug">{t.text}</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

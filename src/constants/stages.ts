@@ -1,3 +1,24 @@
+// One-line purpose of each stage, shown subtly under the column header in the funnel.
+export const STAGE_INFO: Record<string, string> = {
+  'Nuevo': 'Acaban de llegar: CVs que nadie ha revisado todavía.',
+  'Aplicó': 'Completó el formulario de aplicación del portal.',
+  'CV recibido': 'Su currículum fue recibido y procesado.',
+  'Precalificado': 'La IA analizó el CV y lo considera apto para seguir.',
+  'Revisión humana': 'Espera que el equipo revise el perfil manualmente.',
+  'Contacto WhatsApp 1': 'Se le envió el primer mensaje de contacto por WhatsApp.',
+  'Formulario etapa 2 enviado': 'Recibió el formulario de evaluación; esperando que lo responda.',
+  'Formulario etapa 2 completado': 'Ya respondió el formulario; listo para evaluar.',
+  'Evaluación IA etapa 2': 'La IA calificó sus respuestas del formulario.',
+  'Convocado a entrevista': 'Invitado por WhatsApp a entrevista con fecha, hora y lugar.',
+  'Entrevista presencial': 'En entrevista cara a cara con el equipo.',
+  'Tests presenciales': 'Realizando las pruebas técnicas presenciales.',
+  'Finalista': 'Superó todas las etapas: entre los mejores para el puesto.',
+  'Oferta': 'Se le está presentando la oferta de trabajo.',
+  'Contratado': 'Proceso completado con éxito: ya es parte del equipo.',
+  'Descartado': 'No continúa en el proceso para esta vacante.',
+  'Banco de talento': 'Buen perfil guardado para futuras vacantes.',
+};
+
 export const PIPELINE_STAGES = [
   'Nuevo',
   'Aplicó',
