@@ -31,6 +31,25 @@ Para que eso funcione, hay que hacer **UN solo paso, UNA sola vez**. Después nu
    pégalo tal cual.
 6. **Add secret**.
 
+### 2.5. Dale permisos a esa cuenta de servicio (necesario una sola vez)
+
+La llave recién creada autentica, pero por defecto **no tiene permiso para publicar
+reglas**. Hay que darle dos roles:
+
+1. Abre IAM del proyecto:
+   <https://console.cloud.google.com/iam-admin/iam?project=gen-lang-client-0929279196>
+2. Busca la fila de la cuenta que termina en
+   `@gen-lang-client-0929279196.iam.gserviceaccount.com`
+   (normalmente empieza con `firebase-adminsdk-`).
+3. Clic en el **lápiz** ✏️ de esa fila.
+4. **+ AGREGAR OTRO ROL** y añade estos dos:
+   - **Firebase Rules Admin** (publicar las reglas)
+   - **Service Usage Consumer** (dejar que verifique que la API está activa)
+5. **Guardar**.
+
+> Si prefieres lo más rápido en vez de lo más preciso, un solo rol **Editor** también
+> funciona (da más permisos de los necesarios).
+
 ### 3. ¡Listo!
 De ahora en adelante, cada vez que yo (o cualquiera) cambie las reglas y lo suba a
 `main`, se despliegan solas. Puedes verlo en la pestaña **Actions** del repo.
