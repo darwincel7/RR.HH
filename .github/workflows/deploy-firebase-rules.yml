@@ -1,0 +1,49 @@
+name: Deploy Firebase Rules
+
+# Auto-deploys the Firestore + Storage security rules to the "produccion" database
+# whenever they change on main. This is what lets rule fixes go live without anyone
+# opening the Firebase console — a push IS the deploy.
+#
+# ONE-TIME SETUP (see FIREBASE_DEPLOY_SETUP.md):
+#   Add a repository secret named FIREBASE_SERVICE_ACCOUNT containing the JSON of a
+#   Firebase service account key (Project Settings -> Service accounts -> Generate new
+#   private key). Nothing else is required.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'firestore.rules'
+      - 'storage.rules'
+      - 'firebase.json'
+      - '.firebaserc'
+  workflow_dispatch: {}
+
+jobs:
+  deploy-rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Firebase CLI
+        run: npm install -g firebase-tools
+
+      - name: Deploy Firestore & Storage rules
+        env:
+          # firebase-tools authenticates with this service-account file.
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          if [ -z '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' ]; then
+            echo "::error::Falta el secreto FIREBASE_SERVICE_ACCOUNT. Mira FIREBASE_DEPLOY_SETUP.md"
+            exit 1
+          fi
+          printf '%s' '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+          firebase deploy \
+            --only firestore:rules,storage \
+            --project gen-lang-client-0929279196 \
+            --non-interactive
+          rm -f "$GOOGLE_APPLICATION_CREDENTIALS"
