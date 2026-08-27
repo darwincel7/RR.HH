@@ -1,13 +1,19 @@
 import React, { useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, doc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { apiFetch } from '../lib/api';
+import { apiFetch, requestCvWorkerRun } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { normalizePhone } from '../lib/phone';
+
+// How often an open recruiter tab pokes the backend queue. Generous on purpose: this
+// is a safety net for CVs the server's own triggers missed, not the main path — an
+// application already kicks the worker the moment it arrives.
+const HEARTBEAT_MS = 3 * 60 * 1000;
 
 export default function CVWorker() {
   const { isRecruiter } = useAuth();
   const isRunning = useRef(false);
+  const isPinging = useRef(false);
 
   useEffect(() => {
     // Only run the worker if the logged-in user is a recruiter
@@ -124,15 +130,40 @@ export default function CVWorker() {
       }
     };
 
+    // Ask the server to drain its queue. One request at a time: a drain can hold the
+    // connection for minutes, so stacking pings would gain nothing (the server just
+    // answers "busy" and returns).
+    const heartbeat = async () => {
+      if (isPinging.current) return;
+      isPinging.current = true;
+      try {
+        await requestCvWorkerRun();
+      } finally {
+        isPinging.current = false;
+      }
+    };
+
     const start = async () => {
-      // If the backend processes CVs (admin mode), the browser worker stands down
-      // to avoid duplicate processing across multiple recruiters.
+      // Does the backend own CV parsing? (Admin SDK credentials present.)
+      let serverOwnsCvs = false;
       try {
         const health = await fetch('/api/health').then(r => r.json()).catch(() => ({}));
-        if (cancelled || health?.serverCvWorker) return;
-      } catch { /* fall through and run in the browser */ }
+        serverOwnsCvs = !!health?.serverCvWorker;
+      } catch { /* assume it doesn't, and parse in the browser below */ }
       if (cancelled) return;
-      // Run once immediately, then every 60 seconds
+
+      if (serverOwnsCvs) {
+        // The browser must NOT parse too — two recruiters would double-process the same
+        // CVs. It becomes a heartbeat instead: the server's 60s timer stalls whenever
+        // the host throttles CPU between requests, so on a quiet day an open recruiter
+        // tab is what keeps the queue moving. The request itself is what hands the
+        // server the CPU to drain it.
+        heartbeat();
+        intervalId = setInterval(heartbeat, HEARTBEAT_MS);
+        return;
+      }
+
+      // No admin credentials (dev): the browser parses the CVs itself, as before.
       runWorker();
       intervalId = setInterval(runWorker, 60 * 1000);
     };

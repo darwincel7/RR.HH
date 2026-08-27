@@ -79,23 +79,32 @@ mismo CV) y los puntúa con Gemini de a 3 en paralelo. Los que quedan atascados 
 ([`CVWorker.tsx`](src/components/CVWorker.tsx)) hace el trabajo; consulta `/api/health` y
 se aparta en cuanto el backend se encarga.
 
-Hay **tres** cosas que ponen el worker a trabajar, porque una sola no basta:
+Hay **cuatro** cosas que ponen el worker a trabajar, porque una sola no basta:
 
 | Disparador | Cuándo |
 |---|---|
-| Temporizador cada 60 s | Mientras el proceso tenga CPU |
 | Aviso interno tras `/api/apply` | Al instante en que llega una postulación |
-| `POST /api/cv-worker/run` | Bajo demanda: acciones del reclutador o un ping programado |
+| `POST /api/cv-worker/run` desde la app | Cuando el reclutador sube CVs en lote o reintenta los que fallaron |
+| Latido del navegador (cada 3 min) | Mientras un reclutador tenga la app abierta |
+| Temporizador cada 60 s | Mientras el proceso tenga CPU (red de seguridad) |
 
 El temporizador por sí solo no es suficiente en Cloud Run: fuera de una petición la CPU
-se limita, así que entre visitas el `setInterval` se detiene y la cola queda quieta. El
-endpoint vacía la cola **dentro** de una petición, donde la CPU está garantizada, y corta
-a los 4 minutos para no chocar con el tiempo límite de 5 minutos de Cloud Run (responde
-`incomplete: true` si quedó trabajo pendiente).
+se limita, así que entre visitas el `setInterval` se detiene y la cola queda quieta. Por
+eso los otros tres disparadores son peticiones HTTP — vaciar la cola **dentro** de una
+petición es lo que garantiza la CPU para hacerlo. El endpoint corta a los 4 minutos para
+no chocar con el tiempo límite de 5 minutos de Cloud Run y responde `incomplete: true`
+si quedó trabajo pendiente.
 
-Lo pueden llamar los reclutadores autenticados o un programador con el secreto
-`CV_WORKER_TOKEN` en la cabecera `X-CV-Worker-Token`. Para garantizar el procesamiento
-con cero tráfico, apunta un Cloud Scheduler cada 5 minutos a:
+El latido vive en [`CVWorker.tsx`](src/components/CVWorker.tsx): cuando el backend es
+quien analiza (hay credenciales de Admin), el navegador **no** analiza —dos reclutadores
+duplicarían el trabajo— sino que llama al endpoint cada 3 minutos. En desarrollo, sin
+credenciales de Admin, ese mismo componente analiza los CV él mismo.
+
+Al endpoint lo pueden llamar los reclutadores autenticados o un programador externo con
+el secreto `CV_WORKER_TOKEN` en la cabecera `X-CV-Worker-Token`. Esto último es
+**opcional**: solo hace falta si se quiere garantizar el procesamiento en un periodo en
+que nadie se postule *y* ningún reclutador abra la app. Para activarlo, define
+`CV_WORKER_TOKEN` en el servicio y apunta un Cloud Scheduler cada 5 minutos a:
 
 ```
 POST https://<tu-app>/api/cv-worker/run
