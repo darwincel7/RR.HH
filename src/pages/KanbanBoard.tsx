@@ -10,6 +10,7 @@ import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, Fi
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
+import { requestCvWorkerRun } from '../lib/api';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -364,7 +365,10 @@ export default function KanbanBoard() {
         
         setUploadProgress(Math.round((completed / validFiles.length) * 100));
       }
-      
+
+      // Every CV is queued now — start the analysis immediately.
+      requestCvWorkerRun();
+
       // Close and clean
       setTimeout(() => {
         setIsUploading(false);

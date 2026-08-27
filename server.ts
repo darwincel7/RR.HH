@@ -19,6 +19,7 @@ import { Boom } from "@hapi/boom";
 import QRCode from "qrcode";
 import pino from "pino";
 import fs from "fs";
+import crypto from "crypto";
 import mammoth from "mammoth";
 
 import { setLogLevel } from 'firebase/firestore';
@@ -432,8 +433,9 @@ let cvWorkerRunning = false;
 const CV_CONCURRENCY = 3;
 
 // Parses one already-claimed candidate's CV and writes the results. Isolated so one
-// candidate's failure never aborts the others in the batch.
-async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string }) {
+// candidate's failure never aborts the others in the batch. Returns true when the CV
+// was scored, false when it ended in 'error', so a run can report what it achieved.
+async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string }): Promise<boolean> {
   const isBulk = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
   try {
     const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
@@ -457,6 +459,7 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       await db.setDocData('applications', appId, appUpdate);
     }
     console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
+    return true;
   } catch (err: any) {
     console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
     await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
@@ -466,19 +469,26 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
         await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
       }
     }
+    return false;
   }
 }
 
-async function processPendingCVs() {
-  if (cvWorkerRunning || !db?.canEnforceAuth) return;
+// What a single worker pass achieved. `skipped` means another pass was already in
+// flight, so the caller learns "busy", not "nothing to do" — the two are different.
+type CvWorkerRun = { skipped: boolean; reclaimed: number; claimed: number; scored: number; failed: number };
+
+async function processPendingCVs(max = 12): Promise<CvWorkerRun> {
+  const empty: CvWorkerRun = { skipped: true, reclaimed: 0, claimed: 0, scored: 0, failed: 0 };
+  if (cvWorkerRunning || !db?.canEnforceAuth) return empty;
   cvWorkerRunning = true;
+  const run: CvWorkerRun = { skipped: false, reclaimed: 0, claimed: 0, scored: 0, failed: 0 };
   try {
     // Return any candidate stranded in 'processing' (e.g. by a crash/restart or
     // scale-to-zero mid-parse) back to 'pending' so it gets retried.
-    const reclaimed = await db.reclaimStuckProcessing(5 * 60 * 1000);
-    if (reclaimed) console.log(`[server CV worker] reclaimed ${reclaimed} stuck candidate(s) to pending`);
-    const pending = await db.listPendingCandidates(12);
-    if (pending.length === 0) return;
+    run.reclaimed = await db.reclaimStuckProcessing(5 * 60 * 1000);
+    if (run.reclaimed) console.log(`[server CV worker] reclaimed ${run.reclaimed} stuck candidate(s) to pending`);
+    const pending = await db.listPendingCandidates(max);
+    if (pending.length === 0) return run;
 
     // Bounded-concurrency workers pull from a shared queue. queue.shift() is safe across
     // these async workers because JS runs them on a single thread (no two shift() calls
@@ -491,7 +501,8 @@ async function processPendingCVs() {
         if (!cand) return;
         const claimed = await db.claimCandidate(cand.id);
         if (!claimed) continue;
-        await processOneCandidate(cand);
+        run.claimed++;
+        if (await processOneCandidate(cand)) run.scored++; else run.failed++;
       }
     };
     await Promise.all(Array.from({ length: Math.min(CV_CONCURRENCY, pending.length) }, worker));
@@ -500,6 +511,39 @@ async function processPendingCVs() {
   } finally {
     cvWorkerRunning = false;
   }
+  return run;
+}
+
+// Kick the worker without making the caller wait for Gemini. Used right after a CV is
+// enqueued (a new application) so parsing starts immediately instead of idling until
+// the next 60s tick — which on Cloud Run may never arrive, because CPU is throttled
+// outside request handling and background timers stall between requests.
+function nudgeCvWorker(reason: string) {
+  if (!db?.canEnforceAuth || cvWorkerRunning) return;
+  processPendingCVs().catch(e => console.error(`[server CV worker] nudge (${reason}) failed:`, e));
+}
+
+// Drains the queue in one call, bounded by a deadline so the HTTP request that drives
+// it always returns. This is the path that works with zero background CPU: a scheduled
+// ping (or a recruiter action) holds a request open while the queue empties.
+const CV_DRAIN_DEADLINE_MS = 240_000; // stay inside Cloud Run's 300s default request timeout
+
+async function drainPendingCVs(): Promise<CvWorkerRun & { busy: boolean; deadlineHit: boolean }> {
+  const started = Date.now();
+  const total = { skipped: false, reclaimed: 0, claimed: 0, scored: 0, failed: 0, busy: false, deadlineHit: false };
+  for (;;) {
+    const run = await processPendingCVs();
+    if (run.skipped) { total.busy = true; break; }
+    total.reclaimed += run.reclaimed;
+    total.claimed += run.claimed;
+    total.scored += run.scored;
+    total.failed += run.failed;
+    // Nothing claimed => the queue is empty (failures land in 'error', not back in
+    // 'pending', so this terminates rather than spinning on the same documents).
+    if (run.claimed === 0) break;
+    if (Date.now() - started > CV_DRAIN_DEADLINE_MS) { total.deadlineHit = true; break; }
+  }
+  return total;
 }
 
 async function startServer() {
@@ -876,6 +920,11 @@ async function startServer() {
 
       try { await sendApplyConfirmation(str(email), str(name), vacancy.title || ''); } catch (e) { console.error('confirmation email failed', e); }
 
+      // The CV was just queued (aiStatus 'pending'). Start parsing now instead of
+      // waiting for the next 60s tick — we don't await it, the applicant gets their
+      // confirmation immediately.
+      nudgeCvWorker('nueva postulación');
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error creating application:", error);
@@ -1165,6 +1214,64 @@ async function startServer() {
       console.error("Error scoring stage 2:", error);
       res.status(500).json({ error: "Failed to score stage 2", details: error.message || String(error) });
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // On-demand CV worker
+  // ---------------------------------------------------------------------------
+  // The background interval only runs while the process has CPU. On Cloud Run CPU is
+  // throttled outside request handling, so between requests that timer stalls and the
+  // queue can sit untouched. This endpoint drains the queue INSIDE a request, where CPU
+  // is guaranteed — so a scheduled ping (Cloud Scheduler / uptime check) keeps CVs
+  // flowing even with no traffic, and a recruiter action can force an immediate pass.
+  //
+  // Callers: a signed-in recruiter, or a scheduler presenting CV_WORKER_TOKEN.
+  const schedulerTokenOk = (req: any): boolean => {
+    const expected = process.env.CV_WORKER_TOKEN;
+    if (!expected) return false;
+    const provided = req.headers['x-cv-worker-token'];
+    if (typeof provided !== 'string') return false;
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    // Compare BYTE lengths, not string lengths: two strings of equal character count
+    // can differ in bytes (UTF-8), and timingSafeEqual throws on a length mismatch.
+    if (a.length !== b.length) return false;
+    // Constant-time compare so the token can't be recovered by timing the responses.
+    return crypto.timingSafeEqual(a, b);
+  };
+
+  const runDrain = async (res: any) => {
+    try {
+      const result = await drainPendingCVs();
+      if (result.busy) {
+        return res.json({ busy: true, message: 'El worker ya está procesando CV en este momento.' });
+      }
+      console.log(`[server CV worker] on-demand run: ${result.scored} scored, ${result.failed} failed, ${result.reclaimed} reclaimed`);
+      return res.json({
+        busy: false,
+        scored: result.scored,
+        failed: result.failed,
+        reclaimed: result.reclaimed,
+        // True when we stopped at the time budget with work still queued; the caller
+        // (or the next scheduled ping) should run again to finish the rest.
+        incomplete: result.deadlineHit,
+      });
+    } catch (err: any) {
+      console.error('[server CV worker] on-demand run failed:', err);
+      return res.status(500).json({ error: 'No se pudo procesar la cola de CV.' });
+    }
+  };
+
+  app.post("/api/cv-worker/run", globalRateLimit(60), rateLimit(20), async (req: any, res) => {
+    if (!db?.canEnforceAuth) {
+      // No Admin SDK => the browser worker is the one processing CVs (dev mode).
+      return res.status(503).json({ error: 'El worker del servidor no está activo; el navegador procesa los CV en este modo.' });
+    }
+    if (!schedulerTokenOk(req)) {
+      // Not the scheduler — fall back to normal recruiter auth.
+      return requireRecruiter(req, res, () => runDrain(res));
+    }
+    return runDrain(res);
   });
 
   app.get("/api/test-ai", requireRecruiter, async (req, res) => {

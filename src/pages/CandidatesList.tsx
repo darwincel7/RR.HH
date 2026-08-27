@@ -8,6 +8,7 @@ import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTrian
 import { Link } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
 import { PIPELINE_STAGES } from '../constants/stages';
+import { requestCvWorkerRun } from '../lib/api';
 
 export default function CandidatesList() {
   const [candidates, setCandidates] = useState<any[]>([]);
@@ -177,6 +178,8 @@ export default function CandidatesList() {
         await batch.commit();
       }
       setErroredCount(0);
+      // Wake the server worker so the retry starts now instead of on its next tick.
+      requestCvWorkerRun();
       alert(`${docs.length} CV puestos en cola. La IA los reprocesará en unos segundos.`);
       refresh();
     } catch (e) {
@@ -406,7 +409,10 @@ export default function CandidatesList() {
         
         setUploadProgress(Math.round((completed / files.length) * 100));
       }
-      
+
+      // Every CV is queued now — start the analysis immediately.
+      requestCvWorkerRun();
+
       // Close and refresh
       setTimeout(() => {
         setIsUploading(false);
