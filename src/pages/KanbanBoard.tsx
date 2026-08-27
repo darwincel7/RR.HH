@@ -11,6 +11,7 @@ import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhats
 import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { requestCvWorkerRun } from '../lib/api';
+import { getKanbanOrder, computeDropOrder } from '../lib/kanbanOrder';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -385,15 +386,6 @@ export default function KanbanBoard() {
     }
   };
 
-  // Position of a card inside its column: an explicit kanbanOrder (set when the
-  // recruiter drops a card at a specific spot) wins; otherwise fall back to the
-  // application date so existing boards keep a stable, sensible order.
-  const getKanbanOrder = (app: any): number => {
-    if (typeof app.kanbanOrder === 'number') return app.kanbanOrder;
-    const t: any = app.submittedAt;
-    return t?.toMillis ? t.toMillis() : (t?.toDate ? t.toDate().getTime() : 0);
-  };
-
   const onDragEnd = async (result: DropResult) => {
     const { destination, source, draggableId } = result;
 
@@ -427,13 +419,7 @@ export default function KanbanBoard() {
     const destItems = filteredApplications
       .filter(app => app.stage === newStage && app.id !== draggableId)
       .sort((a, b) => getKanbanOrder(b) - getKanbanOrder(a));
-    const prevItem = destItems[destination.index - 1]; // card ABOVE the slot (higher order)
-    const nextItem = destItems[destination.index];     // card BELOW the slot (lower order)
-    let newOrder: number;
-    if (prevItem && nextItem) newOrder = (getKanbanOrder(prevItem) + getKanbanOrder(nextItem)) / 2;
-    else if (prevItem) newOrder = getKanbanOrder(prevItem) - 100000; // dropped at the bottom
-    else if (nextItem) newOrder = getKanbanOrder(nextItem) + 100000; // dropped at the top
-    else newOrder = Date.now();
+    const newOrder = computeDropOrder(destItems, destination.index, Date.now());
 
     // Optimistic UI update
     const previousApps = [...applications];

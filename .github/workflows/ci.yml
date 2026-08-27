@@ -1,0 +1,40 @@
+name: CI
+
+# Verifica cada cambio ANTES de que llegue a producción: que compile, que los tipos
+# cuadren y que las pruebas pasen. Sin esto, un error de tipos o una prueba rota solo
+# se descubría desplegando (o auditando a mano semanas después).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  verificar:
+    name: Tipos, pruebas y build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      # Cada paso corre aunque el anterior falle, para que un push roto muestre TODOS
+      # sus problemas de una vez en lugar de uno por intento.
+      - name: Verificar tipos
+        run: npm run lint
+
+      - name: Pruebas
+        if: '!cancelled()'
+        run: npm test
+
+      - name: Build
+        if: '!cancelled()'
+        run: npm run build

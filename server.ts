@@ -68,6 +68,12 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 
 // Wraps ai.models.generateContent with a hard timeout + bounded exponential backoff
 // on transient errors (429/5xx/timeout). Prevents thundering-herd during AI spikes.
+// The Gemini model every AI feature uses (CV parsing, stage-2 scoring, test grading).
+// Overridable via GEMINI_MODEL because the default is a *preview* build: Google retires
+// those on its own schedule, and when that happens every AI feature fails at once. With
+// this, recovering is an env-var change and a restart — not a code edit and a redeploy.
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
+
 async function generateContentResilient(ai: GoogleGenAI, params: any, opts: { timeoutMs?: number; retries?: number } = {}): Promise<any> {
   const timeoutMs = opts.timeoutMs ?? 90_000;
   const retries = opts.retries ?? 2;
@@ -407,7 +413,7 @@ async function runCvParse(input: { pdfBase64?: string; mimeType?: string; fileUr
   }
 
   const response = await generateContentResilient(ai,{
-    model: 'gemini-3.1-pro-preview',
+    model: GEMINI_MODEL,
     contents: [prompt, contentsPart],
     config: {
       responseMimeType: "application/json",
@@ -933,18 +939,15 @@ async function startServer() {
   });
 
   // WhatsApp Endpoints
+  // Builds the WhatsApp JID from a phone number. Delegates to the SAME normalizePhone
+  // the client uses to store `phoneNormalized`, so an outgoing number and the stored one
+  // can never drift apart — when these two were separate implementations, inbound replies
+  // stopped matching their candidate.
   const formatWhatsAppNumber = (phone: string) => {
     if (typeof phone !== 'string') throw new Error('phone_invalido');
-    let cleaned = phone.replace(/\D/g, '');
-    if (cleaned.length < 7) throw new Error('phone_invalido');
-    
-    // En República Dominicana (y otros países del NANP), el código de país es +1
-    // Los números locales tienen 10 dígitos (ej. 809XXXXXXX, 829XXXXXXX, 849XXXXXXX)
-    if (cleaned.length === 10) {
-      cleaned = '1' + cleaned;
-    }
-    
-    return cleaned + '@s.whatsapp.net';
+    const normalized = normalizePhone(phone);
+    if (normalized.length < 7) throw new Error('phone_invalido');
+    return normalized + '@s.whatsapp.net';
   };
 
   app.get("/api/whatsapp/status", requireRecruiter, (req, res) => {
@@ -1182,7 +1185,7 @@ async function startServer() {
       }
 
       const response = await generateContentResilient(ai,{
-        model: 'gemini-3.1-pro-preview',
+        model: GEMINI_MODEL,
         contents: [prompt],
         config: {
           responseMimeType: "application/json",
@@ -1282,7 +1285,7 @@ async function startServer() {
       }
 
       const response = await generateContentResilient(ai,{
-        model: 'gemini-3.1-pro-preview',
+        model: GEMINI_MODEL,
         contents: ["Say 'Hello, AI is working!'"]
       });
       res.json({ success: true, message: response.text });
@@ -1376,7 +1379,7 @@ async function startServer() {
       }
 
       const response = await generateContentResilient(ai,{
-        model: 'gemini-3.1-pro-preview',
+        model: GEMINI_MODEL,
         contents: [prompt, contentsPart],
         config: {
           responseMimeType: "application/json",
@@ -1551,7 +1554,7 @@ async function startServer() {
       }
 
       const response = await generateContentResilient(ai,{
-        model: "gemini-3.1-pro-preview",
+        model: GEMINI_MODEL,
         contents: prompt,
         config: {
           responseMimeType: "application/json",

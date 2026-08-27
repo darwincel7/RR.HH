@@ -54,6 +54,8 @@ npm run dev                  # levanta Express + Vite en http://localhost:3000
 | `GEMINI_API_KEY` | Clave de Google Gemini (**solo backend**, nunca se expone al cliente) |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_SECURE` / `SMTP_USER` / `SMTP_PASS` | Credenciales de correo (Nodemailer) |
 | `APP_URL` | URL pública donde se hospeda la app |
+| `GEMINI_MODEL` | *(Opcional)* Modelo de IA. El valor por defecto es una versión **preview** y Google las retira sin aviso: si la IA deja de responder, pon aquí el modelo vigente y reinicia — sin tocar código |
+| `CV_WORKER_TOKEN` | *(Opcional)* Secreto para que un ping programado externo vacíe la cola de CV (ver más abajo) |
 
 > La configuración de Firebase vive en `firebase-applet-config.json`. La `apiKey` de Firebase
 > **no es un secreto** (es identificadora, no de autorización); la seguridad real la imponen
@@ -67,6 +69,28 @@ npm run dev                  # levanta Express + Vite en http://localhost:3000
 | `npm run build` | Compila el frontend y empaqueta el servidor (`dist/server.cjs`) |
 | `npm run start` | Ejecuta el build de producción |
 | `npm run lint` | Type-check con TypeScript (`tsc --noEmit`) |
+| `npm test` | Pruebas automatizadas (Vitest) |
+| `npm run test:watch` | Pruebas en modo vigilancia, mientras programas |
+
+## Pruebas y CI
+
+`npm test` corre la suite con [Vitest](https://vitest.dev). Cubre la lógica pura donde un
+error es silencioso y caro:
+
+| Archivo | Qué protege |
+|---|---|
+| [`src/lib/phone.test.ts`](src/lib/phone.test.ts) | La forma canónica del teléfono: de ella dependen que una respuesta de WhatsApp se enlace con su candidato y que `/api/apply` detecte duplicados |
+| [`src/lib/kanbanOrder.test.ts`](src/lib/kanbanOrder.test.ts) | Que una tarjeta soltada en un punto del embudo se quede exactamente ahí, también tras recargar |
+| [`src/lib/whatsapp.test.ts`](src/lib/whatsapp.test.ts) | Qué etapas envían mensaje automático y cuáles exigen fecha/hora antes de enviar |
+| [`src/constants/stages.test.ts`](src/constants/stages.test.ts) | Que las dos definiciones del embudo (columnas y descripciones) no se desincronicen |
+
+El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
+push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
+problemas de una vez.
+
+El servidor y el cliente comparten **una sola** implementación de `normalizePhone`
+([`src/lib/phone.ts`](src/lib/phone.ts)) — cuando eran dos copias, se desincronizaron y
+las respuestas entrantes dejaron de enlazarse con su candidato.
 
 ## El worker de CV
 
@@ -121,11 +145,16 @@ Ya resuelto:
 - [x] **Paginación** en la lista de candidatos; agregación `count()` en el dashboard.
 - [x] Análisis de CV en un **worker de backend** con cola, reclamo atómico y disparo bajo demanda.
 - [x] **Rate limiting** por IP y global; despliegue automático de reglas por CI.
+- [x] **Pruebas automatizadas** (Vitest) y CI que verifica tipos, pruebas y build en cada push.
+- [x] Modelo de Gemini **configurable** (`GEMINI_MODEL`) en vez de fijado en 5 sitios del código.
+- [x] Gráficas del dashboard en su propio chunk (esa ruta pasó de ~507 KB a ~135 KB).
 
 Pendiente:
 
 - [ ] Validación de entrada con **Zod** (la dependencia está instalada pero sin usar; hoy la
-      validación es manual endpoint por endpoint).
-- [ ] **Pruebas automatizadas** y CI de `lint`/`build` (el único workflow despliega reglas).
+      validación es manual, ~35 comprobaciones repartidas endpoint por endpoint).
+- [ ] Ampliar la cobertura de pruebas: hoy cubre la lógica pura, no los endpoints ni los
+      componentes.
 - [ ] Dividir `server.ts` (~1.600 líneas) y `CandidateProfile.tsx` (~1.400 líneas) en módulos.
-- [ ] Manejo de errores estructurado y observabilidad.
+- [ ] Manejo de errores estructurado y observabilidad (hoy son 34 `console.error` sueltos).
+- [ ] Reglas: las vacantes en borrador y las plantillas de WhatsApp son de lectura pública.

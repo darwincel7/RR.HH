@@ -1,14 +1,25 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 import { collection, getDocs, query, orderBy, limit, where, getCountFromServer } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { Briefcase, Users, UserCheck, Clock, ArrowRight, TrendingUp, Activity, Sparkles } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import { motion } from 'motion/react';
 
 // Vibrant Premium Palette
+// Recharts is the heaviest dependency on this route. Loading it lazily lets the cards,
+// counters and recent activity paint straight away; the charts arrive a moment later.
+// Both come from the same module, so the browser fetches that chunk once.
+const VacancyBarChart = lazy(() => import('../components/DashboardCharts').then(m => ({ default: m.VacancyBarChart })));
+const StageDonutChart = lazy(() => import('../components/DashboardCharts').then(m => ({ default: m.StageDonutChart })));
+
+// Defined here, NOT in DashboardCharts: importing it from there would pull Recharts back
+// into this chunk and undo the split.
+const ChartSkeleton = () => (
+  <div className="w-full h-full rounded-2xl bg-slate-50 animate-pulse" aria-label="Cargando gráfica" />
+);
+
 const COLORS = ['#6366f1', '#ec4899', '#0ea5e9', '#14b8a6', '#f59e0b', '#8b5cf6'];
 
 export default function Dashboard() {
@@ -206,22 +217,9 @@ export default function Dashboard() {
               </div>
             </div>
             <div className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={vacancyData} margin={{ top: 0, right: 0, bottom: 0, left: -20 }}>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-                  <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b', fontWeight: 600 }} dy={10} />
-                  <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11, fill: '#64748b', fontWeight: 600 }} />
-                  <RechartsTooltip 
-                    cursor={{ fill: 'rgba(99, 102, 241, 0.04)' }}
-                    contentStyle={{ borderRadius: '16px', border: '1px solid #e2e8f0', boxShadow: '0 10px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1)', fontSize: '12px', fontWeight: 600 }}
-                  />
-                  <Bar dataKey="candidatos" fill="#6366f1" radius={[6, 6, 0, 0]} barSize={32}>
-                    {vacancyData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                    ))}
-                  </Bar>
-                </BarChart>
-              </ResponsiveContainer>
+              <Suspense fallback={<ChartSkeleton />}>
+                <VacancyBarChart data={vacancyData} colors={COLORS} />
+              </Suspense>
             </div>
           </div>
 
@@ -229,28 +227,9 @@ export default function Dashboard() {
             <h2 className="text-sm font-bold text-slate-800 uppercase tracking-widest mb-8">Funnel por Etapas</h2>
             <div className="flex flex-col md:flex-row items-center gap-8 h-72">
               <div className="h-full w-full md:w-1/2 relative">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      data={stageData}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={70}
-                      outerRadius={100}
-                      paddingAngle={3}
-                      dataKey="value"
-                      stroke="none"
-                      cornerRadius={4}
-                    >
-                      {stageData.map((entry, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                      ))}
-                    </Pie>
-                    <RechartsTooltip 
-                      contentStyle={{ borderRadius: '16px', border: '1px solid #e2e8f0', boxShadow: '0 10px 25px -5px rgb(0 0 0 / 0.1)', fontSize: '12px', fontWeight: 600 }}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
+                <Suspense fallback={<ChartSkeleton />}>
+                  <StageDonutChart data={stageData} colors={COLORS} />
+                </Suspense>
                 {/* Center text in donut */}
                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                   <span className="text-3xl font-extrabold text-slate-900">{metrics.totalCandidates}</span>
