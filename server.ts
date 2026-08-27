@@ -24,6 +24,11 @@ import mammoth from "mammoth";
 
 import { setLogLevel } from 'firebase/firestore';
 import { getServerDb, type ServerDb } from './serverDb';
+import {
+  applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
+  emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema,
+  decodeImageDataUrl, firstIssueMessage, EMAIL_RE,
+} from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
 
 import nodemailer from "nodemailer";
@@ -675,10 +680,23 @@ async function startServer() {
     res.json({ status: "ok", serverCvWorker: !!db?.canEnforceAuth });
   });
 
+  // Validates a request body against its Zod schema (serverSchemas.ts). On failure it
+  // answers 400 with the schema's first issue — the same one-message-per-field contract
+  // the old hand-written checks had — and returns null so the handler just returns.
+  const validate = <S extends { safeParse: (v: unknown) => any }>(
+    schema: S, req: any, res: any
+  ): NonNullable<ReturnType<S['safeParse']>['data']> | null => {
+    const r = schema.safeParse(req.body ?? {});
+    if (!r.success) {
+      res.status(400).json({ error: firstIssueMessage(r.error) });
+      return null;
+    }
+    return r.data;
+  };
+
   // Email Endpoint (public: also used by the candidate application flow). Rate limited.
   // Shared mail sender. Returns {success, simulated?}. Never lets the caller
   // control anything beyond a single recipient/subject/html that WE assemble.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   const sendMail = async (to: string, subject: string, html: string) => {
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
       console.log("Email not sent: SMTP credentials missing. Would have sent to:", to);
@@ -704,9 +722,9 @@ async function startServer() {
   // company address to any recipient. Now gated behind recruiter auth.
   app.post("/api/email/send", requireRecruiter, globalRateLimit(120), rateLimit(60), async (req, res) => {
     try {
-      const { to, subject, html } = req.body || {};
-      if (typeof to !== 'string' || !EMAIL_RE.test(to)) return res.status(400).json({ error: 'Destinatario inválido' });
-      if (typeof subject !== 'string' || typeof html !== 'string') return res.status(400).json({ error: 'Asunto/contenido inválido' });
+      const body = validate(emailSendSchema, req, res);
+      if (!body) return;
+      const { to, subject, html } = body;
       if (subject.length > 300 || html.length > 100_000) return res.status(413).json({ error: 'Contenido demasiado largo' });
       const r = await sendMail(to, subject.slice(0, 300), html);
       res.json(r);
@@ -740,10 +758,9 @@ async function startServer() {
 
   app.post("/api/public/apply-confirmation", globalRateLimit(60), rateLimit(10), async (req, res) => {
     try {
-      const { email, name, vacancyTitle } = req.body || {};
-      if (typeof email !== 'string' || !EMAIL_RE.test(email) || email.length > 200) {
-        return res.status(400).json({ error: 'Correo inválido' });
-      }
+      const body = validate(applyConfirmationSchema, req, res);
+      if (!body) return;
+      const { email, name, vacancyTitle } = body;
       const r = await sendApplyConfirmation(email, name, vacancyTitle);
       res.json(r);
     } catch (error) {
@@ -868,21 +885,16 @@ async function startServer() {
   // application atomically (no orphans), and sends the confirmation email.
   app.post("/api/apply", globalRateLimit(120), rateLimit(20), async (req, res) => {
     try {
-      const { vacancyId, candidateId: bodyCandidateId, name, phone, email, city, cvUrl, cvFileType } = req.body || {};
-      const str = (v: any) => (typeof v === 'string' ? v : '');
-      if (!str(vacancyId) || vacancyId.includes('/') || vacancyId.length > 200) return res.status(400).json({ error: 'Vacante inválida' });
-      if (!str(name) || name.length > 200) return res.status(400).json({ error: 'Nombre inválido' });
-      if (!str(phone) || phone.length > 40) return res.status(400).json({ error: 'Teléfono inválido' });
-      if (!EMAIL_RE.test(str(email)) || email.length > 200) return res.status(400).json({ error: 'Correo inválido' });
-      // CV must live in OUR Firebase Storage bucket (blocks SSRF: the CV worker fetches this URL server-side).
-      if (!str(cvUrl).startsWith('https://firebasestorage.googleapis.com/') || cvUrl.length > 1000) {
-        return res.status(400).json({ error: 'CV inválido' });
-      }
+      // Schema enforces: vacancyId/name/phone/email shape+length, and that cvUrl points
+      // into OUR Firebase Storage bucket (blocks SSRF: the CV worker fetches it server-side).
+      const body = validate(applySchema, req, res);
+      if (!body) return;
+      const { vacancyId, name, phone, email, city, cvUrl, cvFileType } = body;
 
       // Identity: derive the candidate id from the VERIFIED anonymous ID token, never
       // from the request body. This stops a leaked capability URL (which exposes a
       // victim's candidateId) from being used to overwrite that victim's profile.
-      let candidateId = str(bodyCandidateId);
+      let candidateId = body.candidateId;
       if (db.canEnforceAuth) {
         const header = req.headers.authorization || '';
         const token = header.startsWith('Bearer ') ? header.slice(7) : null;
@@ -900,7 +912,7 @@ async function startServer() {
       // Duplicate = a candidate with THIS phone/email already applied to THIS vacancy.
       // We do NOT merge into that candidate's record (that could corrupt a different
       // person who shares a phone/email); we only block a repeat application here.
-      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, str(email));
+      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, email);
       if (existingId) {
         const dup = await db.getDocData('applications', `${existingId}_${vacancyId}`);
         if (dup) return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
@@ -913,18 +925,18 @@ async function startServer() {
       const now = new Date();
       await db.applyBatch(
         { id: candidateId, data: {
-          fullName: str(name).slice(0, 200), email: str(email), phone: str(phone), phoneNormalized,
-          city: str(city).slice(0, 120), cvUrl, cvFileType: str(cvFileType).slice(0, 120),
+          fullName: name, email, phone, phoneNormalized,
+          city: city.slice(0, 120), cvUrl, cvFileType: cvFileType.slice(0, 120),
           aiStatus: 'pending', createdAt: now,
         } },
         { id: applicationId, data: {
-          candidateId, vacancyId, candidateName: str(name).slice(0, 200),
-          stage: 'Nuevo', cvUrl, cvFileType: str(cvFileType).slice(0, 120),
+          candidateId, vacancyId, candidateName: name,
+          stage: 'Nuevo', cvUrl, cvFileType: cvFileType.slice(0, 120),
           submittedAt: now, lastStageUpdate: now,
         } },
       );
 
-      try { await sendApplyConfirmation(str(email), str(name), vacancy.title || ''); } catch (e) { console.error('confirmation email failed', e); }
+      try { await sendApplyConfirmation(email, name, vacancy.title || ''); } catch (e) { console.error('confirmation email failed', e); }
 
       // The CV was just queued (aiStatus 'pending'). Start parsing now instead of
       // waiting for the next 60s tick — we don't await it, the applicant gets their
@@ -996,9 +1008,9 @@ async function startServer() {
 
   app.post("/api/whatsapp/send", requireRecruiter, async (req, res) => {
     try {
-      const { phone, message } = req.body;
-      if (typeof phone !== 'string' || !phone.trim()) return res.status(400).json({ error: "Phone number required" });
-      if (typeof message !== 'string' || !message.trim()) return res.status(400).json({ error: "Message required" });
+      const body = validate(whatsappSendSchema, req, res);
+      if (!body) return;
+      const { phone, message } = body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
         return res.status(400).json({ error: "WhatsApp not fully connected" });
       }
@@ -1016,11 +1028,12 @@ async function startServer() {
 
   app.post("/api/automations/stage-change", requireRecruiter, async (req, res) => {
     try {
-      const { phone, message } = req.body;
+      const body = validate(stageChangeSchema, req, res);
+      if (!body) return;
+      const { phone, message } = body;
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
         return res.status(400).json({ error: "WhatsApp not connected" });
       }
-      if (!phone) return res.status(400).json({ error: "Phone number required" });
       if (!message) return res.json({ success: true, messageSent: false, reason: "No message provided" });
 
       const jid = formatWhatsAppNumber(phone);
@@ -1038,21 +1051,12 @@ async function startServer() {
   // needing a public-write rule. Returns a stable public download URL.
   app.post("/api/company/careers-image", requireRecruiter, async (req, res) => {
     try {
-      const { dataUrl } = req.body || {};
-      if (typeof dataUrl !== 'string') {
-        return res.status(400).json({ error: 'Falta la imagen (dataUrl).' });
-      }
-      const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-      if (!match) {
-        return res.status(400).json({ error: 'Formato de imagen inválido. Debe ser una imagen.' });
-      }
-      const contentType = match[1];
-      const buffer = Buffer.from(match[2], 'base64');
-      if (buffer.length > 5 * 1024 * 1024) {
+      const img = decodeImageDataUrl(req.body?.dataUrl);
+      if ('error' in img) return res.status(400).json({ error: img.error });
+      if (img.buffer.length > 5 * 1024 * 1024) {
         return res.status(413).json({ error: 'La imagen supera 5MB.' });
       }
-      const ext = contentType.split('/')[1].split('+')[0].replace('jpeg', 'jpg');
-      const url = await db.uploadPublicFile(`company/careers-hero-${Date.now()}.${ext}`, buffer, contentType);
+      const url = await db.uploadPublicFile(`company/careers-hero-${Date.now()}.${img.ext}`, img.buffer, img.contentType);
       return res.json({ url });
     } catch (error) {
       console.error("Careers image upload error:", error);
@@ -1066,21 +1070,12 @@ async function startServer() {
   // careers-page load and even broke the database migration (fields >1500 bytes).
   app.post("/api/company/logo", requireRecruiter, async (req, res) => {
     try {
-      const { dataUrl } = req.body || {};
-      if (typeof dataUrl !== 'string') {
-        return res.status(400).json({ error: 'Falta la imagen (dataUrl).' });
-      }
-      const match = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
-      if (!match) {
-        return res.status(400).json({ error: 'Formato de imagen inválido. Debe ser una imagen.' });
-      }
-      const contentType = match[1];
-      const buffer = Buffer.from(match[2], 'base64');
-      if (buffer.length > 2 * 1024 * 1024) {
+      const img = decodeImageDataUrl(req.body?.dataUrl);
+      if ('error' in img) return res.status(400).json({ error: img.error });
+      if (img.buffer.length > 2 * 1024 * 1024) {
         return res.status(413).json({ error: 'El logo supera 2MB.' });
       }
-      const ext = contentType.split('/')[1].split('+')[0].replace('jpeg', 'jpg');
-      const url = await db.uploadPublicFile(`company/logo-${Date.now()}.${ext}`, buffer, contentType);
+      const url = await db.uploadPublicFile(`company/logo-${Date.now()}.${img.ext}`, img.buffer, img.contentType);
       return res.json({ url });
     } catch (error) {
       console.error("Logo upload error:", error);
@@ -1090,13 +1085,9 @@ async function startServer() {
 
   app.post("/api/score-stage2", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
-      const { applicationId, answers } = req.body || {};
-      if (typeof applicationId !== 'string' || !applicationId || applicationId.includes('/') || applicationId.length > 200) {
-        return res.status(400).json({ error: 'applicationId inválido' });
-      }
-      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
-        return res.status(400).json({ error: 'Respuestas inválidas' });
-      }
+      const body = validate(scoreStage2Schema, req, res);
+      if (!body) return;
+      const { applicationId, answers } = body;
       const application = await db.getDocData('applications', applicationId);
       if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
       // The internal scoring must NEVER reach the candidate (public endpoint). Only a
@@ -1104,7 +1095,7 @@ async function startServer() {
       const isRecruiterCaller = await callerIsRecruiter(req);
       // Idempotent for candidates (no re-billing / no double-submit overwrite), but a
       // recruiter may force a fresh re-score via the "Reevaluar IA" button.
-      const forceStage2 = req.body?.force === true && isRecruiterCaller;
+      const forceStage2 = body.force && isRecruiterCaller;
       if (application.stage2Scoring && !forceStage2) {
         return res.json(isRecruiterCaller ? application.stage2Scoring : { success: true, alreadyCompleted: true });
       }
@@ -1297,10 +1288,12 @@ async function startServer() {
 
   app.post("/api/parse-cv", requireRecruiter, async (req, res) => {
     try {
-      const { pdfBase64, fileUrl } = req.body;
-      // Default the mime type so an omitted/non-string value can't crash the .includes()
-      // branch below (previously threw "Cannot read properties of undefined").
-      const mimeType: string = typeof req.body?.mimeType === 'string' ? req.body.mimeType : 'application/pdf';
+      // Schema pins fileUrl to OUR Storage bucket (the server fetches it: an arbitrary
+      // URL here was the last SSRF path, recruiter-authed but still credential-theft
+      // capable against the metadata server) and defaults a junk mimeType to PDF.
+      const body = validate(parseCvSchema, req, res);
+      if (!body) return;
+      const { pdfBase64, fileUrl, mimeType } = body;
 
       let base64Data = pdfBase64;
       
@@ -1415,13 +1408,9 @@ async function startServer() {
   // ============================================================================
   app.post("/api/evaluate-test", globalRateLimit(60), rateLimit(20), async (req, res) => {
     try {
-      const { applicationId, questions, answers } = req.body || {};
-      if (typeof applicationId !== 'string' || !applicationId || applicationId.includes('/') || applicationId.length > 200) {
-        return res.status(400).json({ error: 'applicationId inválido' });
-      }
-      if (!answers || typeof answers !== 'object' || Array.isArray(answers)) {
-        return res.status(400).json({ error: 'Respuestas inválidas' });
-      }
+      const body = validate(evaluateTestSchema, req, res);
+      if (!body) return;
+      const { applicationId, questions, answers } = body;
       if (!process.env.GEMINI_API_KEY) {
         return res.status(500).json({ error: "API key not configured" });
       }
@@ -1432,7 +1421,7 @@ async function startServer() {
       // Only a recruiter caller gets the full result back.
       const isRecruiterCaller = await callerIsRecruiter(req);
       // Idempotent: don't re-grade / re-bill if already completed.
-      const forceTest = req.body?.force === true && isRecruiterCaller;
+      const forceTest = body.force && isRecruiterCaller;
       if (application.testResults && !forceTest) {
         return res.json(isRecruiterCaller
           ? { ...application.testResults, alreadyCompleted: true }
