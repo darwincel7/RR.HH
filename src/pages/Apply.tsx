@@ -99,11 +99,15 @@ export default function Apply() {
         } else {
           setErrorMsg('La vacante no existe o ya no está activa.');
         }
-      } catch (error) {
+      } catch (error: any) {
         console.error("Error fetching data:", error);
-        // If the (authoritative) endpoint already told us this vacancy isn't active,
-        // say that — not a misleading "overloaded, retry" for a genuinely dead link.
-        setErrorMsg(endpointSaysInactive
+        // Two ways we KNOW the link is dead rather than the site being busy:
+        //  - the (authoritative) endpoint already said the vacancy isn't active;
+        //  - Firestore answered permission-denied, which under our rules means exactly
+        //    "missing or inactive" (active vacancies are publicly readable).
+        // Everything else is a transient failure worth a retry message.
+        const vacancyGone = endpointSaysInactive || error?.code === 'permission-denied';
+        setErrorMsg(vacancyGone
           ? 'La vacante no existe o ya no está activa.'
           : 'Estamos recibiendo muchas visitas y no pudimos cargar la vacante. Por favor, recarga la página en unos segundos.');
       } finally {

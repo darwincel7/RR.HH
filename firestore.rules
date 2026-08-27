@@ -49,7 +49,13 @@ service cloud.firestore {
     }
 
     match /vacancies/{vacancyId} {
-      allow read: if true; // Public can read active vacancies (careers portal)
+      // Public may read ONLY published vacancies (the careers portal queries with
+      // where('active' == true), which satisfies this on list). Draft/deactivated
+      // vacancies were previously world-readable — anyone could see an opening
+      // before it was announced. A public get of a missing/inactive vacancy now
+      // fails with permission-denied, which Apply.tsx maps to "no existe o ya no
+      // está activa".
+      allow read: if isRecruiter() || resource.data.active == true;
       allow create, update, delete: if isRecruiter();
     }
 
@@ -111,7 +117,11 @@ service cloud.firestore {
     }
 
     match /settings/{document} {
-      allow read: if true; // Public can read settings (form questions, company branding)
+      // Whitelist, not blanket-public: candidates only ever need the company branding
+      // and the form questions. 'whatsapp_templates' (the exact messages sent to
+      // candidates) was readable by anyone — and any future settings doc would have
+      // been born public too.
+      allow read: if document in ['company', 'forms'] || isRecruiter();
       allow write: if isRecruiter(); // Only recruiters/admins can modify
     }
 
