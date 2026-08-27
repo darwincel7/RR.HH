@@ -148,13 +148,16 @@ Ya resuelto:
 - [x] **Pruebas automatizadas** (Vitest) y CI que verifica tipos, pruebas y build en cada push.
 - [x] Modelo de Gemini **configurable** (`GEMINI_MODEL`) en vez de fijado en 5 sitios del código.
 - [x] Gráficas del dashboard en su propio chunk (esa ruta pasó de ~507 KB a ~135 KB).
+- [x] Validación de **todos** los cuerpos `/api/*` con Zod (`serverSchemas.ts`), con los
+      mensajes fijados por pruebas; `fileUrl` de `parse-cv` restringido al bucket (SSRF).
+- [x] Reglas: vacantes en borrador y plantillas de WhatsApp ya no son de lectura pública.
+- [x] **Avisos por correo al admin** cuando WhatsApp se desvincula (o lo desplaza otra
+      sesión) y cuando la IA falla todos los CV de una tanda — con tope de 1 correo por
+      tipo por hora (`ALERT_EMAIL` para cambiar el destinatario).
 
 Pendiente:
 
-- [ ] Validación de entrada con **Zod** (la dependencia está instalada pero sin usar; hoy la
-      validación es manual, ~35 comprobaciones repartidas endpoint por endpoint).
-- [ ] Ampliar la cobertura de pruebas: hoy cubre la lógica pura, no los endpoints ni los
-      componentes.
+- [ ] Ampliar la cobertura de pruebas: hoy cubre la lógica pura y la validación de los
+      endpoints, no los handlers completos ni los componentes.
 - [ ] Dividir `server.ts` (~1.600 líneas) y `CandidateProfile.tsx` (~1.400 líneas) en módulos.
-- [ ] Manejo de errores estructurado y observabilidad (hoy son 34 `console.error` sueltos).
-- [ ] Reglas: las vacantes en borrador y las plantillas de WhatsApp son de lectura pública.
+- [ ] Manejo de errores estructurado (hoy son `console.error` sueltos; los fallos críticos ya avisan por correo).

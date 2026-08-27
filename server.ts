@@ -107,6 +107,48 @@ const logger = pino({ level: 'silent' });
 // WhatsApp State
 let sock: WASocket | null = null;
 let qrCode: string | null = null;
+// ---------------------------------------------------------------------------
+// Admin alerts
+// ---------------------------------------------------------------------------
+// When something breaks that needs a HUMAN (WhatsApp got unlinked, the AI is failing
+// every CV), waiting for someone to notice inside the app isn't enough — these
+// failures are exactly the kind nobody sees until candidates pile up. So the server
+// emails the admin directly, using the same SMTP the app already sends mail with.
+const ALERT_EMAIL = process.env.ALERT_EMAIL || 'daruingmejia@gmail.com'; // mirrors ADMIN_EMAILS (serverDb.ts)
+
+// At most one email per alert type per hour: a reconnect loop or a bad batch of CVs
+// must not flood the inbox — the first email already says what's wrong.
+const ALERT_THROTTLE_MS = 60 * 60 * 1000;
+const alertLastSent = new Map<string, number>();
+
+async function notifyAdmin(kind: string, subject: string, htmlBody: string) {
+  try {
+    const last = alertLastSent.get(kind) || 0;
+    if (Date.now() - last < ALERT_THROTTLE_MS) return;
+    alertLastSent.set(kind, Date.now());
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      console.warn(`[alerta] ${kind}: ${subject} (SMTP no configurado; no se envió el correo)`);
+      return;
+    }
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.SMTP_PORT || '587'),
+      secure: process.env.SMTP_SECURE === 'true',
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    await transporter.sendMail({
+      from: `"Darwin Cell RRHH" <${process.env.SMTP_USER}>`,
+      to: ALERT_EMAIL,
+      subject: `[RRHH] ${subject}`,
+      html: htmlBody,
+    });
+    console.log(`[alerta] ${kind}: correo enviado a ${ALERT_EMAIL}`);
+  } catch (err) {
+    // An alert failure must never take anything else down with it.
+    console.error(`[alerta] ${kind}: no se pudo enviar el correo:`, err);
+  }
+}
+
 let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disconnected';
 let isShuttingDown = false; // set on SIGTERM so we don't reconnect WhatsApp mid-shutdown
 // Bumped on every connectToWhatsApp() call. Each socket's event handlers capture their
@@ -257,6 +299,11 @@ async function connectToWhatsApp() {
       // The user must click "Force Reconnect" in the UI to claim the session.
       if (statusCode === DisconnectReason.connectionReplaced) {
         console.log('WhatsApp connection replaced (Status 440). Suspending auto-reconnect. Please click "Forzar Reconexión" in the settings.');
+        // Auto-reconnect is suspended on purpose: nothing recovers without a person.
+        notifyAdmin('wa-replaced', 'WhatsApp desconectado: otra sesión tomó el control',
+          `<p>El WhatsApp de la empresa se desconectó porque <b>otra sesión abrió la misma cuenta</b> (conflicto 440).</p>
+           <p>Los mensajes automáticos a candidatos <b>no se están enviando</b>.</p>
+           <p>Para arreglarlo: entra a la app &rarr; <b>Ajustes de WhatsApp</b> &rarr; pulsa <b>"Forzar Reconexión"</b>.</p>`);
       } else if (statusCode !== DisconnectReason.loggedOut && !isShuttingDown) {
         console.log('Attempting to reconnect in 5 seconds...');
         setTimeout(() => {
@@ -268,6 +315,13 @@ async function connectToWhatsApp() {
         }, 5000);
       } else {
         console.log('WhatsApp logged out. Need to scan new QR.');
+        if (statusCode === DisconnectReason.loggedOut) {
+          // Unlinked from the phone: only scanning a fresh QR brings it back.
+          notifyAdmin('wa-logged-out', 'WhatsApp desvinculado: hay que escanear el QR de nuevo',
+            `<p>El WhatsApp de la empresa se <b>desvinculó</b> (se cerró la sesión desde el teléfono o desde WhatsApp).</p>
+             <p>Los mensajes automáticos a candidatos <b>no se están enviando</b>.</p>
+             <p>Para arreglarlo: entra a la app &rarr; <b>Ajustes de WhatsApp</b> y <b>escanea el código QR</b> con el teléfono de la empresa.</p>`);
+        }
       }
     } else if (connection === 'open') {
       connectionStatus = 'connected';
@@ -473,6 +527,7 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     return true;
   } catch (err: any) {
     console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
+    lastCvWorkerError = err?.message || String(err);
     await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
     if (isBulk) {
       const appIds = await db.getApplicationIdsByCandidate(cand.id);
@@ -483,6 +538,10 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     return false;
   }
 }
+
+// The most recent CV-parse failure, quoted in the admin alert so the email says WHY
+// (expired model, bad API key, quota) instead of just "it's failing".
+let lastCvWorkerError = '';
 
 // What a single worker pass achieved. `skipped` means another pass was already in
 // flight, so the caller learns "busy", not "nothing to do" — the two are different.
@@ -517,6 +576,17 @@ async function processPendingCVs(max = 12): Promise<CvWorkerRun> {
       }
     };
     await Promise.all(Array.from({ length: Math.min(CV_CONCURRENCY, pending.length) }, worker));
+
+    // Every claimed CV failed and none succeeded: that's not one bad file, that's the
+    // AI pipeline being down (retired model, invalid key, exhausted quota). A human
+    // needs to know — candidates keep applying while nothing gets scored.
+    if (run.failed >= 3 && run.scored === 0) {
+      notifyAdmin('cv-worker-failing', 'La IA está fallando al analizar los CV',
+        `<p>El análisis de CV falló en <b>${run.failed} de ${run.failed} candidatos</b> de la última tanda — ninguno se pudo puntuar.</p>
+         <p>Último error: <code>${String(lastCvWorkerError).slice(0, 500).replace(/</g, '&lt;')}</code></p>
+         <p>Causas típicas: el modelo de IA fue retirado (ajusta la variable <b>GEMINI_MODEL</b>), la clave de Gemini venció, o se agotó la cuota.</p>
+         <p>Los CV afectados quedan marcados "con error" en la lista de candidatos; el botón <b>"Reintentar CVs con error"</b> los reencola cuando el problema esté resuelto.</p>`);
+    }
   } catch (err) {
     console.error('[server CV worker] loop error:', err);
   } finally {
