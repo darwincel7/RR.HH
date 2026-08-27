@@ -543,7 +543,7 @@ export default function KanbanBoard() {
   })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
-    <div className="min-h-[calc(100vh-8rem)] flex flex-col animate-fade-in relative">
+    <div className="h-[calc(100vh-5rem)] lg:h-[calc(100vh-7rem)] flex flex-col animate-fade-in relative">
       <div className="mb-4 lg:mb-8 flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
           <h1 className="text-xl lg:text-3xl font-display font-bold text-slate-900 tracking-tight flex items-center">
@@ -633,11 +633,11 @@ export default function KanbanBoard() {
       {/* Columns grow with their content and the PAGE scrolls vertically — no tiny
           per-column scrollbar. Sibling columns still stretch to the tallest one so
           the drop zone keeps covering the whole column. */}
-      <div className="flex-1 overflow-x-auto pb-4">
+      <div className="flex-1 overflow-x-auto overflow-y-hidden pb-2">
         <DragDropContext onDragEnd={onDragEnd}>
-          <div className="flex items-stretch space-x-4 lg:space-x-6 min-w-max px-1">
+          <div className="flex h-full space-x-4 lg:space-x-6 min-w-max px-1">
             {columns.map(column => (
-              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col">
+              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col h-full">
                 <div className="mb-1.5 flex justify-between items-center px-1">
                   <h3 className="font-display font-bold text-slate-700 text-[10px] lg:text-xs uppercase tracking-widest">{column.title}</h3>
                   <div className="flex items-center gap-2">
@@ -678,7 +678,7 @@ export default function KanbanBoard() {
                     <div
                       ref={provided.innerRef}
                       {...provided.droppableProps}
-                      className={`flex-1 p-2 lg:p-3 min-h-[300px] rounded-2xl lg:rounded-3xl transition-all duration-300 ${
+                      className={`flex-1 overflow-y-auto p-2 lg:p-3 min-h-[150px] rounded-2xl lg:rounded-3xl transition-all duration-300 ${
                         snapshot.isDraggingOver ? 'bg-violet-50/50 border-2 border-dashed border-violet-300' : 'bg-slate-100/50 border-2 border-transparent'
                       }`}
                     >
