@@ -20,9 +20,10 @@ import QRCode from "qrcode";
 import pino from "pino";
 import fs from "fs";
 import crypto from "crypto";
-import mammoth from "mammoth";
 
 import { setLogLevel } from 'firebase/firestore';
+import { getAI, generateContentResilient, GEMINI_MODEL } from './serverGemini';
+import { runCvParse, CvParseError } from './serverCvParse';
 import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
@@ -52,56 +53,6 @@ let db: ServerDb;
 
 dotenv.config({ override: true });
 
-function getAI(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.replace(/['"]/g, '').trim() : undefined;
-  
-  if (apiKey === "MY_GEMINI_API_KEY") {
-    return null; // Signals that we have a bad configured key
-  }
-
-  return new GoogleGenAI({ apiKey });
-}
-
-// Reject if a promise takes longer than `ms` — so a hung Gemini call can't hold a
-// Cloud Run concurrency slot open indefinitely.
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`Gemini timeout tras ${ms}ms`)), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
-  });
-}
-
-// Wraps ai.models.generateContent with a hard timeout + bounded exponential backoff
-// on transient errors (429/5xx/timeout). Prevents thundering-herd during AI spikes.
-// The Gemini model every AI feature uses (CV parsing, stage-2 scoring, test grading).
-// Overridable via GEMINI_MODEL because the default is a *preview* build: Google retires
-// those on its own schedule, and when that happens every AI feature fails at once. With
-// this, recovering is an env-var change and a restart — not a code edit and a redeploy.
-const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-3.1-pro-preview';
-
-async function generateContentResilient(ai: GoogleGenAI, params: any, opts: { timeoutMs?: number; retries?: number } = {}): Promise<any> {
-  const timeoutMs = opts.timeoutMs ?? 90_000;
-  const retries = opts.retries ?? 2;
-  let lastErr: any;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    try {
-      return await withTimeout(ai.models.generateContent(params), timeoutMs);
-    } catch (err: any) {
-      lastErr = err;
-      const msg = String(err?.message || err);
-      const status = Number(err?.status || err?.code || 0);
-      const retriable = [429, 500, 503].includes(status) || /timeout|deadline|unavailable|overloaded|rate.?limit|429|503|500/i.test(msg);
-      if (attempt < retries && retriable) {
-        const backoff = 600 * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
-        console.warn(`[gemini] intento ${attempt + 1} falló (${msg.slice(0, 90)}); reintento en ${backoff}ms`);
-        await new Promise((r) => setTimeout(r, backoff));
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
-}
 const logger = pino({ level: 'silent' });
 
 // WhatsApp State
@@ -377,114 +328,6 @@ async function bootstrap() {
     processPendingCVs();
     setInterval(() => { processPendingCVs().catch(e => console.error('[server CV worker]', e)); }, 60_000);
   }
-}
-
-// ---------------------------------------------------------------------------
-// CV parsing used by the backend CV worker. Mirrors the /api/parse-cv endpoint
-// logic; kept as a function so the worker can score CVs without an HTTP round-trip.
-// ---------------------------------------------------------------------------
-class CvParseError extends Error {
-  status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function runCvParse(input: { pdfBase64?: string; mimeType?: string; fileUrl?: string }): Promise<any> {
-  const { pdfBase64, fileUrl } = input;
-  const mimeType = input.mimeType || 'application/pdf';
-  let base64Data = pdfBase64;
-
-  if (fileUrl) {
-    let fileRes: Response;
-    try {
-      fileRes = await fetch(fileUrl);
-    } catch (fetchErr) {
-      console.error("Error fetching file from URL:", fetchErr);
-      throw new CvParseError(400, "Failed to fetch file from URL");
-    }
-    if (!fileRes.ok) {
-      console.error(`[parse-cv] Error fetching file from URL. Status: ${fileRes.status}`);
-      throw new CvParseError(400, `No se pudo descargar el archivo del candidato. Código de error de Storage: ${fileRes.status}`);
-    }
-    const arrayBuffer = await fileRes.arrayBuffer();
-    base64Data = Buffer.from(arrayBuffer).toString('base64');
-  }
-
-  if (!base64Data) {
-    throw new CvParseError(400, "No PDF provided");
-  }
-
-  const cvSchema: Schema = {
-    type: Type.OBJECT,
-    properties: {
-      full_name: { type: Type.STRING, nullable: true },
-      phone: { type: Type.STRING, nullable: true },
-      email: { type: Type.STRING, nullable: true },
-      city: { type: Type.STRING, nullable: true },
-      experience_total_years: { type: Type.NUMBER, nullable: true },
-      relevant_experience_summary: { type: Type.STRING },
-      education_summary: { type: Type.STRING },
-      strengths_detected: { type: Type.ARRAY, items: { type: Type.STRING } },
-      risk_flags: { type: Type.ARRAY, items: { type: Type.STRING } },
-      initial_score_1_to_5: { type: Type.NUMBER },
-      recommendation: { type: Type.STRING, enum: ["advance", "review", "low_priority"] },
-      justification: { type: Type.STRING }
-    },
-    required: ["relevant_experience_summary", "education_summary", "strengths_detected", "risk_flags", "initial_score_1_to_5", "recommendation", "justification"]
-  };
-
-  const prompt = `
-  Eres un analista de reclutamiento asistido por IA dentro de un ATS.
-  Tu rol es extraer, resumir y puntuar información de candidatos de forma estructurada a partir de su CV.
-  El archivo adjunto puede ser un documento PDF, de Word o directamente una imagen/foto del currículum. Debes extraer el texto y analizarlo sin importar su formato de origen.
-  No decides contrataciones finales.
-  No afirmas diagnósticos psicológicos ni criminales.
-
-  MUY IMPORTANTE:
-  No extraigas ni asumas habilidades (skills) basadas únicamente en lo que el candidato escribe en su CV, ya que esto se evaluará posteriormente en la práctica mediante tests y entrevistas. Tu análisis debe centrarse en la experiencia demostrable, la educación, y las fortalezas o riesgos que se puedan deducir de su trayectoria.
-
-  PUNTUACIÓN (ESTRELLAS):
-  Califica el CV con una puntuación de estrellas desde 0.1 hasta 5.0 (ej. 3.5, 4.2, 4.8) en el campo 'initial_score_1_to_5'.
-  Esta es una calificación preliminar basada únicamente en la estructura, experiencia demostrable y presentación del CV.
-
-  Siempre devuelves JSON válido según el esquema entregado.
-  Si faltan datos, lo indicas explícitamente en lugar de inventar.
-
-  IMPORTANTE PARA EL TELÉFONO: Extrae el número de teléfono e incluye siempre el código de país. Si no lo tiene, asume +52. El formato ideal es solo números con el código de país (ej. +525551234567).
-
-  Analiza el siguiente CV (que puede ser documento o imagen) y extrae la información solicitada.
-  `;
-
-  let contentsPart: any;
-  if (mimeType.includes('wordprocessingml.document') || mimeType.includes('msword')) {
-    contentsPart = { text: "Texto extraído del CV:\n" + (await mammoth.extractRawText({ buffer: Buffer.from(base64Data, 'base64') })).value };
-  } else {
-    contentsPart = { inlineData: { data: base64Data, mimeType } };
-  }
-
-  console.log(`[parse-cv] Sending request to Gemini... MimeType: ${mimeType}, Size: ${base64Data.length}`);
-
-  const ai = getAI();
-  if (!ai) {
-    throw new CvParseError(400, "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente.");
-  }
-
-  const response = await generateContentResilient(ai,{
-    model: GEMINI_MODEL,
-    contents: [prompt, contentsPart],
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: cvSchema,
-      temperature: 0.2
-    }
-  });
-
-  const resultText = response.text;
-  if (!resultText) throw new Error("Empty response from Gemini");
-  const cleanJson = resultText.replace(/```json\n?|```/g, '').trim();
-  return JSON.parse(cleanJson);
 }
 
 // Backend CV worker: in admin mode the server (not each recruiter's browser) processes
@@ -1363,108 +1206,16 @@ async function startServer() {
       // capable against the metadata server) and defaults a junk mimeType to PDF.
       const body = validate(parseCvSchema, req, res);
       if (!body) return;
-      const { pdfBase64, fileUrl, mimeType } = body;
-
-      let base64Data = pdfBase64;
-      
-      if (fileUrl) {
-        try {
-          const fileRes = await fetch(fileUrl);
-          if (!fileRes.ok) {
-            console.error(`[parse-cv] Error fetching file from URL. Status: ${fileRes.status}`);
-            return res.status(400).json({ error: `No se pudo descargar el archivo del candidato. Código de error de Storage: ${fileRes.status}` });
-          }
-          const arrayBuffer = await fileRes.arrayBuffer();
-          base64Data = Buffer.from(arrayBuffer).toString('base64');
-        } catch (fetchErr) {
-          console.error("Error fetching file from URL:", fetchErr);
-          return res.status(400).json({ error: "Failed to fetch file from URL" });
-        }
-      }
-
-      if (!base64Data) {
-        return res.status(400).json({ error: "No PDF provided" });
-      }
-
-      const cvSchema: Schema = {
-        type: Type.OBJECT,
-        properties: {
-          full_name: { type: Type.STRING, nullable: true },
-          phone: { type: Type.STRING, nullable: true },
-          email: { type: Type.STRING, nullable: true },
-          city: { type: Type.STRING, nullable: true },
-          experience_total_years: { type: Type.NUMBER, nullable: true },
-          relevant_experience_summary: { type: Type.STRING },
-          education_summary: { type: Type.STRING },
-          strengths_detected: { type: Type.ARRAY, items: { type: Type.STRING } },
-          risk_flags: { type: Type.ARRAY, items: { type: Type.STRING } },
-          initial_score_1_to_5: { type: Type.NUMBER },
-          recommendation: { type: Type.STRING, enum: ["advance", "review", "low_priority"] },
-          justification: { type: Type.STRING }
-        },
-        required: ["relevant_experience_summary", "education_summary", "strengths_detected", "risk_flags", "initial_score_1_to_5", "recommendation", "justification"]
-      };
-
-      const prompt = `
-      Eres un analista de reclutamiento asistido por IA dentro de un ATS.
-      Tu rol es extraer, resumir y puntuar información de candidatos de forma estructurada a partir de su CV.
-      El archivo adjunto puede ser un documento PDF, de Word o directamente una imagen/foto del currículum. Debes extraer el texto y analizarlo sin importar su formato de origen.
-      No decides contrataciones finales.
-      No afirmas diagnósticos psicológicos ni criminales.
-      
-      MUY IMPORTANTE:
-      No extraigas ni asumas habilidades (skills) basadas únicamente en lo que el candidato escribe en su CV, ya que esto se evaluará posteriormente en la práctica mediante tests y entrevistas. Tu análisis debe centrarse en la experiencia demostrable, la educación, y las fortalezas o riesgos que se puedan deducir de su trayectoria.
-
-      PUNTUACIÓN (ESTRELLAS):
-      Califica el CV con una puntuación de estrellas desde 0.1 hasta 5.0 (ej. 3.5, 4.2, 4.8) en el campo 'initial_score_1_to_5'.
-      Esta es una calificación preliminar basada únicamente en la estructura, experiencia demostrable y presentación del CV.
-
-      Siempre devuelves JSON válido según el esquema entregado.
-      Si faltan datos, lo indicas explícitamente en lugar de inventar.
-      
-      IMPORTANTE PARA EL TELÉFONO: Extrae el número de teléfono e incluye siempre el código de país. Si no lo tiene, asume +52. El formato ideal es solo números con el código de país (ej. +525551234567).
-      
-      Analiza el siguiente CV (que puede ser documento o imagen) y extrae la información solicitada.
-      `;
-
-      let contentsPart: any;
-      if (mimeType.includes('wordprocessingml.document') || mimeType.includes('msword')) {
-        contentsPart = { text: "Texto extraído del CV:\n" + (await mammoth.extractRawText({ buffer: Buffer.from(base64Data, 'base64') })).value };
-      } else {
-        contentsPart = { inlineData: { data: base64Data, mimeType: mimeType || 'application/pdf' } };
-      }
-
-      console.log(`[parse-cv] Sending request to Gemini... MimeType: ${mimeType}, Size: ${base64Data.length}`);
-
-      const ai = getAI();
-      if (!ai) {
-        return res.status(400).json({ error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
-      }
-
-      const response = await generateContentResilient(ai,{
-        model: GEMINI_MODEL,
-        contents: [prompt, contentsPart],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: cvSchema,
-          temperature: 0.2
-        }
-      });
-
-      const resultText = response.text;
-      if (!resultText) {
-        throw new Error("Empty response from Gemini");
-      }
-
-      const cleanJson = resultText.replace(/```json\n?|```/g, '').trim();
-      const parsedData = JSON.parse(cleanJson);
+      // Same implementation the backend CV worker uses (serverCvParse.ts) — this
+      // endpoint used to carry its own full copy of the prompt + schema + Gemini call,
+      // and the two versions were already drifting apart.
+      const parsedData = await runCvParse(body);
       res.json(parsedData);
-
     } catch (error: any) {
       console.error("Error parsing CV:", error);
       const errorMessage = error.message || String(error);
-      if (errorMessage.includes('CLAVE INVALIDA')) {
-         res.status(400).json({ error: errorMessage });
+      if (error instanceof CvParseError) {
+        res.status(error.status).json({ error: errorMessage });
       } else if (errorMessage.includes('API key not valid')) {
         res.status(400).json({ error: "API key not valid. Please configure a valid API key in Settings -> Secrets." });
       } else {

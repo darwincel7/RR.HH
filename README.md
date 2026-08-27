@@ -159,5 +159,8 @@ Pendiente:
 
 - [ ] Ampliar la cobertura de pruebas: hoy cubre la lógica pura y la validación de los
       endpoints, no los handlers completos ni los componentes.
-- [ ] Dividir `server.ts` (~1.600 líneas) y `CandidateProfile.tsx` (~1.400 líneas) en módulos.
+- [ ] Seguir dividiendo `server.ts` (~1.470 líneas tras extraer `serverGemini.ts` y
+      `serverCvParse.ts`; el siguiente corte natural es el bloque de WhatsApp/Baileys) y
+      `CandidateProfile.tsx` (~1.400 líneas — mejor en una sesión con la app corriendo,
+      para verificar visualmente cada extracción).
 - [ ] Manejo de errores estructurado (hoy son `console.error` sueltos; los fallos críticos ya avisan por correo).
