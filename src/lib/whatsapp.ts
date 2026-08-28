@@ -5,9 +5,11 @@ import { apiFetch } from './api';
 
 // Distinguishes an intentional skip (no message was meant to go out) from a real
 // delivery failure, so callers can warn the recruiter only when something actually
-// broke instead of on every stage change.
+// broke instead of on every stage change. 'queued' means the server persisted the
+// message in its durable outbox and WILL deliver it (with retries) — for the recruiter
+// that is success: nothing to do, nothing lost.
 export type AutomationResult = {
-  status: 'sent' | 'skipped' | 'failed';
+  status: 'sent' | 'queued' | 'skipped' | 'failed';
   reason?: string;
 };
 
@@ -36,16 +38,30 @@ export function stageNeedsScheduling(stage: string): boolean {
   return ['Convocado a entrevista', 'Entrevista presencial', 'Oferta'].includes(stage);
 }
 
-// Live connection check against the server socket status.
-export async function isWhatsAppConnected(): Promise<boolean> {
+// Live connection + queue snapshot from the server.
+// `outbox` — the server has a durable queue: messages sent while disconnected are NOT
+// lost, they wait and go out on reconnection. `pending` — how many are waiting now.
+export type WhatsAppStatus = { connected: boolean; outbox: boolean; pending: number; suspended: boolean };
+
+export async function getWhatsAppStatus(): Promise<WhatsAppStatus> {
   try {
     const res = await apiFetch('/api/whatsapp/status');
-    if (!res.ok) return false;
+    if (!res.ok) return { connected: false, outbox: false, pending: 0, suspended: false };
     const data = await res.json();
-    return data.status === 'connected';
+    return {
+      connected: data.status === 'connected',
+      outbox: !!data.outbox,
+      pending: Number(data.pending) || 0,
+      suspended: !!data.suspended,
+    };
   } catch {
-    return false;
+    return { connected: false, outbox: false, pending: 0, suspended: false };
   }
+}
+
+// Live connection check against the server socket status.
+export async function isWhatsAppConnected(): Promise<boolean> {
+  return (await getWhatsAppStatus()).connected;
 }
 
 // Small spacing between consecutive automated sends: gentler on the WhatsApp socket
@@ -141,11 +157,12 @@ export async function sendWhatsAppAutomation(
       }
     }
 
-    // Send message via API
+    // Send message via API. stage/candidateName ride along so the durable outbox can
+    // write the conversation history server-side when the message ACTUALLY goes out.
     const res = await apiFetch('/api/automations/stage-change', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, message })
+      body: JSON.stringify({ phone, message, stage, candidateName: variables.nombre || '' })
     });
 
     let data;
@@ -154,6 +171,13 @@ export async function sendWhatsAppAutomation(
     } catch (parseError) {
       console.error("Failed to parse API response. Status:", res.status);
       return { status: 'failed', reason: `respuesta_invalida_${res.status}` };
+    }
+
+    // Durable outbox path: the server persisted the message and delivers it itself
+    // (it also writes the history entry on actual delivery — no client write here,
+    // that would duplicate the record).
+    if (data.success && data.queued) {
+      return { status: 'queued' };
     }
 
     if (data.success && data.messageSent) {

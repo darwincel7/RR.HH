@@ -60,6 +60,30 @@ export interface ServerDb {
   uploadPublicFile(path: string, buffer: Buffer, contentType: string): Promise<string>;
   /** Active (published) vacancies, for the public careers portal. */
   listActiveVacancies(): Promise<any[]>;
+
+  // --- WhatsApp single-owner lease + durable outbox (admin mode only) -------------
+  /** True when the durable WhatsApp outbox is available (Admin SDK present). */
+  supportsOutbox: boolean;
+  /** Atomically claims/renews the "who owns the WhatsApp socket" lease. Returns true
+   * if `holderId` now holds it. `force` steals it regardless of the current holder
+   * (the recruiter's reconnect button is the human override). */
+  acquireWhatsAppLease(holderId: string, ttlMs: number, force?: boolean): Promise<boolean>;
+  /** Releases the lease if held by `holderId` (clean handover on shutdown). */
+  releaseWhatsAppLease(holderId: string): Promise<void>;
+  /** Persists an outgoing message. Returns its outbox id. */
+  enqueueWhatsApp(data: Record<string, any>): Promise<string>;
+  /** Queued messages whose nextAttemptAt has passed, oldest first. */
+  listOutboxSendable(max: number): Promise<any[]>;
+  /** Atomically claims one outbox message (queued -> sending). False if already taken. */
+  claimOutboxMessage(id: string): Promise<boolean>;
+  /** Merges fields into an outbox message (status flips, attempts, errors). */
+  markOutbox(id: string, fields: Record<string, any>): Promise<void>;
+  /** Returns messages stuck in 'sending' (older than ms) to 'queued'. */
+  reclaimStuckOutbox(olderThanMs: number): Promise<number>;
+  /** How many messages are waiting (queued or sending). */
+  countOutboxPending(): Promise<number>;
+  /** One outbox message by id (to report the final state of a manual send). */
+  getOutboxMessage(id: string): Promise<any | null>;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -183,6 +207,74 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       async getApplicationIdsByCandidate(candidateId) {
         const snap = await adb.collection('applications').where('candidateId', '==', candidateId).get();
         return snap.docs.map((d: any) => d.id);
+      },
+      supportsOutbox: true,
+      async acquireWhatsAppLease(holderId, ttlMs, force = false) {
+        const ref = adb.collection('whatsapp_runtime').doc('socket_owner');
+        return await adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const now = Date.now();
+          const cur = snap.exists ? snap.data() : null;
+          const curExpires = cur?.expiresAt?.toMillis ? cur.expiresAt.toMillis() : (cur?.expiresAt ? new Date(cur.expiresAt).getTime() : 0);
+          const held = cur && cur.holderId && curExpires > now;
+          if (held && cur.holderId !== holderId && !force) return false;
+          tx.set(ref, { holderId, acquiredAt: cur?.holderId === holderId ? (cur.acquiredAt ?? new Date()) : new Date(), expiresAt: new Date(now + ttlMs) });
+          return true;
+        });
+      },
+      async releaseWhatsAppLease(holderId) {
+        const ref = adb.collection('whatsapp_runtime').doc('socket_owner');
+        await adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (snap.exists && snap.data()?.holderId === holderId) tx.delete(ref);
+        });
+      },
+      async enqueueWhatsApp(data) {
+        const ref = await adb.collection('whatsapp_outbox').add({ ...data, createdAt: FieldValue.serverTimestamp() });
+        return ref.id;
+      },
+      async listOutboxSendable(max) {
+        // Single-field query (auto-indexed); the nextAttemptAt gate is filtered in
+        // memory to avoid a composite index — same pattern as reclaimStuckProcessing.
+        const snap = await adb.collection('whatsapp_outbox').where('status', '==', 'queued').limit(Math.max(max * 3, 30)).get();
+        const now = Date.now();
+        const ms = (v: any) => (v?.toMillis ? v.toMillis() : (v ? new Date(v).getTime() : 0));
+        return snap.docs
+          .map((d: any) => ({ id: d.id, ...d.data() }))
+          .filter((m: any) => ms(m.nextAttemptAt) <= now)
+          .sort((a: any, b: any) => ms(a.createdAt) - ms(b.createdAt))
+          .slice(0, max);
+      },
+      async claimOutboxMessage(id) {
+        const ref = adb.collection('whatsapp_outbox').doc(id);
+        return await adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists || snap.data()?.status !== 'queued') return false;
+          tx.update(ref, { status: 'sending', sendingStartedAt: new Date() });
+          return true;
+        });
+      },
+      async markOutbox(id, fields) {
+        await adb.collection('whatsapp_outbox').doc(id).set(fields, { merge: true });
+      },
+      async reclaimStuckOutbox(olderThanMs) {
+        const snap = await adb.collection('whatsapp_outbox').where('status', '==', 'sending').limit(50).get();
+        const cutoff = Date.now() - olderThanMs;
+        let n = 0;
+        for (const d of snap.docs) {
+          const started: any = d.data()?.sendingStartedAt;
+          const ms = started?.toMillis ? started.toMillis() : (started ? new Date(started).getTime() : 0);
+          if (!ms || ms < cutoff) { await d.ref.update({ status: 'queued' }); n++; }
+        }
+        return n;
+      },
+      async countOutboxPending() {
+        const q = await adb.collection('whatsapp_outbox').where('status', 'in', ['queued', 'sending']).count().get();
+        return q.data().count as number;
+      },
+      async getOutboxMessage(id) {
+        const snap = await adb.collection('whatsapp_outbox').doc(id).get();
+        return snap.exists ? { id: snap.id, ...snap.data() } : null;
       },
       async listActiveVacancies() {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
@@ -314,6 +406,19 @@ async function initClient(): Promise<ServerDb> {
       const snap = await getDocs(query(collection(cdb, 'applications'), where('candidateId', '==', candidateId)));
       return snap.docs.map(d => d.id);
     },
+    // Dev fallback: no Admin SDK, so no durable outbox (the rules block client access
+    // to whatsapp_outbox on purpose). The server falls back to direct sends, and the
+    // single local process trivially "owns" the socket.
+    supportsOutbox: false,
+    async acquireWhatsAppLease() { return true; },
+    async releaseWhatsAppLease() { /* no-op */ },
+    async enqueueWhatsApp() { throw new Error('outbox_no_disponible_en_dev'); },
+    async listOutboxSendable() { return []; },
+    async claimOutboxMessage() { return false; },
+    async markOutbox() { /* no-op */ },
+    async reclaimStuckOutbox() { return 0; },
+    async countOutboxPending() { return 0; },
+    async getOutboxMessage() { return null; },
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));

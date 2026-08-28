@@ -224,18 +224,28 @@ export default function CandidateProfile() {
       const res = await apiFetch('/api/whatsapp/send', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: candidate.phone, message })
+        // candidateId lets the server link the queued message's history entry directly.
+        body: JSON.stringify({ phone: candidate.phone, message, candidateId })
       });
       if (res.ok) {
-        // Log message in Firestore
-        await addDoc(collection(db, 'whatsapp_messages'), {
-          candidateId,
-          text: message,
-          sentAt: serverTimestamp(),
-          direction: 'outbound'
-        });
-        setMessage('');
-        alert('Mensaje enviado con éxito');
+        const data = await res.json().catch(() => ({}));
+        if (data.queued) {
+          // WhatsApp is down RIGHT NOW but the message is safe in the server's queue —
+          // the server also writes the history entry when it actually delivers, so no
+          // client-side log here (it would duplicate the record).
+          setMessage('');
+          alert('📨 WhatsApp está desconectado en este momento. El mensaje quedó EN COLA y se enviará solo al reconectar.');
+        } else {
+          // Log message in Firestore
+          await addDoc(collection(db, 'whatsapp_messages'), {
+            candidateId,
+            text: message,
+            sentAt: serverTimestamp(),
+            direction: 'outbound'
+          });
+          setMessage('');
+          alert('Mensaje enviado con éxito');
+        }
       } else {
         alert('Error al enviar mensaje. ¿Está conectado WhatsApp?');
       }

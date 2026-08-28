@@ -116,6 +116,17 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    // Outgoing-message queue and socket-ownership lease. Server-only (Admin SDK
+    // bypasses rules): clients enqueue through /api/*, never by writing here. Recruiters
+    // may READ the outbox so the UI can show what is waiting/failed.
+    match /whatsapp_outbox/{messageId} {
+      allow read: if isRecruiter();
+      allow write: if false;
+    }
+    match /whatsapp_runtime/{docId} {
+      allow read, write: if false;
+    }
+
     match /settings/{document} {
       // Whitelist, not blanket-public: candidates only ever need the company branding
       // and the form questions. 'whatsapp_templates' (the exact messages sent to

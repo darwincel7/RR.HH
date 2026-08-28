@@ -34,13 +34,19 @@ export default function WhatsAppStatusBanner() {
     return null;
   }
 
+  // With the durable outbox nothing is lost while disconnected — the banner says the
+  // truth ("queued, will send on reconnect") instead of the old scary "won't be sent".
+  const hasOutbox = !!status.outbox;
+  const pending = Number(status.pending) || 0;
   return (
     <div className="bg-rose-500 text-white px-4 py-3 flex items-center justify-center shadow-md z-[50] relative rounded-xl mb-6">
       <AlertTriangle className="w-5 h-5 mr-3 flex-shrink-0" />
       <p className="text-sm font-medium">
-        WhatsApp está desconectado. Los mensajes automáticos no se enviarán.{' '}
+        {hasOutbox
+          ? <>WhatsApp está desconectado. {pending > 0 ? <><strong>{pending} mensaje(s) esperan en cola</strong> y se enviarán solos al reconectar.</> : 'Los mensajes nuevos quedarán en cola y se enviarán solos al reconectar.'}</>
+          : <>WhatsApp está desconectado. Los mensajes automáticos no se enviarán.</>}{' '}
         <Link to="/settings" className="underline font-bold hover:text-rose-100 ml-2">
-          Conectar ahora
+          {status.suspended ? 'Forzar Reconexión' : 'Conectar ahora'}
         </Link>
       </p>
     </div>

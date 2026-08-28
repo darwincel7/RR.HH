@@ -24,6 +24,10 @@ import crypto from "crypto";
 import { setLogLevel } from 'firebase/firestore';
 import { getAI, generateContentResilient, GEMINI_MODEL } from './serverGemini';
 import { runCvParse, CvParseError } from './serverCvParse';
+import {
+  nextSpacingMs, retryBackoffMs, afterFailure, drainAction,
+  OUTBOX_STUCK_MS, OUTBOX_DRAIN_DEADLINE_MS,
+} from './serverWhatsAppQueue';
 import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
@@ -102,6 +106,35 @@ async function notifyAdmin(kind: string, subject: string, htmlBody: string) {
 
 let connectionStatus: 'connecting' | 'connected' | 'disconnected' | 'qr' = 'disconnected';
 let isShuttingDown = false; // set on SIGTERM so we don't reconnect WhatsApp mid-shutdown
+
+// True after a 440 conflict (another connection took the session): auto-reconnect is
+// suspended and only the recruiter's "Forzar Reconexión" (which STEALS the lease) may
+// resume. The outbox drain checks this so queued messages wait instead of burning
+// retry attempts against a session someone else owns.
+let waReconnectSuspended = false;
+
+// -----------------------------------------------------------------------------------
+// Single-owner lease: only ONE server instance may hold the Baileys socket.
+// -----------------------------------------------------------------------------------
+// Cloud Run can run several instances of this server at once (autoscaling, rolling
+// deploys). Every instance used to connect the socket at boot with the SAME stored
+// credentials — WhatsApp then kicks the previous connection with a 440 conflict, the
+// instances keep kicking each other, and the recruiter sees WhatsApp "randomly"
+// disconnect five times in an afternoon. The Firestore lease makes ownership explicit:
+// non-owners still enqueue messages, only the owner connects and drains.
+const INSTANCE_ID = crypto.randomUUID();
+const WA_LEASE_TTL_MS = 10 * 60 * 1000;
+let waLeaseHeld = false;
+
+async function ensureWhatsAppOwnership(force = false): Promise<boolean> {
+  try {
+    waLeaseHeld = await db.acquireWhatsAppLease(INSTANCE_ID, WA_LEASE_TTL_MS, force);
+  } catch (err) {
+    // Firestore hiccup: keep whatever we believed before rather than flapping.
+    console.error('[wa-lease] no se pudo adquirir/renovar el lease:', err);
+  }
+  return waLeaseHeld;
+}
 // Bumped on every connectToWhatsApp() call. Each socket's event handlers capture their
 // own generation and bail out once a newer socket has superseded them — otherwise a
 // stale socket's handlers keep mutating global state and spawning duplicate reconnects
@@ -206,6 +239,7 @@ const useFirestoreAuthState = async (collectionName: string) => {
 };
 
 async function connectToWhatsApp() {
+  connectionStatus = 'connecting';
   const collectionName = process.env.NODE_ENV === 'production' ? 'whatsapp_auth_prod' : 'whatsapp_auth_dev';
   const { state, saveCreds } = await useFirestoreAuthState(collectionName);
   const { version } = await fetchLatestBaileysVersion();
@@ -250,6 +284,7 @@ async function connectToWhatsApp() {
       // The user must click "Force Reconnect" in the UI to claim the session.
       if (statusCode === DisconnectReason.connectionReplaced) {
         console.log('WhatsApp connection replaced (Status 440). Suspending auto-reconnect. Please click "Forzar Reconexión" in the settings.');
+        waReconnectSuspended = true;
         // Auto-reconnect is suspended on purpose: nothing recovers without a person.
         notifyAdmin('wa-replaced', 'WhatsApp desconectado: otra sesión tomó el control',
           `<p>El WhatsApp de la empresa se desconectó porque <b>otra sesión abrió la misma cuenta</b> (conflicto 440).</p>
@@ -277,7 +312,10 @@ async function connectToWhatsApp() {
     } else if (connection === 'open') {
       connectionStatus = 'connected';
       qrCode = null;
+      waReconnectSuspended = false;
       console.log('WhatsApp connection opened');
+      // Everything that queued up while the socket was down goes out NOW.
+      nudgeWhatsAppOutbox('conexión restablecida');
     }
   });
 
@@ -319,7 +357,16 @@ async function connectToWhatsApp() {
 // Initialize the data layer first, then the WhatsApp client and HTTP server.
 async function bootstrap() {
   db = await getServerDb();
-  connectToWhatsApp().catch(err => console.error('Failed to initialize WhatsApp:', err));
+
+  // Only the lease owner opens the Baileys socket. Multiple Cloud Run instances used to
+  // ALL connect at boot with the same stored credentials, and WhatsApp kicked them
+  // against each other with 440 conflicts — the "keeps disconnecting" the recruiter saw.
+  if (await ensureWhatsAppOwnership()) {
+    connectToWhatsApp().catch(err => console.error('Failed to initialize WhatsApp:', err));
+  } else {
+    console.log('[wa-lease] otra instancia posee el socket de WhatsApp; esta instancia solo encola.');
+  }
+
   startServer();
 
   // In admin mode the backend owns CV processing (centralized, no per-browser duplication).
@@ -327,6 +374,18 @@ async function bootstrap() {
     console.log('[server CV worker] Admin mode — backend CV processor enabled (browser worker stands down).');
     processPendingCVs();
     setInterval(() => { processPendingCVs().catch(e => console.error('[server CV worker]', e)); }, 60_000);
+
+    // WhatsApp keeper: renew (or inherit) the lease, revive a dropped socket, and move
+    // the queue — while the process has CPU. HTTP-driven drains cover the gaps.
+    setInterval(() => {
+      (async () => {
+        const owner = await ensureWhatsAppOwnership();
+        if (owner && connectionStatus === 'disconnected' && !waReconnectSuspended && !isShuttingDown) {
+          connectToWhatsApp().catch(err => console.error('[wa-lease] reconexión falló:', err));
+        }
+        await drainWhatsAppOutbox();
+      })().catch(e => console.error('[wa-keeper]', e));
+    }, 60_000);
   }
 }
 
@@ -468,6 +527,145 @@ async function drainPendingCVs(): Promise<CvWorkerRun & { busy: boolean; deadlin
     if (Date.now() - started > CV_DRAIN_DEADLINE_MS) { total.deadlineHit = true; break; }
   }
   return total;
+}
+
+// Builds the WhatsApp JID from a phone number. Delegates to the SAME normalizePhone
+// the client uses to store `phoneNormalized`, so an outgoing number and the stored one
+// can never drift apart — when these two were separate implementations, inbound replies
+// stopped matching their candidate.
+const formatWhatsAppNumber = (phone: string) => {
+  if (typeof phone !== 'string') throw new Error('phone_invalido');
+  const normalized = normalizePhone(phone);
+  if (normalized.length < 7) throw new Error('phone_invalido');
+  return normalized + '@s.whatsapp.net';
+};
+
+// -----------------------------------------------------------------------------------
+// WhatsApp outbox drain — the ONLY place that actually sends messages in admin mode.
+// -----------------------------------------------------------------------------------
+// Requests never touch the socket directly any more: they persist the message to the
+// outbox and nudge this drain. The drain sends strictly one at a time with randomized
+// anti-spam spacing, reconnects the socket if it can, retries failures with backoff,
+// and never loses a message — a send that cannot happen right now simply stays queued.
+const waSleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+// Waits until the socket can send. Kicks off a reconnect if the socket is down and we
+// own the lease. Returns 'stopped' when only a human can fix things (QR needed, or a
+// 440 conflict suspended reconnection) — queued messages then wait, unburned.
+async function waitForWhatsAppReady(maxWaitMs: number): Promise<'connected' | 'stopped' | 'timeout'> {
+  const deadline = Date.now() + maxWaitMs;
+  for (;;) {
+    const action = drainAction(connectionStatus, waReconnectSuspended);
+    if (action === 'send') return 'connected';
+    if (action === 'stop') return 'stopped';
+    if (connectionStatus === 'disconnected' && waLeaseHeld && !isShuttingDown) {
+      connectToWhatsApp().catch(err => console.error('[wa-outbox] reconexión falló:', err));
+    }
+    if (Date.now() >= deadline) return 'timeout';
+    await waSleep(1000);
+  }
+}
+
+let waDrainRunning = false;
+
+async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; failedFinal: number; stopped: boolean }> {
+  const result = { sent: 0, requeued: 0, failedFinal: 0, stopped: false };
+  if (waDrainRunning || !db?.supportsOutbox || isShuttingDown) return result;
+  waDrainRunning = true;
+  try {
+    // Renew (or take) the lease; a non-owner instance leaves the queue to the owner.
+    if (!await ensureWhatsAppOwnership()) return result;
+
+    const reclaimed = await db.reclaimStuckOutbox(OUTBOX_STUCK_MS);
+    if (reclaimed) console.log(`[wa-outbox] ${reclaimed} mensaje(s) atascados en 'sending' devueltos a la cola`);
+
+    const started = Date.now();
+    for (;;) {
+      if (Date.now() - started > OUTBOX_DRAIN_DEADLINE_MS) break;
+      const batch = await db.listOutboxSendable(10);
+      if (batch.length === 0) break;
+
+      for (const msg of batch) {
+        if (Date.now() - started > OUTBOX_DRAIN_DEADLINE_MS) break;
+
+        const ready = await waitForWhatsAppReady(25_000);
+        if (ready !== 'connected') {
+          result.stopped = true;
+          break;
+        }
+
+        // Claim atomically so two drains (e.g. interval + HTTP) never double-send.
+        if (!await db.claimOutboxMessage(msg.id)) continue;
+
+        try {
+          const jid = formatWhatsAppNumber(msg.phone);
+          const info = await sock!.sendMessage(jid, { text: msg.message });
+          rememberSentMessage(info);
+          await db.markOutbox(msg.id, { status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null });
+          result.sent++;
+
+          // Conversation history — written on ACTUAL delivery to the socket, not on
+          // enqueue, so the profile chat reflects what really went out.
+          try {
+            const candidateId = msg.candidateId || await db.findCandidateIdByPhone(msg.phone);
+            if (candidateId) {
+              await db.addWhatsappMessage({
+                candidateId, text: msg.message, direction: 'outbound',
+                isAutomated: msg.origin !== 'manual', ...(msg.stage ? { stage: msg.stage } : {}),
+              });
+            }
+          } catch (histErr) {
+            console.error('[wa-outbox] no se pudo guardar el historial del mensaje:', histErr);
+          }
+
+          await waSleep(nextSpacingMs());
+        } catch (err: any) {
+          const emsg = err?.message || String(err);
+          if (emsg === 'phone_invalido') {
+            // Bad data never improves with retries — fail it immediately and visibly.
+            await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'Teléfono inválido' });
+            result.failedFinal++;
+            continue;
+          }
+          const next = afterFailure(msg.attempts || 0, Date.now(), emsg.slice(0, 500));
+          await db.markOutbox(msg.id, next);
+          if (next.status === 'failed') {
+            result.failedFinal++;
+            notifyAdmin('wa-outbox-failed', 'Un mensaje de WhatsApp no se pudo entregar tras varios intentos',
+              `<p>Un mensaje para <b>${String(msg.candidateName || msg.phone)}</b> agotó sus ${next.attempts} intentos de envío.</p>
+               <p>Último error: <code>${emsg.slice(0, 300).replace(/</g, '&lt;')}</code></p>
+               <p>Queda marcado como fallido en la cola; revisa la conexión de WhatsApp en Ajustes.</p>`);
+          } else {
+            result.requeued++;
+          }
+        }
+      }
+      if (result.stopped) break;
+    }
+
+    // Messages waiting but sending impossible without a human: say so once an hour.
+    if (result.stopped) {
+      const pending = await db.countOutboxPending();
+      if (pending > 0) {
+        notifyAdmin('wa-outbox-stalled', `${pending} mensaje(s) de WhatsApp en cola esperando reconexión`,
+          `<p>Hay <b>${pending}</b> mensaje(s) de WhatsApp en cola que no pueden salir porque la sesión está caída o desvinculada.</p>
+           <p><b>No se ha perdido ninguno</b>: se enviarán solos en cuanto WhatsApp vuelva.</p>
+           <p>Para reactivarla: app &rarr; <b>Ajustes de WhatsApp</b> &rarr; "Forzar Reconexión" (o escanear el QR si se desvinculó).</p>`);
+      }
+    }
+  } catch (err) {
+    console.error('[wa-outbox] error en el drenaje:', err);
+  } finally {
+    waDrainRunning = false;
+  }
+  return result;
+}
+
+// Fire-and-forget kick, mirroring nudgeCvWorker: enqueue points call this so messages
+// start flowing immediately instead of waiting for the next timer/heartbeat.
+function nudgeWhatsAppOutbox(reason: string) {
+  if (!db?.supportsOutbox || waDrainRunning) return;
+  drainWhatsAppOutbox().catch(e => console.error(`[wa-outbox] nudge (${reason}) falló:`, e));
 }
 
 async function startServer() {
@@ -864,32 +1062,39 @@ async function startServer() {
   });
 
   // WhatsApp Endpoints
-  // Builds the WhatsApp JID from a phone number. Delegates to the SAME normalizePhone
-  // the client uses to store `phoneNormalized`, so an outgoing number and the stored one
-  // can never drift apart — when these two were separate implementations, inbound replies
-  // stopped matching their candidate.
-  const formatWhatsAppNumber = (phone: string) => {
-    if (typeof phone !== 'string') throw new Error('phone_invalido');
-    const normalized = normalizePhone(phone);
-    if (normalized.length < 7) throw new Error('phone_invalido');
-    return normalized + '@s.whatsapp.net';
-  };
 
-  app.get("/api/whatsapp/status", requireRecruiter, (req, res) => {
-    res.json({ status: connectionStatus, qr: qrCode, session: "v2" });
+  app.get("/api/whatsapp/status", requireRecruiter, async (req, res) => {
+    // outbox:true tells the client messages are DURABLE (a bulk move with WhatsApp down
+    // queues instead of failing). pending lets the UI show "N en cola".
+    let pending = 0;
+    try { pending = await db.countOutboxPending(); } catch { /* best effort */ }
+    res.json({
+      status: connectionStatus, qr: qrCode, session: "v2",
+      outbox: !!db?.supportsOutbox, pending,
+      suspended: waReconnectSuspended,
+    });
   });
 
   app.post("/api/whatsapp/reconnect", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp reconnect requested...");
-      // Optional: clean up the old socket if it still exists somehow
+      // Close the OLD socket without logging out. This used to call sock.logout(),
+      // which UNLINKS the device — it invalidates the stored session with WhatsApp
+      // itself, so the very button meant to fix the connection sometimes destroyed it
+      // (and forced a fresh QR scan). end() just closes the websocket; the saved
+      // credentials stay valid and the new socket resumes the same session.
       if (sock) {
-        try { sock.logout("Manual reconnect"); } catch(e) {}
+        try { (sock as any)?.end?.(undefined); } catch (e) { /* best effort */ }
         sock = null;
       }
       connectionStatus = 'disconnected';
       qrCode = null;
+      // The recruiter's click is the human override: STEAL the lease (another instance
+      // may hold it after a 440 fight) and lift the post-conflict suspension.
+      waReconnectSuspended = false;
+      await ensureWhatsAppOwnership(true);
       await connectToWhatsApp();
+      nudgeWhatsAppOutbox('reconexión manual');
       res.json({ success: true, status: 'reconnecting' });
     } catch (error) {
       console.error("Manual reconnect failed:", error);
@@ -924,15 +1129,41 @@ async function startServer() {
       const body = validate(whatsappSendSchema, req, res);
       if (!body) return;
       const { phone, message } = body;
-      if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
-        return res.status(400).json({ error: "WhatsApp not fully connected" });
+      // Validate the number up front — bad data should fail NOW, not after retries.
+      let formattedPhone: string;
+      try {
+        formattedPhone = formatWhatsAppNumber(phone);
+      } catch {
+        return res.status(400).json({ error: "Teléfono inválido" });
       }
 
-      const formattedPhone = formatWhatsAppNumber(phone);
+      // Connected: send immediately — the recruiter is watching the chat.
+      if (sock && connectionStatus === 'connected' && sock?.user?.id) {
+        try {
+          const info = await sock.sendMessage(formattedPhone, { text: message });
+          rememberSentMessage(info);
+          return res.json({ success: true });
+        } catch (directErr) {
+          // The socket died mid-send (the exact moment things used to lose messages).
+          // Fall through: queue it instead of failing.
+          console.error('[whatsapp/send] envío directo falló, encolando:', directErr);
+          if (!db?.supportsOutbox) throw directErr;
+        }
+      }
 
-      const info = await sock.sendMessage(formattedPhone, { text: message });
-      rememberSentMessage(info);
-      res.json({ success: true });
+      // Not connected but the outbox exists: the message is NOT lost — it queues and
+      // goes out on reconnection. The client shows "quedó en cola".
+      if (db?.supportsOutbox) {
+        await db.enqueueWhatsApp({
+          phone, message, origin: 'manual',
+          candidateId: typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
+          status: 'queued', attempts: 0, nextAttemptAt: new Date(),
+        });
+        nudgeWhatsAppOutbox('envío manual con socket caído');
+        return res.json({ success: true, queued: true });
+      }
+
+      return res.status(400).json({ error: "WhatsApp not fully connected" });
     } catch (error) {
       console.error("Error sending WhatsApp:", error);
       res.status(500).json({ error: "Failed to send message" });
@@ -944,11 +1175,32 @@ async function startServer() {
       const body = validate(stageChangeSchema, req, res);
       if (!body) return;
       const { phone, message } = body;
+      if (!message) return res.json({ success: true, messageSent: false, reason: "No message provided" });
+      try {
+        formatWhatsAppNumber(phone); // surface bad numbers to the recruiter NOW
+      } catch {
+        return res.status(400).json({ error: "Teléfono inválido" });
+      }
+
+      // Durable path (admin mode): persist first, send from the drain. A bulk move of
+      // 20 candidates enqueues in seconds and NEVER loses a message — the old direct
+      // send lost every message after the socket dropped mid-batch.
+      if (db?.supportsOutbox) {
+        await db.enqueueWhatsApp({
+          phone, message, origin: 'automation',
+          stage: typeof req.body?.stage === 'string' ? req.body.stage.slice(0, 100) : null,
+          candidateId: typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
+          candidateName: typeof req.body?.candidateName === 'string' ? req.body.candidateName.slice(0, 200) : null,
+          status: 'queued', attempts: 0, nextAttemptAt: new Date(),
+        });
+        nudgeWhatsAppOutbox('automatización de etapa');
+        return res.json({ success: true, queued: true, messageSent: false });
+      }
+
+      // Dev fallback (no Admin SDK): direct send, as before.
       if (!sock || connectionStatus !== 'connected' || !sock?.user?.id) {
         return res.status(400).json({ error: "WhatsApp not connected" });
       }
-      if (!message) return res.json({ success: true, messageSent: false, reason: "No message provided" });
-
       const jid = formatWhatsAppNumber(phone);
       const info = await sock.sendMessage(jid, { text: message });
       rememberSentMessage(info);
@@ -1149,16 +1401,24 @@ async function startServer() {
 
   const runDrain = async (res: any) => {
     try {
-      const result = await drainPendingCVs();
+      // This request is the app's guaranteed-CPU moment (the browser heartbeat calls it
+      // every 3 minutes): move BOTH queues while we have it. Concurrently — they share
+      // no state — and WhatsApp's drain also renews the socket-owner lease.
+      const [result, wa] = await Promise.all([
+        drainPendingCVs(),
+        drainWhatsAppOutbox().catch(e => { console.error('[wa-outbox]', e); return null; }),
+      ]);
       if (result.busy) {
         return res.json({ busy: true, message: 'El worker ya está procesando CV en este momento.' });
       }
-      console.log(`[server CV worker] on-demand run: ${result.scored} scored, ${result.failed} failed, ${result.reclaimed} reclaimed`);
+      console.log(`[server CV worker] on-demand run: ${result.scored} scored, ${result.failed} failed, ${result.reclaimed} reclaimed` +
+        (wa ? ` · [wa-outbox] ${wa.sent} enviados, ${wa.requeued} reintentarán` : ''));
       return res.json({
         busy: false,
         scored: result.scored,
         failed: result.failed,
         reclaimed: result.reclaimed,
+        whatsapp: wa || undefined,
         // True when we stopped at the time budget with work still queued; the caller
         // (or the next scheduled ping) should run again to finish the rest.
         incomplete: result.deadlineHit,
@@ -1461,6 +1721,9 @@ async function startServer() {
     isShuttingDown = true;
     console.log(`[shutdown] ${sig} recibido — cerrando limpiamente...`);
     try { (sock as any)?.end?.(undefined); } catch { /* ignore */ }
+    // Hand the socket over: without this, the replacement instance would wait out the
+    // full lease TTL before connecting (WhatsApp down for minutes on every deploy).
+    db?.releaseWhatsAppLease?.(INSTANCE_ID).catch(() => { /* best effort */ });
     server.close(() => { console.log('[shutdown] servidor HTTP cerrado'); process.exit(0); });
     // Force-exit if draining hangs (Cloud Run allows ~10s before SIGKILL).
     setTimeout(() => process.exit(0), 8000);

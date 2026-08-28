@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
-import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw } from 'lucide-react';
 import { Link } from 'react-router-dom';
@@ -252,10 +252,12 @@ export default function CandidatesList() {
       // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
       // BEFORE moving anyone — never leave a batch half-notified.
       if (stageMayAutoSend(newStage)) {
-        const connected = await isWhatsAppConnected();
-        if (!connected) {
-          const proceed = window.confirm(
-            `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
+        const wa = await getWhatsAppStatus();
+        if (!wa.connected) {
+          // With the durable outbox, a disconnected socket does NOT lose messages.
+          const proceed = window.confirm(wa.outbox
+            ? `📨 WhatsApp está desconectado en este momento.\n\nLos mensajes de los ${appsToMove.length} candidato(s) quedarán EN COLA y se enviarán solos en cuanto WhatsApp se reconecte. No se pierde ninguno.\n\n¿Continuar?`
+            : `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
           );
           if (!proceed) { setBulkActionLoading(false); return; }
         }
@@ -272,6 +274,7 @@ export default function CandidatesList() {
       // (the eval form for stage 2, the test for presential tests) and keep each send
       // best-effort so one failure does not block the rest.
       let sentCount = 0;
+      let queuedCount = 0;
       const failedSends: any[] = [];
       for (const app of appsToMove) {
         if (!app.phone) continue;
@@ -290,11 +293,13 @@ export default function CandidatesList() {
           };
           const r = await sendWhatsAppAutomation(app.phone, newStage, vars);
           if (r.status === 'sent') sentCount++;
+          if (r.status === 'queued') queuedCount++;
           if (r.status === 'failed') {
             failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars });
           }
-          // Space consecutive sends: gentler on WhatsApp and avoids burst-flagging.
-          if (r.status !== 'skipped') await sleep(SEND_SPACING_MS);
+          // Direct (dev) sends need client-side spacing; queued ones are paced by the
+          // server's drain, so enqueueing can go fast.
+          if (r.status === 'sent') await sleep(SEND_SPACING_MS);
         } catch (autoErr) {
           console.error(`Automation failed for ${app.id} (stage saved anyway):`, autoErr);
           failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars: { nombre: app.candidateName, vacante: app.vacancyTitle, link: '', email: app.email } });
@@ -327,7 +332,7 @@ export default function CandidatesList() {
       try {
         const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
         if (r.status === 'failed') still.push(f);
-        else if (r.status === 'sent') sentNow++;
+        else if (r.status === 'sent' || r.status === 'queued') sentNow++;
       } catch {
         still.push(f);
       }

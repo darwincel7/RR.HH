@@ -7,7 +7,7 @@ import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle } from 'lucide-react';
 
-import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, isWhatsAppConnected, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { requestCvWorkerRun } from '../lib/api';
@@ -188,10 +188,13 @@ export default function KanbanBoard() {
     // BEFORE moving anyone. Better to stop the whole batch than to move candidates
     // whose messages will silently fail (a half-notified batch confuses the process).
     if (stageMayAutoSend(targetStage)) {
-      const connected = await isWhatsAppConnected();
-      if (!connected) {
-        const proceed = window.confirm(
-          `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
+      const wa = await getWhatsAppStatus();
+      if (!wa.connected) {
+        // With the durable outbox, a disconnected socket does NOT lose messages: they
+        // queue server-side and go out on reconnection. Say so instead of scaring.
+        const proceed = window.confirm(wa.outbox
+          ? `📨 WhatsApp está desconectado en este momento.\n\nLos mensajes de los ${appsToMove.length} candidato(s) quedarán EN COLA y se enviarán solos en cuanto WhatsApp se reconecte. No se pierde ninguno.\n\n¿Continuar?`
+          : `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
         );
         if (!proceed) { setBulkActionLoading(false); return; }
       }
@@ -199,6 +202,7 @@ export default function KanbanBoard() {
 
     let movedCount = 0;
     let sentCount = 0;
+    let queuedCount = 0;
     const failedSends: any[] = [];
     const failed: string[] = [];
 
@@ -235,11 +239,13 @@ export default function KanbanBoard() {
             };
             const r = await sendWhatsAppAutomation(phone, targetStage, vars);
             if (r.status === 'sent') sentCount++;
+            if (r.status === 'queued') queuedCount++;
             if (r.status === 'failed') {
               failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: phone || '—', vars });
             }
-            // Space consecutive sends: gentler on WhatsApp and avoids burst-flagging.
-            if (phone && r.status !== 'skipped') await sleep(SEND_SPACING_MS);
+            // Direct (dev) sends need client-side spacing; queued ones are paced by the
+            // server's drain, so enqueueing can go fast.
+            if (phone && r.status === 'sent') await sleep(SEND_SPACING_MS);
           }
         } catch (autoErr) {
           console.error(`Automation failed for ${movedApp.id} (stage saved anyway):`, autoErr);
@@ -264,7 +270,11 @@ export default function KanbanBoard() {
       // Show exactly WHO didn't get the message, with one-click retry.
       setSendReport({ stage: targetStage, sent: sentCount, failed: failedSends });
     } else if (failed.length === 0) {
-      showToast('success', `${movedCount} candidato(s) movidos a "${targetStage}"${sentCount > 0 ? ` · ${sentCount} WhatsApp enviados` : ''}`, 4000);
+      const parts = [
+        sentCount > 0 ? `${sentCount} WhatsApp enviados` : '',
+        queuedCount > 0 ? `${queuedCount} WhatsApp en cola (se envían solos)` : '',
+      ].filter(Boolean).join(' · ');
+      showToast('success', `${movedCount} candidato(s) movidos a "${targetStage}"${parts ? ` · ${parts}` : ''}`, 4500);
       if (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage)) {
         showToast('warning', '📅 Para enviarles la invitación con fecha y hora, agéndala en la página Entrevistas.', 6500);
       }
@@ -281,7 +291,7 @@ export default function KanbanBoard() {
       try {
         const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
         if (r.status === 'failed') still.push(f);
-        else if (r.status === 'sent') sentNow++;
+        else if (r.status === 'sent' || r.status === 'queued') sentNow++;
       } catch {
         still.push(f);
       }

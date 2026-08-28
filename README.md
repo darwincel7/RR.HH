@@ -92,6 +92,38 @@ El servidor y el cliente comparten **una sola** implementación de `normalizePho
 ([`src/lib/phone.ts`](src/lib/phone.ts)) — cuando eran dos copias, se desincronizaron y
 las respuestas entrantes dejaron de enlazarse con su candidato.
 
+## Mensajería de WhatsApp: cola durable y propietario único
+
+Ningún mensaje se envía "a ver si sale". En modo admin, cada mensaje (automatización de
+etapa, envío manual con el socket caído) se **persiste primero** en `whatsapp_outbox` y
+un drenador único lo entrega: de a uno, con espaciado aleatorio de 2.5–5 s (anti-spam),
+reintentos con backoff (30 s → 1 h, máx. 6 intentos), reconexión automática previa y
+alerta por correo si un mensaje se declara imposible o la cola queda varada esperando a
+un humano. Un envío que no puede salir ahora **no se pierde: espera**.
+
+Complementos que eliminan las desconexiones que sufría el envío masivo:
+
+- **Lease de propietario único** (`whatsapp_runtime/socket_owner`): solo una instancia
+  del servidor mantiene el socket de Baileys. Antes, cada instancia de Cloud Run
+  conectaba al arrancar con las mismas credenciales y WhatsApp las echaba entre sí
+  (conflictos 440 — el "se desconecta solo" del día a día). Las no propietarias solo
+  encolan; el botón **Forzar Reconexión** roba el lease (autoridad humana) y el
+  apagado limpio lo libera para el traspaso instantáneo en cada deploy.
+- **Bug corregido**: ese botón llamaba `sock.logout()`, que **desvincula el
+  dispositivo** (invalida la sesión guardada y obliga a re-escanear el QR). Ahora
+  cierra el websocket (`end()`) y reconecta con las mismas credenciales.
+- El drenaje corre con CPU garantizada: al encolar, al reconectar, en el latido del
+  navegador (cada 3 min vía `/api/cv-worker/run`, que mueve ambas colas) y en un
+  temporizador de 60 s como red de seguridad.
+- La lógica pura de decisiones (backoff, ritmo, cuándo parar sin quemar reintentos)
+  vive en [`serverWhatsAppQueue.ts`](serverWhatsAppQueue.ts), fijada por pruebas.
+
+En desarrollo (sin Admin SDK) el envío es directo, como siempre.
+
+> **Nota operativa:** conviene fijar el servicio de Cloud Run en **máximo 1 instancia**
+> y **CPU siempre asignada**. El lease ya evita la pelea entre instancias, pero una
+> sola instancia con CPU permanente es lo más sano para un websocket persistente.
+
 ## El worker de CV
 
 El análisis de CV corre **en el backend**, no en el navegador del reclutador. Cuando hay
