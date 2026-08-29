@@ -24,6 +24,7 @@ import crypto from "crypto";
 import { setLogLevel } from 'firebase/firestore';
 import { getAI, generateContentResilient, GEMINI_MODEL } from './serverGemini';
 import { runCvParse, CvParseError } from './serverCvParse';
+import { packAuthBlob, unpackAuthBlob, AUTH_BLOB_VERSION } from './serverSessionBlob';
 import {
   nextSpacingMs, retryBackoffMs, afterFailure, drainAction,
   OUTBOX_STUCK_MS, OUTBOX_DRAIN_DEADLINE_MS,
@@ -113,6 +114,15 @@ let isShuttingDown = false; // set on SIGTERM so we don't reconnect WhatsApp mid
 // retry attempts against a session someone else owns.
 let waReconnectSuspended = false;
 
+// Reconnection pacing. The old fixed 5s retry turned one bad state into an infinite
+// hammer (production logged a 403 every ~8s for 11 straight minutes). Failures back
+// off exponentially, and a STREAK of 403s means WhatsApp is rejecting our stored
+// session as invalid — retrying it is pointless, so the session gets wiped to force a
+// clean QR pairing (with an email so a human knows to scan).
+let waConnectFailures = 0;   // consecutive closes without a successful open
+let waForbiddenStreak = 0;   // consecutive 403 (forbidden) closes
+const WA_FORBIDDEN_LIMIT = 5;
+
 // -----------------------------------------------------------------------------------
 // Single-owner lease: only ONE server instance may hold the Baileys socket.
 // -----------------------------------------------------------------------------------
@@ -167,21 +177,56 @@ const useFirestoreAuthState = async (collectionName: string) => {
   // consistently on every read/write/delete.
   const fixId = (id: string) => id.replace(/\//g, '__');
 
+  // Session state is stored gzip-compressed and CHUNKED across documents. The raw
+  // JSON grew past Firestore's ~1MB document cap ("longer than 1048487 bytes" in the
+  // production logs): the save silently failed, the session lived only in memory, and
+  // the next reconnect read a half-saved state that WhatsApp rejected with endless
+  // 403s. That storage failure was the root cause of the recurring disconnections.
+  const partId = (id: string, p: number) => `${fixId(id)}__p${p}`;
+
   const writeData = async (data: any, id: string) => {
     try {
       const str = JSON.stringify(data, BufferJSON.replacer);
-      await db.setDocData(collectionName, fixId(id), { data: str });
+      const parts = packAuthBlob(str);
+      // How many chunks did the PREVIOUS save use? Extra ones must be deleted, or a
+      // shrinking state would leave stale tails that corrupt the next read.
+      const prev = await db.getDocData(collectionName, fixId(id));
+      const prevParts = prev?.v === AUTH_BLOB_VERSION ? (prev.parts || 1) : 1;
+      await db.setDocData(collectionName, fixId(id), { v: AUTH_BLOB_VERSION, parts: parts.length, data: parts[0] });
+      for (let p = 1; p < parts.length; p++) {
+        await db.setDocData(collectionName, partId(id, p), { v: AUTH_BLOB_VERSION, data: parts[p] });
+      }
+      for (let p = Math.max(parts.length, 1); p < prevParts; p++) {
+        await db.deleteDocData(collectionName, partId(id, p)).catch(() => { /* best effort */ });
+      }
     } catch (error) {
       console.error("Error saving WhatsApp auth state to Firestore:", error);
+      // This failing is exactly how the session used to die silently — say it loudly.
+      notifyAdmin('wa-session-save', 'La sesión de WhatsApp no se pudo guardar',
+        `<p>El servidor no pudo guardar el estado de la sesión de WhatsApp en la base de datos.</p>
+         <p>La conexión actual sigue funcionando, pero <b>se perderá en el próximo reinicio</b> y habrá que escanear el QR de nuevo.</p>
+         <p>Error: <code>${String((error as any)?.message || error).slice(0, 300).replace(/</g, '&lt;')}</code></p>`);
     }
   };
 
   const readData = async (id: string) => {
     try {
       const docData = await db.getDocData(collectionName, fixId(id));
-      if (docData && docData.data) {
-        return JSON.parse(docData.data, BufferJSON.reviver);
+      if (!docData || !docData.data) return null;
+      let json: string;
+      if (docData.v === AUTH_BLOB_VERSION) {
+        const parts: string[] = [docData.data];
+        for (let p = 1; p < (docData.parts || 1); p++) {
+          const part = await db.getDocData(collectionName, partId(id, p));
+          if (!part?.data) throw new Error(`chunk ${p} de "${id}" ausente`);
+          parts.push(part.data);
+        }
+        json = unpackAuthBlob(parts);
+      } else {
+        // Legacy uncompressed format — readable as-is; converted to v2 on next write.
+        json = docData.data;
       }
+      return JSON.parse(json, BufferJSON.reviver);
     } catch (error) {
       console.error("Error reading WhatsApp auth state from Firestore:", error);
     }
@@ -190,6 +235,11 @@ const useFirestoreAuthState = async (collectionName: string) => {
 
   const removeData = async (id: string) => {
     try {
+      const docData = await db.getDocData(collectionName, fixId(id));
+      const parts = docData?.v === AUTH_BLOB_VERSION ? (docData.parts || 1) : 1;
+      for (let p = 1; p < parts; p++) {
+        await db.deleteDocData(collectionName, partId(id, p)).catch(() => { /* best effort */ });
+      }
       await db.deleteDocData(collectionName, fixId(id));
     } catch (error) {
       console.error("Error deleting WhatsApp auth state from Firestore:", error);
@@ -290,15 +340,32 @@ async function connectToWhatsApp() {
           `<p>El WhatsApp de la empresa se desconectó porque <b>otra sesión abrió la misma cuenta</b> (conflicto 440).</p>
            <p>Los mensajes automáticos a candidatos <b>no se están enviando</b>.</p>
            <p>Para arreglarlo: entra a la app &rarr; <b>Ajustes de WhatsApp</b> &rarr; pulsa <b>"Forzar Reconexión"</b>.</p>`);
+      } else if (statusCode === 403 && ++waForbiddenStreak >= WA_FORBIDDEN_LIMIT) {
+        // WhatsApp rejects our stored credentials over and over: the saved session is
+        // invalid (this is what a half-saved >1MB state produced). Retrying forever is
+        // useless — wipe it and reconnect clean, which shows a fresh QR in Ajustes.
+        console.error(`[whatsapp] ${waForbiddenStreak} rechazos 403 seguidos — la sesión guardada es inválida; se limpia para generar un QR nuevo.`);
+        waForbiddenStreak = 0;
+        notifyAdmin('wa-session-invalid', 'WhatsApp rechazó la sesión guardada: hay que escanear el QR',
+          `<p>WhatsApp rechazó repetidamente la sesión guardada del servidor (error 403).</p>
+           <p>La sesión quedó limpia y hay un <b>QR nuevo</b> esperando en la app &rarr; <b>Ajustes de WhatsApp</b>. Escanéalo para reconectar; los mensajes en cola saldrán solos después.</p>`);
+        try { await db.deleteCollection(collectionName); } catch (e) { console.error('[whatsapp] no se pudo limpiar la sesión:', e); }
+        if (!isShuttingDown && myGen === connectionGeneration) {
+          connectToWhatsApp().catch(err => console.error('Failed to reconnect:', err));
+        }
       } else if (statusCode !== DisconnectReason.loggedOut && !isShuttingDown) {
-        console.log('Attempting to reconnect in 5 seconds...');
+        // Exponential backoff (5s, 10s, 20s… capped at 2 min), reset on every
+        // successful open — a flapping socket no longer hammers WhatsApp.
+        waConnectFailures++;
+        const delay = Math.min(5000 * Math.pow(2, Math.max(0, waConnectFailures - 1)), 120_000);
+        console.log(`Attempting to reconnect in ${Math.round(delay / 1000)} seconds... (fallo consecutivo #${waConnectFailures})`);
         setTimeout(() => {
           // Only reconnect if no newer socket already superseded this one (avoids stacking
           // duplicate reconnect timers that spawn competing sockets).
           if (!isShuttingDown && myGen === connectionGeneration) {
             connectToWhatsApp().catch(err => console.error('Failed to reconnect:', err));
           }
-        }, 5000);
+        }, delay);
       } else {
         console.log('WhatsApp logged out. Need to scan new QR.');
         if (statusCode === DisconnectReason.loggedOut) {
@@ -313,6 +380,8 @@ async function connectToWhatsApp() {
       connectionStatus = 'connected';
       qrCode = null;
       waReconnectSuspended = false;
+      waConnectFailures = 0;
+      waForbiddenStreak = 0;
       console.log('WhatsApp connection opened');
       // Everything that queued up while the socket was down goes out NOW.
       nudgeWhatsAppOutbox('conexión restablecida');
