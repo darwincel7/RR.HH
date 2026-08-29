@@ -71,15 +71,17 @@ export default function CVWorker() {
                 aiStatus: 'completed'
               };
 
-              // If it was a bulk upload (Procesando:...), overwrite the names and emails
-              if (data.fullName?.startsWith("Procesando:")) {
-                if (parsedData.full_name) candidateUpdatePayload.fullName = parsedData.full_name;
-                if (parsedData.email) candidateUpdatePayload.email = parsedData.email;
-                if (parsedData.phone) {
+              // Bulk uploads: the AI fills only the EMPTY fields — data the recruiter
+              // typed at upload time (name/phone/email/city) always wins.
+              const namePending = data.fullName?.startsWith("Procesando:");
+              if (namePending || data.source === 'bulk') {
+                if (namePending && parsedData.full_name) candidateUpdatePayload.fullName = parsedData.full_name;
+                if (!data.email && parsedData.email) candidateUpdatePayload.email = parsedData.email;
+                if (!data.phone && parsedData.phone) {
                   candidateUpdatePayload.phone = parsedData.phone;
                   candidateUpdatePayload.phoneNormalized = normalizePhone(parsedData.phone);
                 }
-                if (parsedData.city) candidateUpdatePayload.city = parsedData.city;
+                if (!data.city && parsedData.city) candidateUpdatePayload.city = parsedData.city;
               }
 
               // Update candidate
@@ -95,7 +97,7 @@ export default function CVWorker() {
                   scoreSummary: parsedData.initial_score_1_to_5,
                   recommendation: parsedData.recommendation
                 };
-                if (data.fullName?.startsWith("Procesando:") && parsedData.full_name) {
+                if (namePending && parsedData.full_name) {
                   appUpdatePayload.candidateName = parsedData.full_name;
                 }
 

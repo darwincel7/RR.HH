@@ -48,8 +48,9 @@ export interface ServerDb {
   verifyRecruiter(idToken: string): Promise<RecruiterIdentity | null>;
   /** Verifies a Firebase ID token (incl. anonymous) and returns its uid, or null. Admin mode only. */
   verifyUid(idToken: string): Promise<string | null>;
-  /** Candidates awaiting AI CV analysis (aiStatus == 'pending'). */
-  listPendingCandidates(max: number): Promise<Array<{ id: string; cvUrl?: string; cvFileType?: string; fullName?: string }>>;
+  /** Candidates awaiting AI CV analysis (aiStatus == 'pending'). Includes the contact
+   * fields so the worker can fill only the EMPTY ones (manual data always wins). */
+  listPendingCandidates(max: number): Promise<Array<{ id: string; cvUrl?: string; cvFileType?: string; fullName?: string; email?: string; phone?: string; city?: string; source?: string }>>;
   /** Atomically claims a candidate for processing (pending -> processing). Returns false if already claimed. */
   claimCandidate(id: string): Promise<boolean>;
   /** Returns candidates stuck in 'processing' (older than olderThanMs) to 'pending'. Returns count reclaimed. */
@@ -176,7 +177,10 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async listPendingCandidates(max) {
         const snap = await adb.collection('candidates').where('aiStatus', '==', 'pending').limit(max).get();
-        return snap.docs.map((d: any) => ({ id: d.id, cvUrl: d.data().cvUrl, cvFileType: d.data().cvFileType, fullName: d.data().fullName }));
+        return snap.docs.map((d: any) => {
+          const c = d.data();
+          return { id: d.id, cvUrl: c.cvUrl, cvFileType: c.cvFileType, fullName: c.fullName, email: c.email, phone: c.phone, city: c.city, source: c.source };
+        });
       },
       async claimCandidate(id) {
         const ref = adb.collection('candidates').doc(id);
@@ -379,7 +383,10 @@ async function initClient(): Promise<ServerDb> {
     },
     async listPendingCandidates(max) {
       const snap = await getDocs(query(collection(cdb, 'candidates'), where('aiStatus', '==', 'pending'), limit(max)));
-      return snap.docs.map(d => ({ id: d.id, cvUrl: d.data().cvUrl, cvFileType: d.data().cvFileType, fullName: d.data().fullName }));
+      return snap.docs.map(d => {
+        const c: any = d.data();
+        return { id: d.id, cvUrl: c.cvUrl, cvFileType: c.cvFileType, fullName: c.fullName, email: c.email, phone: c.phone, city: c.city, source: c.source };
+      });
     },
     async claimCandidate(id) {
       const ref = doc(cdb, 'candidates', id);

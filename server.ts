@@ -402,27 +402,32 @@ const CV_CONCURRENCY = 3;
 // Parses one already-claimed candidate's CV and writes the results. Isolated so one
 // candidate's failure never aborts the others in the batch. Returns true when the CV
 // was scored, false when it ended in 'error', so a run can report what it achieved.
-async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string }): Promise<boolean> {
-  const isBulk = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
+async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string; email?: string; phone?: string; city?: string; source?: string }): Promise<boolean> {
+  // Bulk docs: created by the recruiter's mass upload. Two shapes exist — old ones with
+  // the "Procesando:" placeholder name, and new ones marked source:'bulk' that may carry
+  // MANUAL data typed at upload time. On bulk docs the AI fills only the EMPTY fields;
+  // whatever the recruiter typed always wins.
+  const namePending = typeof cand.fullName === 'string' && cand.fullName.startsWith('Procesando:');
+  const isBulk = cand.source === 'bulk' || namePending;
   try {
     const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
 
     const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
     if (isBulk) {
-      if (parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
-      if (parsedData.email) candidateUpdate.email = parsedData.email;
-      if (parsedData.phone) {
+      if (namePending && parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
+      if (!cand.email && parsedData.email) candidateUpdate.email = parsedData.email;
+      if (!cand.phone && parsedData.phone) {
         candidateUpdate.phone = parsedData.phone;
         candidateUpdate.phoneNormalized = normalizePhone(parsedData.phone);
       }
-      if (parsedData.city) candidateUpdate.city = parsedData.city;
+      if (!cand.city && parsedData.city) candidateUpdate.city = parsedData.city;
     }
     await db.setDocData('candidates', cand.id, candidateUpdate);
 
     const appIds = await db.getApplicationIdsByCandidate(cand.id);
     for (const appId of appIds) {
       const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
-      if (isBulk && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
+      if (namePending && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
       await db.setDocData('applications', appId, appUpdate);
     }
     console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
@@ -431,7 +436,8 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
     lastCvWorkerError = err?.message || String(err);
     await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
-    if (isBulk) {
+    if (namePending) {
+      // Only placeholder names get the error label — a manually-typed name stays intact.
       const appIds = await db.getApplicationIdsByCandidate(cand.id);
       for (const appId of appIds) {
         await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });

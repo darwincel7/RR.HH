@@ -12,6 +12,8 @@ import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { requestCvWorkerRun } from '../lib/api';
 import { getKanbanOrder, computeDropOrder } from '../lib/kanbanOrder';
+import BulkCvUploadModal, { type BulkEntry } from '../components/BulkCvUploadModal';
+import { normalizePhone } from '../lib/phone';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -47,9 +49,6 @@ export default function KanbanBoard() {
 
   // Bulk upload state
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Interview schedule for THIS vacancy (date + time + place). Set here once, then used
   // to build the WhatsApp invitation and to block convoking with a past date.
@@ -306,94 +305,67 @@ export default function KanbanBoard() {
     }
   };
 
-  const handleBulkUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (!e.target.files?.length || !vacancyId) return;
+  // Bulk upload with per-CV data: whatever the recruiter typed (name/phone/email/city)
+  // is written as-is and the AI only fills what was left BLANK (source:'bulk' tells the
+  // worker to complete empty fields without overwriting manual ones).
+  const uploadBulkEntries = async (entries: BulkEntry[], onProgress: (pct: number) => void) => {
+    if (!vacancyId) return;
+    let completed = 0;
+    // Upload in chunks of 5 to dramatically speed up the process without hitting rate limits
+    const chunkSize = 5;
+    for (let i = 0; i < entries.length; i += chunkSize) {
+      const chunk = entries.slice(i, i + chunkSize);
 
-    const files = Array.from(e.target.files) as File[];
-    const validFiles = files.filter(f => f.type === 'application/pdf' || f.name.endsWith('.pdf') || f.type.includes('word') || f.name.endsWith('.docx'));
-    
-    if (validFiles.length === 0) {
-      alert("Por favor selecciona archivos PDF o Word.");
-      return;
+      await Promise.all(chunk.map(async ({ file, name, phone, email, city }) => {
+        // 1. Create a candidate record
+        const candidateId = doc(collection(db, 'candidates')).id;
+
+        // 2. Upload file to storage (folder = uploading recruiter's uid)
+        const fileExt = file.name.split('.').pop() || 'pdf';
+        const uploaderUid = auth.currentUser?.uid || candidateId;
+        const storageRef = ref(storage, `cvs/${uploaderUid}/${candidateId}_bulk_${Date.now()}.${fileExt}`);
+        await uploadBytes(storageRef, file);
+        const cvUrl = await getDownloadURL(storageRef);
+
+        const displayName = name.trim() || `Procesando: ${file.name}`;
+
+        // 3 & 4. Save candidate shell + application atomically so a failure never
+        // leaves an orphaned candidate without its application (or vice versa).
+        const applicationId = `${candidateId}_${vacancyId}`;
+        const batch = writeBatch(db);
+        batch.set(doc(db, 'candidates', candidateId), {
+          fullName: displayName,
+          email: email.trim(),
+          phone: phone.trim(),
+          ...(phone.trim() ? { phoneNormalized: normalizePhone(phone) } : {}),
+          city: city.trim(),
+          source: 'bulk', // the AI completes only the EMPTY fields on bulk docs
+          cvUrl,
+          cvFileType: file.type || 'application/pdf',
+          aiStatus: 'pending', // This triggers our background CV processor cron
+          createdAt: serverTimestamp()
+        });
+        batch.set(doc(db, 'applications', applicationId), {
+          candidateId,
+          vacancyId: vacancyId,
+          vacancyTitle: vacancy?.title || '',
+          candidateName: displayName,
+          stage: 'Nuevo',
+          cvUrl,
+          cvFileType: file.type || 'application/pdf',
+          submittedAt: serverTimestamp(),
+          lastStageUpdate: serverTimestamp()
+        });
+        await batch.commit();
+
+        completed++;
+      }));
+
+      onProgress((completed / entries.length) * 100);
     }
 
-    if (validFiles.length > 50) {
-      alert("Por favor no subas más de 50 archivos a la vez para no saturar el sistema.");
-      return;
-    }
-    
-    setIsUploading(true);
-    setUploadProgress(0);
-
-    try {
-      let completed = 0;
-      
-      // Upload in chunks of 5 to dramatically speed up the process without hitting rate limits
-      const chunkSize = 5;
-      for (let i = 0; i < validFiles.length; i += chunkSize) {
-        const chunk = validFiles.slice(i, i + chunkSize);
-        
-        await Promise.all(chunk.map(async (file) => {
-          // 1. Create a candidate record
-          const candidateId = doc(collection(db, 'candidates')).id;
-          
-          // 2. Upload file to storage (folder = uploading recruiter's uid)
-          const fileExt = file.name.split('.').pop() || 'pdf';
-          const uploaderUid = auth.currentUser?.uid || candidateId;
-          const storageRef = ref(storage, `cvs/${uploaderUid}/${candidateId}_bulk_${Date.now()}.${fileExt}`);
-          await uploadBytes(storageRef, file);
-          const cvUrl = await getDownloadURL(storageRef);
-
-          // 3 & 4. Save candidate shell + application atomically so a failure never
-          // leaves an orphaned candidate without its application (or vice versa).
-          const applicationId = `${candidateId}_${vacancyId}`;
-          const batch = writeBatch(db);
-          batch.set(doc(db, 'candidates', candidateId), {
-            fullName: `Procesando: ${file.name}`,
-            email: '',
-            phone: '',
-            city: '',
-            cvUrl,
-            cvFileType: file.type || 'application/pdf',
-            aiStatus: 'pending', // This triggers our background CV processor cron
-            createdAt: serverTimestamp()
-          });
-          batch.set(doc(db, 'applications', applicationId), {
-            candidateId,
-            vacancyId: vacancyId,
-            vacancyTitle: vacancy?.title || '',
-            candidateName: `Procesando: ${file.name}`,
-            stage: 'Nuevo',
-            cvUrl,
-            cvFileType: file.type || 'application/pdf',
-            submittedAt: serverTimestamp(),
-            lastStageUpdate: serverTimestamp()
-          });
-          await batch.commit();
-
-          completed++;
-        }));
-        
-        setUploadProgress(Math.round((completed / validFiles.length) * 100));
-      }
-
-      // Every CV is queued now — start the analysis immediately.
-      requestCvWorkerRun();
-
-      // Close and clean
-      setTimeout(() => {
-        setIsUploading(false);
-        setIsBulkUploadModalOpen(false);
-        if (fileInputRef.current) {
-          fileInputRef.current.value = '';
-        }
-      }, 1000);
-
-    } catch (error) {
-      console.error("Bulk upload error:", error);
-      alert("Error al subir los CVs. Revisa la consola o asegúrate de que tienes conexión.");
-      setIsUploading(false);
-    }
+    // Every CV is queued now — start the analysis immediately.
+    requestCvWorkerRun();
   };
 
   const onDragEnd = async (result: DropResult) => {
@@ -852,67 +824,12 @@ export default function KanbanBoard() {
       )}
 
       {/* Bulk Upload Modal */}
-      <Modal isOpen={isBulkUploadModalOpen} onClose={isUploading ? undefined : () => setIsBulkUploadModalOpen(false)} overlayClassName="bg-slate-900/40 z-[100]">
-          <div className="bg-white rounded-2xl p-6 w-full max-w-lg shadow-xl relative animate-scale-in">
-            <button 
-              onClick={() => setIsBulkUploadModalOpen(false)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"
-              disabled={isUploading}
-            >
-              <X className="w-5 h-5" />
-            </button>
-            <h2 className="text-xl font-bold text-slate-800 mb-2 flex items-center">
-              <UploadCloud className="w-6 h-6 mr-2 text-violet-600" />
-              Subida Masiva de CVs
-            </h2>
-            <p className="text-slate-500 mb-6 text-sm">
-              Sube múltiples currículums (PDF o Word) a la vez para analizarlos e integrarlos a esta vacante.
-            </p>
-
-            <div 
-              className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${isUploading ? 'border-violet-300 bg-violet-50' : 'border-slate-300 hover:border-violet-400 hover:bg-slate-50'}`}
-              onClick={() => !isUploading && fileInputRef.current?.click()}
-            >
-              {isUploading ? (
-                <div className="flex flex-col items-center">
-                  <div className="w-12 h-12 mb-4 bg-violet-100 rounded-full flex items-center justify-center">
-                    <Loader2 className="w-6 h-6 text-violet-600 animate-spin" />
-                  </div>
-                  <h3 className="font-bold text-slate-800 mb-1">Subiendo y Procesando CVs...</h3>
-                  <p className="text-sm text-slate-500 mb-4">Por favor no cierres esta ventana</p>
-                  
-                  <div className="w-full bg-slate-200 rounded-full h-2 mb-2">
-                    <div 
-                      className="bg-violet-600 h-2 rounded-full transition-all duration-300"
-                      style={{ width: `${uploadProgress}%` }}
-                    ></div>
-                  </div>
-                  <span className="text-xs font-bold text-violet-600">{uploadProgress}% Completado</span>
-                </div>
-              ) : (
-                <div className="cursor-pointer">
-                  <div className="w-12 h-12 mb-4 bg-violet-100 rounded-full flex items-center justify-center mx-auto">
-                    <Upload className="w-6 h-6 text-violet-600" />
-                  </div>
-                  <h3 className="font-bold text-slate-800 mb-1">Haz clic para buscar los archivos</h3>
-                  <p className="text-sm text-slate-500">Puedes seleccionar hasta 50 archivos a la vez</p>
-                  <p className="text-xs text-slate-400 mt-2">Formatos soportados: .pdf, .doc, .docx</p>
-                </div>
-              )}
-            </div>
-            
-            <input 
-              type="file" 
-              multiple 
-              accept=".pdf,.doc,.docx,application/pdf,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document" 
-              className="hidden" 
-              ref={fileInputRef}
-              onChange={handleBulkUpload}
-              disabled={isUploading}
-            />
-
-          </div>
-      </Modal>
+      <BulkCvUploadModal
+        isOpen={isBulkUploadModalOpen}
+        onClose={() => setIsBulkUploadModalOpen(false)}
+        subtitle="Sube múltiples CVs para esta vacante y añade los datos que ya conozcas; la IA completa el resto."
+        uploadEntries={uploadBulkEntries}
+      />
 
       {/* WhatsApp delivery report after a bulk move — who didn't get the message + retry. */}
       <WhatsAppSendReport

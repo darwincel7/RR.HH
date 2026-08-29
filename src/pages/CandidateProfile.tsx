@@ -5,8 +5,9 @@ import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink } from 'lucide-react';
+import { Loader2, ArrowLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
 import Modal from '../components/ui/Modal';
+import EditCandidateModal from '../components/EditCandidateModal';
 
 export default function CandidateProfile() {
   const { candidateId } = useParams();
@@ -24,6 +25,7 @@ export default function CandidateProfile() {
   const [interviewObs, setInterviewObs] = useState({ score: 0, notes: '', redFlags: '' });
   const [savingObs, setSavingObs] = useState(false);
   const [showCVModal, setShowCVModal] = useState(false);
+  const [showEditCandidate, setShowEditCandidate] = useState(false);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [analyzingCV, setAnalyzingCV] = useState(false);
   
@@ -512,7 +514,16 @@ export default function CandidateProfile() {
             <div className="w-20 h-20 lg:w-24 lg:h-24 bg-white rounded-full mx-auto mb-4 flex items-center justify-center shadow-xl border-4 border-white relative z-10">
               <User className="w-8 h-8 lg:w-10 lg:h-10 text-violet-300" />
             </div>
-            <h1 className="text-xl lg:text-2xl font-display font-bold text-slate-900 relative z-10">{candidate.fullName || candidate.name}</h1>
+            <h1 className="text-xl lg:text-2xl font-display font-bold text-slate-900 relative z-10 flex items-center justify-center gap-2">
+              <span>{candidate.fullName || candidate.name}</span>
+              <button
+                onClick={() => setShowEditCandidate(true)}
+                title="Editar nombre, teléfono, correo o ciudad"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 transition-colors"
+              >
+                <Pencil className="w-4 h-4" />
+              </button>
+            </h1>
             <p className="text-sm lg:text-base text-slate-500 font-medium mb-4 lg:mb-6 relative z-10">{ai.currentRole || 'Candidato'}</p>
             
             <div className="flex flex-col space-y-2 lg:space-y-3 text-xs lg:text-sm text-left relative z-10">
@@ -1397,6 +1408,14 @@ export default function CandidateProfile() {
           </div>
       </Modal>
 
+
+      {/* Edición de los datos que suministró el candidato (nombre/teléfono/correo/ciudad). */}
+      <EditCandidateModal
+        isOpen={showEditCandidate}
+        onClose={() => setShowEditCandidate(false)}
+        candidateId={candidateId!}
+        candidate={candidate}
+      />
     </div>
   );
 }
