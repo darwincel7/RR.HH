@@ -139,9 +139,13 @@ export default function Interviews() {
           hora: session.time,
           ubicacion: session.location,
         });
-        alert(r.status === 'sent'
-          ? `Candidato añadido. Invitación enviada por WhatsApp para el ${session.date} a las ${session.time}.`
-          : 'Candidato añadido, pero NO se pudo enviar la invitación por WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
+        // 'queued' is the NORMAL production outcome: the server's durable queue
+        // delivers it by itself with anti-ban pacing. Only 'failed' is a problem.
+        alert(r.status === 'sent' || r.status === 'queued'
+          ? `Candidato añadido. Invitación de WhatsApp en camino para el ${session.date} a las ${session.time}.`
+          : r.status === 'skipped'
+            ? 'Candidato añadido. No se envió WhatsApp (el candidato pidió no recibir mensajes o falta información).'
+            : 'Candidato añadido, pero NO se pudo enviar la invitación por WhatsApp. Revisa la conexión de WhatsApp en Configuración.');
       } else if (session && !phone) {
         alert('Candidato añadido. No tiene teléfono registrado, así que no se envió la invitación.');
       }
@@ -176,8 +180,10 @@ export default function Interviews() {
         ubicacion: session.location
       });
 
-      if (r.status === 'sent') {
-        alert("Recordatorio enviado con éxito.");
+      if (r.status === 'sent' || r.status === 'queued') {
+        alert("Recordatorio en camino: el servidor lo entrega en unos segundos.");
+      } else if (r.status === 'skipped') {
+        alert("No se envió el recordatorio: el candidato pidió no recibir mensajes por WhatsApp.");
       } else {
         alert("No se pudo enviar el recordatorio por WhatsApp. Revisa la conexión de WhatsApp en Configuración.");
       }

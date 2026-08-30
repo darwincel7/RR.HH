@@ -64,9 +64,10 @@ export async function isWhatsAppConnected(): Promise<boolean> {
   return (await getWhatsAppStatus()).connected;
 }
 
-// Small spacing between consecutive automated sends: gentler on the WhatsApp socket
-// and reduces the chance of Meta flagging a burst of identical messages as spam.
-export const SEND_SPACING_MS = 600;
+// Spacing between consecutive DIRECT sends (dev fallback without the server outbox —
+// in production the server queue paces everything with its own longer jitter). 600ms
+// was a burst by WhatsApp anti-spam standards; 3s is the floor for identical texts.
+export const SEND_SPACING_MS = 3000;
 export const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
 export async function sendWhatsAppAutomation(
@@ -95,35 +96,52 @@ export async function sendWhatsAppAutomation(
     // Fetch templates
     const docRef = doc(db, 'settings', 'whatsapp_templates');
     const docSnap = await getDoc(docRef);
-    
+
+    // Company identity: every template opens by saying WHO is writing. A message from
+    // an unknown, unsaved number that never names the company is what recipients
+    // report as spam — and recipient reports are the strongest account-ban signal.
+    // Fetched once here; reused for the email branding below.
+    let companyName = 'Darwin Cell';
+    let companyLogoUrl = '';
+    try {
+      const companySnap = await getDoc(doc(db, 'settings', 'company'));
+      if (companySnap.exists()) {
+        if (companySnap.data().name) companyName = companySnap.data().name;
+        if (companySnap.data().logoUrl) companyLogoUrl = companySnap.data().logoUrl;
+      }
+    } catch { /* branding is best-effort */ }
+
     let template = "";
     if (docSnap.exists() && docSnap.data().templates && docSnap.data().templates[stage]) {
       template = docSnap.data().templates[stage];
     } else {
-      // Fallbacks if not configured
+      // Fallbacks if not configured. Written to read like a person from HR, not a
+      // broadcast: the company introduces itself in the first line, 1-2 emojis at
+      // most, and every message invites a reply — incoming replies are the best
+      // legitimacy signal a WhatsApp number can earn.
       switch (stage) {
         case "Formulario etapa 2 enviado":
-          template = "Hola {{nombre}} 👋\n\nRecientemente aplicaste para la vacante de {{vacante}} y hemos revisado tu perfil con mucho interés. ✅\n\nNos complace informarte que has sido preseleccionado(a) para avanzar a la siguiente etapa del proceso de entrevistas. 🎉\n\nSi deseas continuar, por favor completa el siguiente formulario:\n\n🔗 {{link}}\n\n🗓️ Fecha límite de respuesta: {{fecha}}\n\nAgradecemos tu interés y tu tiempo. ¡Estamos emocionados de conocerte mejor y descubrir si esta oportunidad es para ti! 🙌";
+          template = "Hola {{nombre}}, te saluda el equipo de reclutamiento de {{empresa}} 👋\n\nRecibimos tu aplicación a la vacante de {{vacante}} y nos gustó tu perfil: queremos avanzar contigo a la siguiente etapa.\n\nEl próximo paso es completar este formulario antes del {{fecha}}:\n{{link}}\n\n¿Contamos contigo? Respóndenos por aquí para saber que recibiste este mensaje. Y si prefieres no continuar en el proceso, también puedes decírnoslo.";
           break;
         case "Convocado a entrevista":
-          template = "🎉 ¡Felicitaciones {{nombre}}!\n\nHas sido preseleccionado(a) para avanzar a la siguiente etapa del proceso para el puesto de {{vacante}}.\n\nNos encantaría coordinar una entrevista virtual contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Virtual ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}} por el proceso de {{vacante}}.\n\n¡Buenas noticias! Queremos invitarte a una entrevista virtual:\n\nFecha: {{fecha}}\nHora: {{hora}}\nModalidad: Virtual ({{ubicacion}})\n\n¿Te queda bien ese horario? Respóndenos por aquí para confirmar; si no puedes ese día, lo coordinamos. ¡Gracias!";
           break;
         case "Entrevista presencial":
-          template = "🎉 ¡Felicidades, {{nombre}}!\n\nHas sido seleccionado/a para avanzar a la etapa final del proceso para el puesto de {{vacante}} 👏\n\nNos encantaría coordinar una entrevista presencial contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Presencial ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}}. Pasaste a la etapa final del proceso para {{vacante}} 🎉\n\nQueremos conocerte en persona:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas tu asistencia respondiendo este mensaje? Si necesitas otro horario, dinos y lo buscamos.";
           break;
         case "Recordatorio de entrevista":
-          template = "⏰ Recordatorio de entrevista\n\nHola {{nombre}} 👋\n\nTe recordamos tu entrevista para el puesto de {{vacante}}.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅. ¡Te esperamos!";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}} para recordarte tu entrevista para {{vacante}}:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas que podrás asistir? ¡Te esperamos!";
           break;
         case "Oferta":
-          template = "🎉 ¡Felicitaciones, {{nombre}}!\n\nHas sido seleccionado/a para incorporarte a nuestro equipo en el puesto de {{vacante}} 👏✨\n\nQueremos coordinar una reunión presencial para revisar detalles y formalizar el acuerdo de inicio laboral.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅\n\n¡Estamos muy emocionados por tenerte en nuestro equipo! 🚀";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}} con una excelente noticia: fuiste seleccionado(a) para el puesto de {{vacante}} 🎉\n\nQueremos reunirnos contigo para revisar los detalles y formalizar el inicio:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas por aquí? ¡Nos alegra mucho poder darte la bienvenida al equipo!";
           break;
         // "Contratado" intentionally has NO template: hiring is handled in person,
         // so no automatic WhatsApp is sent when a candidate is marked as hired.
         case "Descartado":
-          template = "Hola {{nombre}} 👋,\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. 🙏\n\nTras revisar todos los perfiles, hemos decidido continuar con otros candidatos en esta etapa. Agradecemos tu tiempo y el interés que mostraste. 🌟\n\n¡Te deseamos muchos éxitos!";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. En esta ocasión decidimos continuar con otros perfiles, pero valoramos de verdad el tiempo y el interés que dedicaste.\n\nTe deseamos muchos éxitos, y ojalá coincidamos en una próxima oportunidad.";
           break;
         case "Banco de talento":
-          template = "Hola {{nombre}} 👋\n\nQueremos agradecerte sinceramente por tu tiempo, disposición y la excelente participación que tuviste en la última etapa del proceso para el puesto de {{vacante}} 🙌\n\nEn esta ocasión, el proceso ha concluido con la selección de otro perfil, pero valoramos mucho tus capacidades y el potencial que demostraste.\n\n📌 Con tu permiso, nos gustaría conservar tus datos en nuestra base de talento para considerarte en futuras oportunidades que se alineen con tu perfil.\n\n¿Estarías de acuerdo? Solo debes responder “Sí, autorizo” ✅\n\n¡Gracias nuevamente por tu interés en formar parte de nuestro equipo!\n\nTe deseamos muchos éxitos en tus próximos pasos 🚀\n\nSaludos cordiales.";
+          template = "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por tu excelente participación en el proceso para {{vacante}}. Esta vez el proceso concluyó con otro perfil, pero tu desempeño nos gustó mucho.\n\nNos encantaría guardar tus datos en nuestro banco de talento para futuras oportunidades. ¿Nos autorizas? Responde \"Sí, autorizo\" y quedas dentro.";
           break;
       }
     }
@@ -133,6 +151,7 @@ export async function sendWhatsAppAutomation(
     // Replace variables
     let message = template.replace(/{{nombre}}/g, variables.nombre || '');
     message = message.replace(/{{vacante}}/g, variables.vacante || 'la vacante');
+    message = message.replace(/{{empresa}}/g, companyName);
     message = message.replace(/{{link}}/g, variables.link || '');
     message = message.replace(/{{fecha}}/g, variables.fecha || '');
     message = message.replace(/{{hora}}/g, variables.hora || '');
@@ -141,11 +160,6 @@ export async function sendWhatsAppAutomation(
     // Send Email Automation if email is provided
     if (variables.email) {
       try {
-        const companyRef = doc(db, 'settings', 'company');
-        const companySnap = await getDoc(companyRef);
-        const companyName = companySnap.exists() ? companySnap.data().name : 'Nuestra Empresa';
-        const companyLogoUrl = companySnap.exists() ? companySnap.data().logoUrl : '';
-
         const emailHtml = getEmailTemplate(
           `Actualización de tu proceso: ${stage}`,
           message,
@@ -171,6 +185,13 @@ export async function sendWhatsAppAutomation(
     } catch (parseError) {
       console.error("Failed to parse API response. Status:", res.status);
       return { status: 'failed', reason: `respuesta_invalida_${res.status}` };
+    }
+
+    // The candidate asked not to receive WhatsApp messages; the server honors that
+    // and skips silently. For the recruiter this is a deliberate skip, not a failure
+    // (a failure would invite retries against someone who said stop).
+    if (data.success && data.skipped === 'opt_out') {
+      return { status: 'skipped', reason: 'candidato_pidio_no_contactar' };
     }
 
     // Durable outbox path: the server persisted the message and delivers it itself

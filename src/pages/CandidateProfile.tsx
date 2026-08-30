@@ -232,11 +232,16 @@ export default function CandidateProfile() {
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         if (data.queued) {
-          // WhatsApp is down RIGHT NOW but the message is safe in the server's queue —
-          // the server also writes the history entry when it actually delivers, so no
-          // client-side log here (it would duplicate the record).
+          // The server ALWAYS queues now (one paced exit door for every send) and
+          // writes the history entry itself upon actual delivery — no client-side
+          // log here (it would duplicate the record). `connected` distinguishes
+          // "on its way in seconds" from "waiting for reconnection".
           setMessage('');
-          alert('📨 WhatsApp está desconectado en este momento. El mensaje quedó EN COLA y se enviará solo al reconectar.');
+          if (data.connected) {
+            alert('📨 Mensaje en camino: saldrá en unos segundos (el sistema espacia los envíos para proteger el número).');
+          } else {
+            alert('📨 WhatsApp está desconectado en este momento. El mensaje quedó EN COLA y se enviará solo al reconectar.');
+          }
         } else {
           // Log message in Firestore
           await addDoc(collection(db, 'whatsapp_messages'), {
@@ -249,7 +254,9 @@ export default function CandidateProfile() {
           alert('Mensaje enviado con éxito');
         }
       } else {
-        alert('Error al enviar mensaje. ¿Está conectado WhatsApp?');
+        // Surface the server's reason (e.g. the candidate opted out of WhatsApp).
+        const data = await res.json().catch(() => ({} as any));
+        alert(data?.error || 'Error al enviar mensaje. ¿Está conectado WhatsApp?');
       }
     } catch (error) {
       console.error("Error sending WhatsApp:", error);

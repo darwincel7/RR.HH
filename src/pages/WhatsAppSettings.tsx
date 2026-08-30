@@ -24,18 +24,24 @@ export default function WhatsAppSettings() {
   const [uploadingCareersImage, setUploadingCareersImage] = useState(false);
   const careersFileInputRef = useRef<HTMLInputElement>(null);
 
+  // Same defaults as src/lib/whatsapp.ts (keep in sync). Deliberately written like a
+  // person from HR, not a broadcast: the company introduces itself ({{empresa}}), 1-2
+  // emojis at most, and every message invites a reply — messages that look like mass
+  // campaigns get reported by recipients, and reports get the number banned.
   const [templates, setTemplates] = useState({
-    "Formulario etapa 2 enviado": "Hola {{nombre}} 👋\n\nRecientemente aplicaste para la vacante de {{vacante}} y hemos revisado tu perfil con mucho interés. ✅\n\nNos complace informarte que has sido preseleccionado(a) para avanzar a la siguiente etapa del proceso de entrevistas. 🎉\n\nSi deseas continuar, por favor completa el siguiente formulario:\n\n🔗 {{link}}\n\n🗓️ Fecha límite de respuesta: {{fecha}}\n\nAgradecemos tu interés y tu tiempo. ¡Estamos emocionados de conocerte mejor y descubrir si esta oportunidad es para ti! 🙌",
-    "Convocado a entrevista": "🎉 ¡Felicitaciones {{nombre}}!\n\nHas sido preseleccionado(a) para avanzar a la siguiente etapa del proceso para el puesto de {{vacante}}.\n\nNos encantaría coordinar una entrevista virtual contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Virtual ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.",
-    "Entrevista presencial": "🎉 ¡Felicidades, {{nombre}}!\n\nHas sido seleccionado/a para avanzar a la etapa final del proceso para el puesto de {{vacante}} 👏\n\nNos encantaría coordinar una entrevista presencial contigo para conocerte mejor.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Modalidad: Presencial ({{ubicacion}})\n\nPor favor, responde a este mensaje para confirmar tu disponibilidad ✅\n\n¡Gracias por tu interés y entusiasmo!\n\nSaludos.",
-    "Oferta": "🎉 ¡Felicitaciones, {{nombre}}!\n\nHas sido seleccionado/a para incorporarte a nuestro equipo en el puesto de {{vacante}} 👏✨\n\nQueremos coordinar una reunión presencial para revisar detalles y formalizar el acuerdo de inicio laboral.\n\n🗓️ Fecha: {{fecha}}\n🕒 Hora: {{hora}}\n📍 Lugar: {{ubicacion}}\n\nPor favor, confirma tu asistencia respondiendo a este mensaje ✅\n\n¡Estamos muy emocionados por tenerte en nuestro equipo! 🚀",
-    "Descartado": "Hola {{nombre}} 👋,\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. 🙏\n\nTras revisar todos los perfiles, hemos decidido continuar con otros candidatos en esta etapa. Agradecemos tu tiempo y el interés que mostraste. 🌟\n\n¡Te deseamos muchos éxitos!",
-    "Banco de talento": "Hola {{nombre}} 👋\n\nQueremos agradecerte sinceramente por tu tiempo, disposición y la excelente participación que tuviste en la última etapa del proceso para el puesto de {{vacante}} 🙌\n\nEn esta ocasión, el proceso ha concluido con la selección de otro perfil, pero valoramos mucho tus capacidades y el potencial que demostraste.\n\n📌 Con tu permiso, nos gustaría conservar tus datos en nuestra base de talento para considerarte en futuras oportunidades que se alineen con tu perfil.\n\n¿Estarías de acuerdo? Solo debes responder “Sí, autorizo” ✅\n\n¡Gracias nuevamente por tu interés en formar parte de nuestro equipo!\n\nTe deseamos muchos éxitos en tus próximos pasos 🚀\n\nSaludos cordiales."
+    "Formulario etapa 2 enviado": "Hola {{nombre}}, te saluda el equipo de reclutamiento de {{empresa}} 👋\n\nRecibimos tu aplicación a la vacante de {{vacante}} y nos gustó tu perfil: queremos avanzar contigo a la siguiente etapa.\n\nEl próximo paso es completar este formulario antes del {{fecha}}:\n{{link}}\n\n¿Contamos contigo? Respóndenos por aquí para saber que recibiste este mensaje. Y si prefieres no continuar en el proceso, también puedes decírnoslo.",
+    "Convocado a entrevista": "Hola {{nombre}}, te escribimos de {{empresa}} por el proceso de {{vacante}}.\n\n¡Buenas noticias! Queremos invitarte a una entrevista virtual:\n\nFecha: {{fecha}}\nHora: {{hora}}\nModalidad: Virtual ({{ubicacion}})\n\n¿Te queda bien ese horario? Respóndenos por aquí para confirmar; si no puedes ese día, lo coordinamos. ¡Gracias!",
+    "Entrevista presencial": "Hola {{nombre}}, te escribimos de {{empresa}}. Pasaste a la etapa final del proceso para {{vacante}} 🎉\n\nQueremos conocerte en persona:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas tu asistencia respondiendo este mensaje? Si necesitas otro horario, dinos y lo buscamos.",
+    "Oferta": "Hola {{nombre}}, te escribimos de {{empresa}} con una excelente noticia: fuiste seleccionado(a) para el puesto de {{vacante}} 🎉\n\nQueremos reunirnos contigo para revisar los detalles y formalizar el inicio:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas por aquí? ¡Nos alegra mucho poder darte la bienvenida al equipo!",
+    "Descartado": "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. En esta ocasión decidimos continuar con otros perfiles, pero valoramos de verdad el tiempo y el interés que dedicaste.\n\nTe deseamos muchos éxitos, y ojalá coincidamos en una próxima oportunidad.",
+    "Banco de talento": "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por tu excelente participación en el proceso para {{vacante}}. Esta vez el proceso concluyó con otro perfil, pero tu desempeño nos gustó mucho.\n\nNos encantaría guardar tus datos en nuestro banco de talento para futuras oportunidades. ¿Nos autorizas? Responde \"Sí, autorizo\" y quedas dentro."
   });
 
   const fetchStatus = async () => {
     try {
-      const res = await apiFetch('/api/whatsapp/status');
+      // watch=qr marks a human present on THIS page (where the QR shows): the server
+      // then keeps regenerating expired QRs instead of pausing after 3 unattended ones.
+      const res = await apiFetch('/api/whatsapp/status?watch=qr');
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`);
       }
@@ -613,7 +619,7 @@ export default function WhatsAppSettings() {
           <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg">
             <h3 className="text-sm font-bold text-blue-900 mb-2">Variables dinámicas disponibles:</h3>
             <div className="flex flex-wrap gap-2">
-              {['{{nombre}}', '{{vacante}}', '{{link}}', '{{fecha}}', '{{hora}}', '{{ubicacion}}'].map(v => (
+              {['{{nombre}}', '{{empresa}}', '{{vacante}}', '{{link}}', '{{fecha}}', '{{hora}}', '{{ubicacion}}'].map(v => (
                 <span key={v} className="px-2 py-1 bg-white border border-blue-200 text-blue-700 text-xs font-mono rounded shadow-sm">{v}</span>
               ))}
             </div>

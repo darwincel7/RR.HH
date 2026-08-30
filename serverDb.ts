@@ -85,6 +85,12 @@ export interface ServerDb {
   countOutboxPending(): Promise<number>;
   /** One outbox message by id (to report the final state of a manual send). */
   getOutboxMessage(id: string): Promise<any | null>;
+  /** Recent outbox docs for a phone, any status (dedupe decisions happen in the caller). */
+  listOutboxByPhone(phone: string): Promise<any[]>;
+  /** Queued MANUAL messages ready to send. The quarantine drain reads these directly:
+   * fetching the generic queue and filtering afterwards let ≥30 queued automations
+   * occupy the whole batch window and starve the recruiter's own chat for hours. */
+  listQueuedOutboxManual(max: number): Promise<any[]>;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -280,6 +286,25 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         const snap = await adb.collection('whatsapp_outbox').doc(id).get();
         return snap.exists ? { id: snap.id, ...snap.data() } : null;
       },
+      async listOutboxByPhone(phone) {
+        const snap = await adb.collection('whatsapp_outbox')
+          .where('phone', '==', phone).limit(25).get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      },
+      async listQueuedOutboxManual(max) {
+        // Two equality filters — served by merging single-field indexes, no composite
+        // index needed. nextAttemptAt gated in memory, like listOutboxSendable.
+        const snap = await adb.collection('whatsapp_outbox')
+          .where('status', '==', 'queued').where('origin', '==', 'manual')
+          .limit(Math.max(max * 3, 30)).get();
+        const now = Date.now();
+        const ms = (v: any) => (v?.toMillis ? v.toMillis() : (v ? new Date(v).getTime() : 0));
+        return snap.docs
+          .map((d: any) => ({ id: d.id, ...d.data() }))
+          .filter((m: any) => ms(m.nextAttemptAt) <= now)
+          .sort((a: any, b: any) => ms(a.createdAt) - ms(b.createdAt))
+          .slice(0, max);
+      },
       async listActiveVacancies() {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
         return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
@@ -426,6 +451,8 @@ async function initClient(): Promise<ServerDb> {
     async reclaimStuckOutbox() { return 0; },
     async countOutboxPending() { return 0; },
     async getOutboxMessage() { return null; },
+    async listOutboxByPhone() { return []; },
+    async listQueuedOutboxManual() { return []; },
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));

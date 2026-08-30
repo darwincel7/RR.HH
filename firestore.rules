@@ -126,6 +126,12 @@ service cloud.firestore {
     match /whatsapp_runtime/{docId} {
       allow read, write: if false;
     }
+    // Candidates who replied "no me escriban": written only by the server when it
+    // detects the request; recruiters may read so the UI can show who asked to stop.
+    match /whatsapp_optouts/{phone} {
+      allow read: if isRecruiter();
+      allow write: if false;
+    }
 
     match /settings/{document} {
       // Whitelist, not blanket-public: candidates only ever need the company branding

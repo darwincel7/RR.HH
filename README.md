@@ -94,12 +94,26 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
 
 ## Mensajería de WhatsApp: cola durable y propietario único
 
-Ningún mensaje se envía "a ver si sale". En modo admin, cada mensaje (automatización de
-etapa, envío manual con el socket caído) se **persiste primero** en `whatsapp_outbox` y
-un drenador único lo entrega: de a uno, con espaciado aleatorio de 2.5–5 s (anti-spam),
-reintentos con backoff (30 s → 1 h, máx. 6 intentos), reconexión automática previa y
+Ningún mensaje se envía "a ver si sale". En modo admin, **todo** mensaje (automatización
+de etapa y también el chat manual) se **persiste primero** en `whatsapp_outbox` y un
+drenador único lo entrega: de a uno, con espaciado aleatorio de 8–20 s y una pausa larga
+de 45–90 s cada ~6 mensajes, presencia "escribiendo…" proporcional al largo del texto,
+reintentos con backoff (30 s → 1 h, máx. 6 intentos; los errores permanentes tipo
+`forbidden`/`item-not-found` fallan al primer intento), reconexión automática previa y
 alerta por correo si un mensaje se declara imposible o la cola queda varada esperando a
 un humano. Un envío que no puede salir ahora **no se pierde: espera**.
+
+Protección anti-baneo (tras el bloqueo del número en ago 2026): el número recién
+vinculado pasa una **cuarentena** de 12 h sin automatizaciones (el chat manual sí sale) y
+luego una **rampa de calentamiento** de ~2 semanas (20 → 200 mensajes/día; tope fijo de
+25/hora; contadores persistidos en `whatsapp_runtime/send_stats`, edad del número en
+`whatsapp_runtime/link_info`). Antes de cada envío se verifica con `onWhatsApp()` que el
+número exista (adiós a la tasa de rebote), y si un candidato responde "no me escriban"
+queda en `whatsapp_optouts` y no recibe nada más — los reportes de destinatarios son la
+señal #1 de baneo. La huella del cliente es estándar (`Browsers.macOS('Chrome')`,
+`markOnlineOnConnect:false`), una racha de 403 **suspende** en vez de re-parear en bucle,
+y todas las vías de reconexión respetan una única puerta de backoff. Ajustables por env:
+`WA_HOURLY_CAP`, `WA_DAILY_CAP`, `WA_QUARANTINE_HOURS`.
 
 Complementos que eliminan las desconexiones que sufría el envío masivo:
 
