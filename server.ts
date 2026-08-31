@@ -1660,6 +1660,71 @@ async function startServer() {
     });
   });
 
+  // Queue viewer: what's waiting, what's being sent, and what failed (with WHY).
+  // The recruiter finally SEES the durable queue instead of inferring it from a count.
+  app.get("/api/whatsapp/outbox", requireRecruiter, async (req, res) => {
+    try {
+      if (!db?.supportsOutbox) return res.json({ pending: [], failed: [] });
+      const [pendingRaw, failedRaw] = await Promise.all([
+        db.listOutboxByStatuses(['queued', 'sending'], 50),
+        db.listOutboxByStatuses(['failed'], 30),
+      ]);
+      const pub = (m: any) => ({
+        id: m.id,
+        candidateName: m.candidateName || null,
+        candidateId: m.candidateId || null,
+        phone: m.phone,
+        // Enough to recognize the message; the full text lives in the profile chat.
+        preview: String(m.message || '').slice(0, 140),
+        status: m.status,
+        origin: m.origin || 'automation',
+        stage: m.stage || null,
+        attempts: m.attempts || 0,
+        lastError: m.lastError || null,
+        createdAt: tsToMs(m.createdAt) ? new Date(tsToMs(m.createdAt)).toISOString() : null,
+        nextAttemptAt: tsToMs(m.nextAttemptAt) ? new Date(tsToMs(m.nextAttemptAt)).toISOString() : null,
+      });
+      const byCreatedAsc = (a: any, b: any) => tsToMs(a.createdAt) - tsToMs(b.createdAt);
+      const byCreatedDesc = (a: any, b: any) => tsToMs(b.createdAt) - tsToMs(a.createdAt);
+      res.json({
+        pending: pendingRaw.sort(byCreatedAsc).map(pub),
+        failed: failedRaw.sort(byCreatedDesc).map(pub),
+      });
+    } catch (err) {
+      console.error('[wa-outbox] no se pudo listar la cola:', err);
+      res.status(500).json({ error: 'No se pudo cargar la cola de mensajes.' });
+    }
+  });
+
+  // Act on ONE failed message: put it back in line ('retry') or archive it
+  // ('dismiss'). Only failed messages accept actions — a queued/sent one is either
+  // already on its way or already delivered.
+  app.post("/api/whatsapp/outbox/action", requireRecruiter, async (req, res) => {
+    try {
+      if (!db?.supportsOutbox) return res.status(400).json({ error: 'La cola no está disponible en este modo.' });
+      const id = typeof req.body?.id === 'string' ? req.body.id : '';
+      const action = req.body?.action;
+      if (!id || id.length > 200 || (action !== 'retry' && action !== 'dismiss')) {
+        return res.status(400).json({ error: 'Solicitud inválida.' });
+      }
+      const msg = await db.getOutboxMessage(id);
+      if (!msg) return res.status(404).json({ error: 'El mensaje ya no existe.' });
+      if (msg.status !== 'failed') {
+        return res.status(409).json({ error: 'Solo los mensajes fallidos se pueden reintentar o descartar.' });
+      }
+      if (action === 'retry') {
+        await db.markOutbox(id, { status: 'queued', attempts: 0, nextAttemptAt: new Date(), lastError: null });
+        nudgeWhatsAppOutbox('reintento manual desde la cola');
+      } else {
+        await db.markOutbox(id, { status: 'dismissed', dismissedAt: new Date() });
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('[wa-outbox] acción sobre mensaje falló:', err);
+      res.status(500).json({ error: 'No se pudo completar la acción.' });
+    }
+  });
+
   app.post("/api/whatsapp/reconnect", requireRecruiter, async (req, res) => {
     try {
       console.log("Manual WhatsApp reconnect requested...");

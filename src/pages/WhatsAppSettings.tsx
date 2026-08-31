@@ -3,7 +3,7 @@ import { doc, getDoc, setDoc, collection, getDocs, updateDoc } from 'firebase/fi
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock } from 'lucide-react';
+import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock, Inbox, RotateCcw, Trash2 } from 'lucide-react';
 
 export default function WhatsAppSettings() {
   const { isAdmin, user } = useAuth();
@@ -109,6 +109,60 @@ export default function WhatsAppSettings() {
     const interval = setInterval(fetchStatus, 5000); // Poll every 5s
     return () => clearInterval(interval);
   }, []);
+
+  // ---- Message queue viewer ----
+  const [outbox, setOutbox] = useState<{ pending: any[]; failed: any[] } | null>(null);
+  const [outboxLoading, setOutboxLoading] = useState(false);
+  const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
+
+  const fetchOutbox = async () => {
+    setOutboxLoading(true);
+    try {
+      const res = await apiFetch('/api/whatsapp/outbox');
+      if (res.ok) setOutbox(await res.json());
+    } catch (e) {
+      console.error('Error cargando la cola de mensajes:', e);
+    } finally {
+      setOutboxLoading(false);
+    }
+  };
+
+  const outboxAction = async (id: string, action: 'retry' | 'dismiss') => {
+    setOutboxBusy(id);
+    try {
+      const res = await apiFetch('/api/whatsapp/outbox/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, action }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({} as any));
+        alert(d?.error || 'No se pudo completar la acción.');
+      }
+      await fetchOutbox();
+    } catch {
+      alert('No se pudo completar la acción.');
+    } finally {
+      setOutboxBusy(null);
+    }
+  };
+
+  // Refresh the queue view whenever the server-side pending count changes (it only
+  // changes when the queue actually moves, so this stays cheap) — plus the manual
+  // refresh button in the card.
+  useEffect(() => {
+    if (status) fetchOutbox();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status?.pending]);
+
+  // Row label for a pending message's state.
+  const pendingLabel = (m: any): string => {
+    if (m.status === 'sending') return 'Enviando…';
+    if (m.nextAttemptAt && new Date(m.nextAttemptAt).getTime() > Date.now()) {
+      return `Reintenta ${fmtDate(m.nextAttemptAt) || 'pronto'}`;
+    }
+    return 'En cola';
+  };
 
   // ---- Team access management (admin only) ----
   const fetchTeam = async () => {
@@ -604,6 +658,147 @@ export default function WhatsAppSettings() {
             </div>
           </div>
         )}
+
+        {/* Anti-ban pacing: surface what the engine already enforces, so a waiting
+            queue reads as "protection working" instead of "something is broken". */}
+        {status?.pacing && (
+          <div className="mt-4 bg-slate-50 border border-slate-200 rounded-xl p-4">
+            <div className="flex items-center mb-3">
+              <ShieldCheck className="w-4 h-4 text-emerald-600 mr-2" />
+              <h3 className="text-sm font-bold text-slate-700">Protección anti-bloqueo del número</h3>
+            </div>
+            {status.pacing.quarantineUntil && (
+              <div className="mb-3 bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded-lg p-3 font-medium">
+                ⏳ Número recién vinculado: los mensajes automáticos están en <b>pausa preventiva</b> hasta
+                {' '}{fmtDate(status.pacing.quarantineUntil) || 'dentro de unas horas'}. El chat manual sí funciona.
+                Los mensajes en cola saldrán solos — no hay que hacer nada.
+              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="bg-white border border-slate-200 rounded-lg p-3">
+                <p className="text-xs text-slate-500 font-medium">Enviados hoy</p>
+                <p className="text-lg font-bold text-slate-800">
+                  {status.pacing.sentToday}
+                  <span className="text-sm font-medium text-slate-400"> / {status.pacing.dailyLimit}</span>
+                </p>
+                <div className="mt-1 h-1.5 bg-slate-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-emerald-500 rounded-full transition-all"
+                    style={{ width: `${Math.min(100, Math.round((100 * (status.pacing.sentToday || 0)) / Math.max(1, status.pacing.dailyLimit || 1)))}%` }}
+                  />
+                </div>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-lg p-3">
+                <p className="text-xs text-slate-500 font-medium">En cola ahora</p>
+                <p className="text-lg font-bold text-slate-800">{status.pending || 0}</p>
+                <p className="text-[11px] text-slate-400 mt-1">máx. {status.pacing.hourlyLimit}/hora</p>
+              </div>
+              <div className="bg-white border border-slate-200 rounded-lg p-3">
+                <p className="text-xs text-slate-500 font-medium">Número vinculado</p>
+                <p className="text-sm font-bold text-slate-800 mt-1">{fmtDate(status.pacing.linkedAt) || '—'}</p>
+              </div>
+            </div>
+            <p className="text-[11px] text-slate-400 mt-3">
+              El límite diario sube solo a medida que el número gana antigüedad. Si la cola espera, es la protección
+              trabajando — no una falla: nada se pierde.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Message queue */}
+      <div className="bg-white shadow-sm border border-slate-200 rounded-xl overflow-hidden">
+        <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+          <div className="flex items-center">
+            <Inbox className="w-5 h-5 text-blue-600 mr-2" />
+            <h2 className="text-lg font-bold text-slate-800">Cola de mensajes</h2>
+          </div>
+          <button
+            onClick={fetchOutbox}
+            disabled={outboxLoading}
+            className="inline-flex items-center px-3 py-1.5 border border-slate-200 text-slate-600 bg-white rounded-lg hover:bg-slate-50 text-sm font-medium transition-colors"
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${outboxLoading ? 'animate-spin' : ''}`} /> Actualizar
+          </button>
+        </div>
+        <div className="p-6 space-y-5">
+          {!outbox ? (
+            <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-blue-500" /></div>
+          ) : outbox.pending.length === 0 && outbox.failed.length === 0 ? (
+            <p className="text-sm text-slate-500 text-center py-4">
+              No hay mensajes en espera ni fallidos. Todo lo encolado ya se entregó. ✅
+            </p>
+          ) : (
+            <>
+              {outbox.pending.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-bold text-slate-700 mb-2">En espera ({outbox.pending.length})</h3>
+                  <ul className="border border-slate-100 rounded-lg divide-y divide-slate-100">
+                    {outbox.pending.map((m: any) => (
+                      <li key={m.id} className="px-3 py-2.5 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-800 truncate">
+                            {m.candidateName || m.phone}
+                            <span className="ml-2 text-[10px] uppercase tracking-wide text-slate-400">{m.origin === 'manual' ? 'Manual' : 'Automático'}{m.stage ? ` · ${m.stage}` : ''}</span>
+                          </p>
+                          <p className="text-xs text-slate-500 truncate">{m.preview}</p>
+                        </div>
+                        <span className="shrink-0 text-xs font-medium text-blue-700 bg-blue-50 border border-blue-100 px-2 py-1 rounded-full">
+                          {pendingLabel(m)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {outbox.failed.length > 0 && (
+                <div>
+                  <h3 className="text-sm font-bold text-rose-700 mb-2">Fallidos ({outbox.failed.length})</h3>
+                  <ul className="border border-rose-100 rounded-lg divide-y divide-rose-50">
+                    {outbox.failed.map((m: any) => (
+                      <li key={m.id} className="px-3 py-2.5 flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <p className="text-sm font-medium text-slate-800 truncate">
+                            {m.candidateName || m.phone}
+                            <span className="ml-2 text-[10px] text-slate-400">{fmtDate(m.createdAt) || ''}</span>
+                          </p>
+                          <p className="text-xs text-slate-500 truncate">{m.preview}</p>
+                          <p className="text-xs text-rose-600 font-medium mt-0.5">{m.lastError || 'Falló el envío'}{m.attempts ? ` · ${m.attempts} intento(s)` : ''}</p>
+                        </div>
+                        <div className="shrink-0 flex items-center gap-2">
+                          {outboxBusy === m.id ? (
+                            <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => outboxAction(m.id, 'retry')}
+                                title="Volver a intentar el envío"
+                                className="inline-flex items-center px-2.5 py-1.5 text-xs font-medium border border-slate-200 text-slate-700 bg-white rounded-lg hover:bg-slate-50 transition-colors"
+                              >
+                                <RotateCcw className="w-3.5 h-3.5 mr-1" /> Reintentar
+                              </button>
+                              <button
+                                onClick={() => outboxAction(m.id, 'dismiss')}
+                                title="Quitar de la lista (no se enviará)"
+                                className="inline-flex items-center px-2.5 py-1.5 text-xs font-medium border border-rose-200 text-rose-600 bg-white rounded-lg hover:bg-rose-50 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 mr-1" /> Descartar
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="text-[11px] text-slate-400 mt-2">
+                    "El candidato pidió no recibir mensajes" y "El número no tiene WhatsApp" no se resuelven reintentando:
+                    contacta por correo o corrige el teléfono en el perfil y envía desde ahí.
+                  </p>
+                </div>
+              )}
+            </>
+          )}
+        </div>
       </div>
 
       {/* Templates */}

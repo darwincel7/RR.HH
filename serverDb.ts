@@ -87,6 +87,8 @@ export interface ServerDb {
   getOutboxMessage(id: string): Promise<any | null>;
   /** Recent outbox docs for a phone, any status (dedupe decisions happen in the caller). */
   listOutboxByPhone(phone: string): Promise<any[]>;
+  /** Outbox docs in any of the given statuses (queue viewer). Unsorted; caller sorts. */
+  listOutboxByStatuses(statuses: string[], max: number): Promise<any[]>;
   /** Queued MANUAL messages ready to send. The quarantine drain reads these directly:
    * fetching the generic queue and filtering afterwards let ≥30 queued automations
    * occupy the whole batch window and starve the recruiter's own chat for hours. */
@@ -291,6 +293,11 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           .where('phone', '==', phone).limit(25).get();
         return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
       },
+      async listOutboxByStatuses(statuses, max) {
+        const snap = await adb.collection('whatsapp_outbox')
+          .where('status', 'in', statuses).limit(max).get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      },
       async listQueuedOutboxManual(max) {
         // Two equality filters — served by merging single-field indexes, no composite
         // index needed. nextAttemptAt gated in memory, like listOutboxSendable.
@@ -452,6 +459,7 @@ async function initClient(): Promise<ServerDb> {
     async countOutboxPending() { return 0; },
     async getOutboxMessage() { return null; },
     async listOutboxByPhone() { return []; },
+    async listOutboxByStatuses() { return []; },
     async listQueuedOutboxManual() { return []; },
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));

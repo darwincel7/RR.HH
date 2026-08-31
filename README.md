@@ -115,6 +115,12 @@ señal #1 de baneo. La huella del cliente es estándar (`Browsers.macOS('Chrome'
 y todas las vías de reconexión respetan una única puerta de backoff. Ajustables por env:
 `WA_HOURLY_CAP`, `WA_DAILY_CAP`, `WA_QUARANTINE_HOURS`.
 
+Todo esto es **visible en Ajustes de WhatsApp**: panel de protección (enviados hoy vs
+límite, cuarentena, fecha de vinculación) y la **cola de mensajes** (en espera y fallidos
+con su motivo, con Reintentar/Descartar vía `/api/whatsapp/outbox`). El perfil del
+candidato marca a quien pidió no recibir WhatsApp (chat bloqueado) y a los números sin
+cuenta de WhatsApp.
+
 Complementos que eliminan las desconexiones que sufría el envío masivo:
 
 - **Lease de propietario único** (`whatsapp_runtime/socket_owner`): solo una instancia

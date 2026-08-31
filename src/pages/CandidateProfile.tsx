@@ -641,6 +641,15 @@ export default function CandidateProfile() {
                 <div className={`w-2 h-2 rounded-full mr-2 ${wsStatus?.status === 'connected' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`}></div>
                 Chat WhatsApp
               </span>
+              {candidate.whatsappOptOut ? (
+                <span className="normal-case tracking-normal text-[10px] font-bold text-rose-600 bg-rose-50 border border-rose-100 px-2 py-0.5 rounded-full" title="Respondió pidiendo no recibir más mensajes; el sistema lo respeta automáticamente.">
+                  🚫 Pidió no recibir WhatsApp
+                </span>
+              ) : candidate.whatsappExists === false ? (
+                <span className="normal-case tracking-normal text-[10px] font-bold text-amber-600 bg-amber-50 border border-amber-100 px-2 py-0.5 rounded-full" title="Al intentar enviarle, WhatsApp reportó que este número no tiene cuenta. Corrige el teléfono en Editar.">
+                  ⚠️ Número sin WhatsApp
+                </span>
+              ) : null}
             </h3>
             <div className="flex-1 bg-slate-50 rounded-2xl p-3 lg:p-4 mb-3 lg:mb-4 overflow-y-auto border border-slate-100 flex flex-col space-y-3">
               <p className="text-[10px] text-center text-slate-400 font-medium my-2">Inicio de la conversación</p>
@@ -665,13 +674,16 @@ export default function CandidateProfile() {
                 type="text"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
-                placeholder="Escribe..."
-                className="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs lg:text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all"
+                placeholder={candidate.whatsappOptOut ? 'Este candidato pidió no recibir WhatsApp' : 'Escribe...'}
+                disabled={!!candidate.whatsappOptOut}
+                className="flex-1 p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs lg:text-sm focus:ring-2 focus:ring-emerald-500 outline-none transition-all disabled:opacity-60 disabled:cursor-not-allowed"
                 onKeyPress={(e) => e.key === 'Enter' && handleSendWhatsApp()}
               />
               <button
                 onClick={handleSendWhatsApp}
-                disabled={sendingMsg || !message.trim() || wsStatus?.status !== 'connected'}
+                // The durable outbox delivers even while disconnected — only block when
+                // there's no queue at all (dev mode) or the candidate opted out.
+                disabled={sendingMsg || !message.trim() || !!candidate.whatsappOptOut || (wsStatus?.status !== 'connected' && !wsStatus?.outbox)}
                 className="p-2.5 bg-emerald-500 text-white rounded-xl hover:bg-emerald-600 disabled:opacity-50 transition-all shadow-lg shadow-emerald-500/30"
               >
                 {sendingMsg ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
