@@ -61,6 +61,8 @@ export interface ServerDb {
   uploadPublicFile(path: string, buffer: Buffer, contentType: string): Promise<string>;
   /** Active (published) vacancies, for the public careers portal. */
   listActiveVacancies(): Promise<any[]>;
+  /** Whole collection as [{id, ...data}], optionally only some fields (server-side projection). */
+  listDocs(collection: string, fields?: string[]): Promise<any[]>;
 
   // --- WhatsApp single-owner lease + durable outbox (admin mode only) -------------
   /** True when the durable WhatsApp outbox is available (Admin SDK present). */
@@ -316,6 +318,12 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
         return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
       },
+      async listDocs(c, fields) {
+        let q: any = adb.collection(c);
+        if (fields && fields.length) q = q.select(...fields);
+        const snap = await q.get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      },
       async uploadPublicFile(path, buffer, contentType) {
         const bucket = getStorage(app).bucket(firebaseConfig.storageBucket);
         const token = randomUUID();
@@ -463,6 +471,10 @@ async function initClient(): Promise<ServerDb> {
     async listQueuedOutboxManual() { return []; },
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    },
+    async listDocs(c) {
+      const snap = await getDocs(collection(cdb, c));
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));
     },
     async uploadPublicFile() {

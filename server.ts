@@ -25,6 +25,7 @@ import { setLogLevel } from 'firebase/firestore';
 import { getAI, generateContentResilient, GEMINI_MODEL } from './serverGemini';
 import { runCvParse, CvParseError } from './serverCvParse';
 import { findCvPhoto, normalizeCvImage, renderAvatar } from './serverCvPhoto';
+import { buildPhotoQueue } from './serverPhotoBackfill';
 import { packAuthBlob, unpackAuthBlob, AUTH_BLOB_VERSION } from './serverSessionBlob';
 import {
   nextSpacingMs, retryBackoffMs, afterFailure, drainAction, typingDelayMs,
@@ -635,7 +636,11 @@ async function bootstrap() {
   if (db.canEnforceAuth) {
     console.log('[server CV worker] Admin mode — backend CV processor enabled (browser worker stands down).');
     processPendingCVs();
-    setInterval(() => { processPendingCVs().catch(e => console.error('[server CV worker]', e)); }, 60_000);
+    setInterval(() => {
+      processPendingCVs()
+        .catch(e => console.error('[server CV worker]', e))
+        .then(() => photoBackfillPass());
+    }, 60_000);
 
     // WhatsApp keeper: renew (or inherit) the lease, revive a dropped socket, and move
     // the queue — while the process has CPU. HTTP-driven drains cover the gaps.
@@ -699,6 +704,68 @@ async function extractCandidatePhoto(candidateId: string, opts: { force?: boolea
     await db.setDocData('candidates', candidateId, { photoStatus: 'error', photoError: String(err?.message || err).slice(0, 300), photoCheckedAt: new Date() })
       .catch(() => { /* best effort */ });
     throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Automatic photo backfill: existing candidates get their CV photo little by little,
+// sales vacancies first (order: serverPhotoBackfill.ts). Runs after each CV-worker
+// pass — on the 60s timer and on the browser heartbeat — a few candidates at a time, so
+// it never competes with new applications and spreads the AI cost over time.
+// PHOTO_BACKFILL=off disables it; PHOTO_BACKFILL_PER_PASS tunes the pace (default 3).
+// ---------------------------------------------------------------------------
+const PHOTO_PER_PASS = Math.max(1, Math.min(10, Number(process.env.PHOTO_BACKFILL_PER_PASS) || 3));
+const PHOTO_QUEUE_REFRESH_MS = 6 * 60 * 60 * 1000; // re-scan for missed/new ones every 6h
+let photoQueue: string[] = [];
+let photoQueueBuiltAt = 0;
+let photoBackfillRunning = false;
+let photoBackfillPausedUntil = 0;
+const photoBackfillStats = { processed: 0, found: 0, none: 0, errors: 0, startedAt: new Date().toISOString() };
+
+async function rebuildPhotoQueue() {
+  const [vacancies, applications, candidates] = await Promise.all([
+    db.listDocs('vacancies', ['title']),
+    db.listDocs('applications', ['candidateId', 'vacancyId', 'stage', 'submittedAt']),
+    db.listDocs('candidates', ['cvUrl', 'photoUrl', 'photoStatus', 'aiStatus']),
+  ]);
+  photoQueue = buildPhotoQueue({ vacancies, applications, candidates });
+  photoQueueBuiltAt = Date.now();
+  if (photoQueue.length) console.log(`[photo backfill] ${photoQueue.length} candidato(s) en cola para buscar su foto (ventas primero).`);
+}
+
+async function photoBackfillPass(): Promise<void> {
+  if (process.env.PHOTO_BACKFILL === 'off' || !db?.canEnforceAuth || photoBackfillRunning) return;
+  if (Date.now() < photoBackfillPausedUntil) return;
+  photoBackfillRunning = true;
+  try {
+    if (photoQueue.length === 0 && Date.now() - photoQueueBuiltAt > PHOTO_QUEUE_REFRESH_MS) await rebuildPhotoQueue();
+    let errors = 0;
+    let attempted = 0;
+    while (attempted < PHOTO_PER_PASS && photoQueue.length > 0) {
+      const id = photoQueue.shift()!;
+      attempted++;
+      try {
+        const r = await extractCandidatePhoto(id);
+        if (r.status === 'skipped') { attempted--; continue; } // someone already decided — free slot
+        photoBackfillStats.processed++;
+        if (r.status === 'found') photoBackfillStats.found++; else photoBackfillStats.none++;
+      } catch (err: any) {
+        errors++;
+        photoBackfillStats.processed++;
+        photoBackfillStats.errors++;
+        console.warn(`[photo backfill] ${id}:`, err?.message || err);
+      }
+    }
+    // Every attempt failed: the AI/storage is likely down — back off instead of
+    // burning through the queue marking everyone 'error'.
+    if (attempted >= 2 && errors === attempted) {
+      photoBackfillPausedUntil = Date.now() + 30 * 60 * 1000;
+      console.warn('[photo backfill] pausado 30 min: todas las extracciones de la tanda fallaron.');
+    }
+  } catch (err) {
+    console.error('[photo backfill] loop error:', err);
+  } finally {
+    photoBackfillRunning = false;
   }
 }
 
@@ -2142,7 +2209,9 @@ async function startServer() {
       // every 3 minutes): move BOTH queues while we have it. Concurrently — they share
       // no state — and WhatsApp's drain also renews the socket-owner lease.
       const [result, waFirst] = await Promise.all([
-        drainPendingCVs(),
+        // New CVs first, then a few existing candidates' photos with the CPU we have.
+        // Only when the CV drain left room: the request must end inside Cloud Run's 300s.
+        drainPendingCVs().then(async r => { if (Date.now() - reqStarted < 120_000) await photoBackfillPass(); return r; }),
         drainWhatsAppOutbox().catch(e => { console.error('[wa-outbox]', e); return null; }),
       ]);
       let wa = waFirst;
@@ -2245,6 +2314,19 @@ async function startServer() {
       console.error('[photo] upload error:', error?.message || error);
       res.status(500).json({ error: 'No se pudo guardar la foto.' });
     }
+  });
+
+  // Progress of the automatic background photo backfill (shown in Candidatos).
+  app.get("/api/photos/backfill/status", requireRecruiter, async (_req, res) => {
+    res.json({
+      enabled: process.env.PHOTO_BACKFILL !== 'off' && !!db?.canEnforceAuth,
+      queued: photoQueue.length,
+      next: photoQueue.slice(0, 1),
+      queueBuiltAt: photoQueueBuiltAt ? new Date(photoQueueBuiltAt).toISOString() : null,
+      pausedUntil: photoBackfillPausedUntil > Date.now() ? new Date(photoBackfillPausedUntil).toISOString() : null,
+      perPass: PHOTO_PER_PASS,
+      stats: photoBackfillStats,
+    });
   });
 
   // Existing candidates (processed before this feature): the list page sends small
