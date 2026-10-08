@@ -4,16 +4,17 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
-import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles } from 'lucide-react';
+import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles, ScanFace } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
 import { PIPELINE_STAGES } from '../constants/stages';
-import { requestCvWorkerRun } from '../lib/api';
+import { requestCvWorkerRun, apiFetch } from '../lib/api';
 import BulkCvUploadModal, { type BulkEntry } from '../components/BulkCvUploadModal';
 import { normalizePhone } from '../lib/phone';
 import { smartMatch, prepareSearch, type SearchField, type SearchHit } from '../lib/smartSearch';
 import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
+import CandidateAvatar from '../components/CandidateAvatar';
 
 // Everything the smart search looks at for one row (application + candidate + notes).
 function searchFieldsFor(c: any): SearchField[] {
@@ -100,6 +101,9 @@ export default function CandidatesList() {
         city: cData.city || '',
         aiExtraction: cData.aiExtraction || null,
         aiStatus: cData.aiStatus || null,
+        cvUrl: cData.cvUrl || app.cvUrl || '',
+        photoUrl: cData.photoUrl || '',
+        photoStatus: cData.photoStatus || '',
         notes: notesMap?.get(app.candidateId) || [],
         calculatedTotalScore
       };
@@ -229,6 +233,42 @@ export default function CandidatesList() {
     } finally {
       setRetryingCVs(false);
     }
+  };
+
+  // Candidates analyzed before photos existed: let the AI look for their photo in the CV.
+  // Small batches (3 per request) keep every request inside Cloud Run's time limit.
+  const [photoScan, setPhotoScan] = useState<{ done: number; total: number; found: number } | null>(null);
+  const scanPhotos = async () => {
+    if (photoScan) return;
+    const rows = await loadAll();
+    const ids = Array.from(new Set(rows
+      .filter(r => r.candidateId && r.cvUrl && !r.photoUrl && !r.photoStatus && r.aiStatus === 'completed')
+      .map(r => r.candidateId as string)));
+    if (ids.length === 0) {
+      alert('Todos los CV ya fueron revisados en busca de foto. Los nuevos se revisan solos al llegar.');
+      return;
+    }
+    if (!window.confirm(`La IA buscará la foto de la persona en ${ids.length} CV que aún no se han revisado.\n\nTarda unos segundos por CV. Puedes seguir usando la app, pero no cierres esta pestaña hasta que termine.\n\n¿Empezar?`)) return;
+    let found = 0;
+    setPhotoScan({ done: 0, total: ids.length, found: 0 });
+    for (let i = 0; i < ids.length; i += 3) {
+      const batch = ids.slice(i, i + 3);
+      try {
+        const res = await apiFetch('/api/photos/backfill', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidateIds: batch }),
+        });
+        const data = await res.json().catch(() => ({} as any));
+        found += Object.values(data?.results || {}).filter(v => v === 'found').length;
+      } catch (e) {
+        console.warn('Lote de fotos falló (se continúa):', e);
+      }
+      setPhotoScan({ done: Math.min(i + 3, ids.length), total: ids.length, found });
+    }
+    setPhotoScan(null);
+    refresh();
+    alert(`Listo: se encontraron ${found} foto(s) en ${ids.length} CV revisados.`);
   };
 
   const anyFilterActive = !!(searchTerm || stageFilter || cityFilter || expFilter);
@@ -572,6 +612,15 @@ export default function CandidatesList() {
             </button>
           )}
           <button
+            onClick={scanPhotos}
+            disabled={!!photoScan}
+            title="La IA busca la foto de perfil dentro del CV de los candidatos que aún no tienen foto"
+            className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-50 transition-colors shadow-sm disabled:opacity-70"
+          >
+            <ScanFace className={`w-4 h-4 mr-2 ${photoScan ? 'animate-pulse text-violet-600' : ''}`} />
+            {photoScan ? `Buscando fotos… ${photoScan.done}/${photoScan.total} (${photoScan.found} encontradas)` : 'Buscar fotos en los CV'}
+          </button>
+          <button
             onClick={() => setIsBulkUploadModalOpen(true)}
             className="flex items-center px-4 py-2 bg-indigo-50 border border-indigo-100 text-indigo-700 text-sm font-bold rounded-lg hover:bg-indigo-100 transition-colors shadow-sm"
           >
@@ -760,9 +809,7 @@ export default function CandidatesList() {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="flex items-center">
-                        <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs mr-3">
-                          {candidate.candidateName?.charAt(0) || 'U'}
-                        </div>
+                        <CandidateAvatar photoUrl={candidate.photoUrl} name={candidate.candidateName} size={36} className="mr-3" />
                         <div>
                           <div className="text-sm font-bold text-slate-800">
                             {candidate.candidateName}
@@ -774,7 +821,7 @@ export default function CandidatesList() {
                       </div>
                       {/* Why this row matched — most useful when the hit is inside a note. */}
                       {searchState.hits?.get(candidate.id)?.filter(h => h.label !== 'Nombre').slice(0, 2).map((h, i) => (
-                        <div key={i} className="mt-1 ml-11 max-w-xs whitespace-normal text-[11px] text-slate-500 leading-snug">
+                        <div key={i} className="mt-1 ml-12 max-w-xs whitespace-normal text-[11px] text-slate-500 leading-snug">
                           <span className="font-bold text-slate-600">{h.label}:</span>{' '}
                           {h.before}<mark className="bg-yellow-200 text-slate-900 rounded px-0.5">{h.match}</mark>{h.after}
                         </div>

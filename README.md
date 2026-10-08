@@ -86,6 +86,7 @@ error es silencioso y caro:
 | [`src/lib/smartSearch.test.ts`](src/lib/smartSearch.test.ts) | El buscador: acentos, formatos de teléfono, varias palabras, búsqueda en notas y tolerancia a errores de escritura |
 | [`src/lib/moveApplication.test.ts`](src/lib/moveApplication.test.ts) | Que mover/copiar perfiles entre vacantes nunca duplique a un candidato en la vacante destino |
 | [`src/lib/navigation.test.ts`](src/lib/navigation.test.ts) | A dónde lleva "Atrás" cuando no hay historial (pestaña nueva, recarga) |
+| [`serverCvPhoto.test.ts`](serverCvPhoto.test.ts) | Extraer la foto del CV: imágenes de PDF/Word/imagen, descarte de íconos y máscaras, recorte cuadrado centrado en la cara |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -121,6 +122,17 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   *Copiar* crea una postulación nueva en la otra vacante con el CV y su puntuación. Nunca
   duplica a alguien que ya está en la vacante destino y no envía WhatsApp.
   `/api/apply` detecta duplicados por el campo `vacancyId`, no por el id del documento.
+
+- **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
+  CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
+  ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del
+  Word (`word/media`) o usa el CV mismo si es una imagen; Gemini elige cuál es el retrato
+  (descarta logos, íconos y firmas) y dónde está la cara, y `sharp` recorta un cuadrado de
+  400×400. Se guarda en Storage (`candidate_photos/`, URL con token) y en el candidato como
+  `photoUrl` + `photoStatus` (`found`, `none`, `manual`, `removed`, `error`). En el perfil
+  la foto se amplía con un clic y se puede **cambiar**, **buscar en el CV** o **quitar**; lo
+  que decide una persona nunca lo pisa la IA. Para los candidatos que ya existían, el botón
+  **Buscar fotos en los CV** de *Candidatos* los revisa en lotes (`/api/photos/backfill`).
 
 > Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`). Se
 > publican solas al llegar a `main` (workflow *Deploy Firebase Rules*) o con

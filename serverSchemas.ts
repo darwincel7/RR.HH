@@ -20,6 +20,8 @@ export const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  * the server fetches these URLs, so accepting arbitrary ones is an SSRF vector
  * (e.g. Cloud Run's metadata server). */
 const STORAGE_URL_PREFIX = 'https://firebasestorage.googleapis.com/';
+export const isOurStorageUrl = (v: unknown): v is string =>
+  typeof v === 'string' && v.length <= 1000 && v.startsWith(STORAGE_URL_PREFIX);
 
 /** A required string field whose every failure mode reports the same message,
  * mirroring how the manual checks answered (one message per field, not per cause). */
