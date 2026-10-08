@@ -1578,14 +1578,27 @@ async function startServer() {
       // Duplicate = a candidate with THIS phone/email already applied to THIS vacancy.
       // We do NOT merge into that candidate's record (that could corrupt a different
       // person who shares a phone/email); we only block a repeat application here.
+      //
+      // Checked by the application's vacancyId FIELD, not by its "<candidate>_<vacancy>"
+      // id: recruiters can move an application to another vacancy, which keeps its id
+      // (so the links already sent keep working) but changes the vacancy it belongs to.
+      const hasApplicationFor = async (candId: string) => {
+        const ids = await db.getApplicationIdsByCandidate(candId);
+        const apps = await Promise.all(ids.map(id => db.getDocData('applications', id)));
+        return apps.some(a => a?.vacancyId === vacancyId);
+      };
       const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, email);
-      if (existingId) {
-        const dup = await db.getDocData('applications', `${existingId}_${vacancyId}`);
-        if (dup) return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+      if (existingId && existingId !== candidateId && await hasApplicationFor(existingId)) {
+        return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
-      const applicationId = `${candidateId}_${vacancyId}`;
-      if (await db.getDocData('applications', applicationId)) {
+      if (await hasApplicationFor(candidateId)) {
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
+      }
+      let applicationId = `${candidateId}_${vacancyId}`;
+      // The conventional id can be held by an application that was MOVED to another
+      // vacancy: never overwrite it — take a unique id instead.
+      if (await db.getDocData('applications', applicationId)) {
+        applicationId = `${applicationId}_${Date.now().toString(36)}`;
       }
 
       const now = new Date();

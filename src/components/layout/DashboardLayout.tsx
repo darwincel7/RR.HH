@@ -5,6 +5,7 @@ import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X,
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import CVWorker from '../CVWorker';
 import AITestButton from '../AITestButton';
+import TopBar from './TopBar';
 
 export default function DashboardLayout() {
   const { user, userData, loading, logout, isRecruiter } = useAuth();
@@ -236,6 +237,7 @@ export default function DashboardLayout() {
         <CVWorker />
         <div className="p-4 md:p-8 pt-20 lg:pt-8 flex-1 flex flex-col">
           <WhatsAppStatusBanner />
+          <TopBar />
           <div className="max-w-7xl mx-auto animate-fade-in w-full flex-1">
             <Outlet />
           </div>

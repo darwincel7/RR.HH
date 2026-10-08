@@ -83,6 +83,9 @@ error es silencioso y caro:
 | [`src/lib/kanbanOrder.test.ts`](src/lib/kanbanOrder.test.ts) | Que una tarjeta soltada en un punto del embudo se quede exactamente ahí, también tras recargar |
 | [`src/lib/whatsapp.test.ts`](src/lib/whatsapp.test.ts) | Qué etapas envían mensaje automático y cuáles exigen fecha/hora antes de enviar |
 | [`src/constants/stages.test.ts`](src/constants/stages.test.ts) | Que las dos definiciones del embudo (columnas y descripciones) no se desincronicen |
+| [`src/lib/smartSearch.test.ts`](src/lib/smartSearch.test.ts) | El buscador: acentos, formatos de teléfono, varias palabras, búsqueda en notas y tolerancia a errores de escritura |
+| [`src/lib/moveApplication.test.ts`](src/lib/moveApplication.test.ts) | Que mover/copiar perfiles entre vacantes nunca duplique a un candidato en la vacante destino |
+| [`src/lib/navigation.test.ts`](src/lib/navigation.test.ts) | A dónde lleva "Atrás" cuando no hay historial (pestaña nueva, recarga) |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -91,6 +94,37 @@ problemas de una vez.
 El servidor y el cliente comparten **una sola** implementación de `normalizePhone`
 ([`src/lib/phone.ts`](src/lib/phone.ts)) — cuando eran dos copias, se desincronizaron y
 las respuestas entrantes dejaron de enlazarse con su candidato.
+
+## Herramientas del día a día del reclutador
+
+- **Atrás / Adelante** (barra superior de todo el panel): recorre las pantallas visitadas
+  sin depender del navegador. Si no hay a dónde volver (link abierto en pestaña nueva),
+  "Atrás" lleva a la pantalla padre en vez de salir de la app. La búsqueda y los filtros de
+  *Candidatos* viven en la URL (`?q=&stage=&city=&exp=`), así que al volver de un perfil la
+  lista sigue exactamente como estaba.
+- **Buscador inteligente** (barra superior, atajo `/`, y en Candidatos y el Kanban):
+  busca en nombre, teléfono, correo, dónde vive, vacante, etapa, CV, **notas** y
+  comentarios de entrevista. Ignora acentos y mayúsculas, entiende cualquier formato de
+  teléfono (`809-555-1234`, `18095551234`, `5551234`), exige que aparezcan todas las
+  palabras (cada una puede estar en un campo distinto), acepta `"frases exactas"` y, si no
+  hay coincidencias exactas, muestra resultados *parecidos* (Rodrigues → Rodríguez,
+  Yoselin → Joselyn). Cada resultado indica dónde coincidió. Lógica en
+  [`src/lib/smartSearch.ts`](src/lib/smartSearch.ts).
+- **Notas del candidato** (perfil): notas con tipo (llamada, WhatsApp, entrevista,
+  referencia, punto fuerte, alerta, seguimiento), autor y fecha; se pueden fijar arriba,
+  editar, eliminar y filtrar. Son del **candidato** (lo siguen entre vacantes) y se guardan
+  en la colección `candidate_notes`, que **solo el equipo** puede leer — nunca en el doc del
+  candidato, que el propio postulante puede leer. El borrador sin guardar se recuerda.
+- **Mover / copiar a otra vacante** (perfil, selección múltiple en Candidatos y en el
+  Kanban): *Mover* cambia la vacante de la postulación conservando su id (los links de
+  formulario/test ya enviados siguen funcionando) y deja constancia en `vacancyHistory`;
+  *Copiar* crea una postulación nueva en la otra vacante con el CV y su puntuación. Nunca
+  duplica a alguien que ya está en la vacante destino y no envía WhatsApp.
+  `/api/apply` detecta duplicados por el campo `vacancyId`, no por el id del documento.
+
+> Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`). Se
+> publican solas al llegar a `main` (workflow *Deploy Firebase Rules*) o con
+> `npm run deploy:rules`.
 
 ## Mensajería de WhatsApp: cola durable y propietario único
 
