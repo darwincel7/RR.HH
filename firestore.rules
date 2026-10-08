@@ -70,6 +70,17 @@ service cloud.firestore {
       allow delete: if isRecruiter();
     }
 
+    // Internal recruiter notes about a candidate. Kept OUT of the candidate doc on
+    // purpose: that doc is readable by the applicant (isOwner above), these never are.
+    match /candidate_notes/{noteId} {
+      allow read, delete: if isRecruiter();
+      allow create, update: if isRecruiter()
+        && request.resource.data.candidateId is string
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 10000;
+    }
+
     match /applications/{applicationId} {
       // A candidate opens their OWN evaluation/test link by its unguessable
       // {anonUID}_{vacancyId} document id (capability URL) — a single-document GET.

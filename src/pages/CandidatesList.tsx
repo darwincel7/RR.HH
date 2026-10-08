@@ -1,24 +1,59 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useDeferredValue } from 'react';
 import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
-import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles } from 'lucide-react';
+import { Link, useSearchParams } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { requestCvWorkerRun } from '../lib/api';
 import BulkCvUploadModal, { type BulkEntry } from '../components/BulkCvUploadModal';
 import { normalizePhone } from '../lib/phone';
+import { smartMatch, prepareSearch, type SearchField, type SearchHit } from '../lib/smartSearch';
+import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } from '../lib/notes';
+import MoveVacancyModal from '../components/MoveVacancyModal';
+
+// Everything the smart search looks at for one row (application + candidate + notes).
+function searchFieldsFor(c: any): SearchField[] {
+  const ai = c.aiExtraction || {};
+  return [
+    { label: 'Nombre', value: c.candidateName },
+    { label: 'Teléfono', value: c.phone, kind: 'phone' },
+    { label: 'Correo', value: c.email },
+    { label: 'Ubicación', value: [c.city, ai.city, ai.location] },
+    { label: 'Notas', value: (c.notes || []).map((n: CandidateNote) => n.text) },
+    { label: 'Notas de entrevista', value: [c.interviewObservation?.notes, c.interviewObservation?.redFlags] },
+    { label: 'Vacante', value: c.vacancyTitle },
+    { label: 'Etapa', value: c.stage },
+    { label: 'CV', value: [ai.currentRole, ai.relevant_experience_summary, ai.education_summary, ...(ai.strengths_detected || [])] },
+  ];
+}
 
 export default function CandidatesList() {
   const [candidates, setCandidates] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
-  const [stageFilter, setStageFilter] = useState('');
-  const [cityFilter, setCityFilter] = useState('');
-  const [expFilter, setExpFilter] = useState('');
+  // Search + filters live in the URL (?q=&stage=&city=&exp=): going into a profile and
+  // pressing "Atrás" returns to the exact same results, a search can be shared as a
+  // link, and the global search bar can land here with a query.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const searchTerm = searchParams.get('q') || '';
+  const stageFilter = searchParams.get('stage') || '';
+  const cityFilter = searchParams.get('city') || '';
+  const expFilter = searchParams.get('exp') || '';
+  const setParam = (key: string) => (value: string) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev);
+      if (value) next.set(key, value); else next.delete(key);
+      return next;
+    }, { replace: true });
+  };
+  const setSearchTerm = setParam('q');
+  const setStageFilter = setParam('stage');
+  const setCityFilter = setParam('city');
+  const setExpFilter = setParam('exp');
+  const [showMoveVacancy, setShowMoveVacancy] = useState(false);
   const [candidateToDelete, setCandidateToDelete] = useState<{id: string, name: string} | null>(null);
 
   const [selectedApps, setSelectedApps] = useState<string[]>([]);
@@ -44,7 +79,7 @@ export default function CandidatesList() {
 
   // Joins an application doc with its candidate + vacancy and computes the blended score.
   // Shared by the paginated fetch and the full-base load so both produce identical rows.
-  const buildRows = (appDocs: any[], vacMap: Map<string, any>, candMap: Map<string, any>) =>
+  const buildRows = (appDocs: any[], vacMap: Map<string, any>, candMap: Map<string, any>, notesMap?: Map<string, CandidateNote[]>) =>
     appDocs.map(d => {
       const app = { id: d.id, ...d.data() } as any;
       const cData = candMap.get(app.candidateId) || {};
@@ -65,6 +100,7 @@ export default function CandidatesList() {
         city: cData.city || '',
         aiExtraction: cData.aiExtraction || null,
         aiStatus: cData.aiStatus || null,
+        notes: notesMap?.get(app.candidateId) || [],
         calculatedTotalScore
       };
     });
@@ -116,17 +152,23 @@ export default function CandidatesList() {
     if (fullyLoaded && !force) return candidatesRef.current;
     setLoadingAll(true);
     try {
-      const [vacSnap, appSnap, candSnap] = await Promise.all([
+      const [vacSnap, appSnap, candSnap, notesMap] = await Promise.all([
         getDocs(collection(db, 'vacancies')),
         getDocs(query(collection(db, 'applications'), orderBy('submittedAt', 'desc'))),
         getDocs(collection(db, 'candidates')),
+        // Notes are searchable too. Never let them break the list (e.g. rules not yet
+        // deployed): without them the search simply doesn't look inside notes.
+        loadAllNotesByCandidate().catch(e => {
+          console.warn('No se pudieron cargar las notas para la búsqueda:', e);
+          return new Map<string, CandidateNote[]>();
+        }),
       ]);
       const vacMap = new Map();
       vacSnap.docs.forEach(d => vacMap.set(d.id, d.data().title));
       const candMap = new Map();
       candSnap.docs.forEach(d => candMap.set(d.id, d.data()));
 
-      const combined = buildRows(appSnap.docs, vacMap, candMap);
+      const combined = buildRows(appSnap.docs, vacMap, candMap, notesMap);
       setCandidates(combined);
       setHasMore(false);
       setLastDoc(null);
@@ -232,6 +274,8 @@ export default function CandidatesList() {
       batch.delete(doc(db, 'candidates', candidateToDelete.id));
       appSnap.docs.forEach(d => batch.delete(d.ref));
       await batch.commit();
+      // Their notes go too (separate collection). Best effort: the candidate is already gone.
+      deleteAllCandidateNotes(candidateToDelete.id).catch(e => console.warn('No se pudieron borrar las notas:', e));
 
       setCandidateToDelete(null);
       refresh(); // Refresh list
@@ -409,14 +453,30 @@ export default function CandidatesList() {
 
   // Single source of truth for the active search + filters, applied to the on-screen list
   // and to the CSV export alike.
+  // Exact matching first; only when that finds nobody, retry tolerating typos and
+  // spelling variants ("Rodrigues" → Rodríguez) — and say so on screen.
+  // The search runs on a deferred copy of the query so typing never stutters on a big
+  // base; the results catch up a moment later.
+  const deferredSearch = useDeferredValue(searchTerm);
+  // Normalized once per load, not on every keystroke (notes can be long).
+  const searchIndex = useMemo(() => candidates.map(c => prepareSearch(searchFieldsFor(c))), [candidates]);
+  const searchState = useMemo(() => {
+    const run = (fuzzy: boolean) => {
+      const hits = new Map<string, SearchHit[]>();
+      candidates.forEach((c, i) => {
+        const r = smartMatch(searchIndex[i], deferredSearch, { fuzzy });
+        if (r.matched) hits.set(c.id, r.hits);
+      });
+      return hits;
+    };
+    if (!deferredSearch.trim()) return { hits: null as Map<string, SearchHit[]> | null, fuzzy: false };
+    const exact = run(false);
+    if (exact.size > 0) return { hits: exact, fuzzy: false };
+    return { hits: run(true), fuzzy: true };
+  }, [candidates, searchIndex, deferredSearch]);
+
   function matchesFilters(c: any) {
-    const term = searchTerm.toLowerCase();
-    const matchesSearch =
-      c.candidateName?.toLowerCase().includes(term) ||
-      c.email?.toLowerCase().includes(term) ||
-      c.phone?.toLowerCase().includes(term) ||
-      c.aiExtraction?.relevant_experience_summary?.toLowerCase().includes(term) ||
-      c.aiExtraction?.strengths_detected?.some((s: string) => s.toLowerCase().includes(term));
+    const matchesSearch = !searchState.hits || searchState.hits.has(c.id);
 
     const matchesStage = stageFilter ? c.stage === stageFilter : true;
 
@@ -559,6 +619,13 @@ export default function CandidatesList() {
               <option value="Descartado">Descartado</option>
               <option value="Banco de talento">Banco de Talento</option>
             </select>
+            <button
+              onClick={() => setShowMoveVacancy(true)}
+              disabled={bulkActionLoading}
+              className="flex items-center bg-white/15 hover:bg-white/25 text-white text-sm rounded-lg px-3 py-1.5 font-bold disabled:opacity-50"
+            >
+              <ArrowRightLeft className="w-4 h-4 mr-1.5" /> Cambiar de vacante
+            </button>
             <button onClick={() => setSelectedApps([])} className="p-1 hover:bg-indigo-500 rounded-md transition-colors ml-2">
               <X className="w-5 h-5" />
             </button>
@@ -575,9 +642,10 @@ export default function CandidatesList() {
             <Search className="w-5 h-5 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Buscar por nombre, email, habilidades..."
+              placeholder="Nombre, teléfono, lugar, notas…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
+              title='Busca en nombre, teléfono, correo, dónde vive, vacante, CV y notas. Varias palabras = todas deben aparecer. Usa "comillas" para una frase exacta.'
               className="w-full pl-10 pr-4 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-indigo-500 outline-none"
             />
           </div>
@@ -626,6 +694,16 @@ export default function CandidatesList() {
           </div>
         </div>
       </div>
+
+      {searchTerm.trim() && !loadingAll && (
+        <div className={`flex flex-wrap items-center gap-2 text-sm rounded-lg px-4 py-2 border ${searchState.fuzzy ? 'bg-amber-50 border-amber-200 text-amber-800' : 'bg-indigo-50 border-indigo-100 text-indigo-800'}`}>
+          <Sparkles className="w-4 h-4" />
+          {searchState.fuzzy
+            ? <span>No hubo coincidencias exactas para <strong>“{searchTerm}”</strong>. Mostrando {filteredCandidates.length} resultado(s) <strong>parecido(s)</strong> (posibles errores de escritura).</span>
+            : <span>{filteredCandidates.length} resultado(s) para <strong>“{searchTerm}”</strong> — se buscó en nombre, teléfono, ubicación, notas, vacante y CV.</span>}
+          <button onClick={() => setSearchTerm('')} className="ml-auto text-xs font-bold underline">Limpiar</button>
+        </div>
+      )}
 
       <div className="bg-white shadow-sm border border-slate-200 rounded-xl overflow-hidden">
         <div className="overflow-x-auto">
@@ -685,14 +763,29 @@ export default function CandidatesList() {
                         <div className="w-8 h-8 rounded-full bg-indigo-100 text-indigo-600 flex items-center justify-center font-bold text-xs mr-3">
                           {candidate.candidateName?.charAt(0) || 'U'}
                         </div>
-                        <div className="text-sm font-bold text-slate-800">
-                          {candidate.candidateName}
+                        <div>
+                          <div className="text-sm font-bold text-slate-800">
+                            {candidate.candidateName}
+                          </div>
+                          {candidate.notes?.length > 0 && (
+                            <div className="text-[10px] font-bold text-amber-600">📝 {candidate.notes.length} nota{candidate.notes.length === 1 ? '' : 's'}</div>
+                          )}
                         </div>
                       </div>
+                      {/* Why this row matched — most useful when the hit is inside a note. */}
+                      {searchState.hits?.get(candidate.id)?.filter(h => h.label !== 'Nombre').slice(0, 2).map((h, i) => (
+                        <div key={i} className="mt-1 ml-11 max-w-xs whitespace-normal text-[11px] text-slate-500 leading-snug">
+                          <span className="font-bold text-slate-600">{h.label}:</span>{' '}
+                          {h.before}<mark className="bg-yellow-200 text-slate-900 rounded px-0.5">{h.match}</mark>{h.after}
+                        </div>
+                      ))}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-xs text-slate-600">{candidate.email}</div>
                       <div className="text-xs text-slate-500">{candidate.phone}</div>
+                      {(candidate.city || candidate.aiExtraction?.city) && (
+                        <div className="text-xs text-slate-400 flex items-center"><MapPin className="w-3 h-3 mr-0.5" />{candidate.city || candidate.aiExtraction?.city}</div>
+                      )}
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap">
                       <div className="text-sm text-slate-700">{candidate.vacancyTitle}</div>
@@ -811,6 +904,13 @@ export default function CandidatesList() {
             </div>
           </div>
       </Modal>
+
+      <MoveVacancyModal
+        isOpen={showMoveVacancy}
+        onClose={() => setShowMoveVacancy(false)}
+        apps={filteredCandidates.filter(c => selectedApps.includes(c.id))}
+        onDone={() => { setSelectedApps([]); refresh(); }}
+      />
 
       {/* Bulk Upload Modal */}
       <BulkCvUploadModal

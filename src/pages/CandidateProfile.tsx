@@ -1,17 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc, serverTimestamp, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
+import CandidateNotes from '../components/CandidateNotes';
+import MoveVacancyModal from '../components/MoveVacancyModal';
 
 export default function CandidateProfile() {
   const { candidateId } = useParams();
-  const navigate = useNavigate();
   const [candidate, setCandidate] = useState<any>(null);
   const [application, setApplication] = useState<any>(null);
   const [allApplications, setAllApplications] = useState<any[]>([]);
@@ -26,6 +27,7 @@ export default function CandidateProfile() {
   const [savingObs, setSavingObs] = useState(false);
   const [showCVModal, setShowCVModal] = useState(false);
   const [showEditCandidate, setShowEditCandidate] = useState(false);
+  const [showMoveVacancy, setShowMoveVacancy] = useState(false);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [analyzingCV, setAnalyzingCV] = useState(false);
   
@@ -504,14 +506,6 @@ export default function CandidateProfile() {
 
   return (
     <div className="max-w-6xl mx-auto pb-12 animate-fade-in px-4 lg:px-0">
-      <button 
-        onClick={() => navigate(-1)}
-        className="flex items-center text-sm font-bold text-slate-500 hover:text-violet-600 mb-4 lg:mb-8 transition-colors"
-      >
-        <ArrowLeft className="w-4 h-4 mr-2" />
-        Volver
-      </button>
-
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
         
         {/* Left Column: Profile & Actions */}
@@ -540,9 +534,9 @@ export default function CandidateProfile() {
               <div className="flex items-center text-slate-600 bg-slate-50 p-2.5 lg:p-3 rounded-xl">
                 <Phone className="w-4 h-4 mr-3 text-violet-500 flex-shrink-0" /> {candidate.phone}
               </div>
-              {ai.location && (
+              {(candidate.city || ai.location || ai.city) && (
                 <div className="flex items-center text-slate-600 bg-slate-50 p-2.5 lg:p-3 rounded-xl">
-                  <MapPin className="w-4 h-4 mr-3 text-violet-500 flex-shrink-0" /> <span className="truncate">{ai.location}</span>
+                  <MapPin className="w-4 h-4 mr-3 text-violet-500 flex-shrink-0" /> <span className="truncate">{candidate.city || ai.location || ai.city}</span>
                 </div>
               )}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2 mt-2">
@@ -631,6 +625,23 @@ export default function CandidateProfile() {
                 </select>
                 {updatingStage && <Loader2 className="w-4 h-4 animate-spin text-violet-600" />}
               </div>
+              <button
+                onClick={() => setShowMoveVacancy(true)}
+                className="mt-3 w-full flex items-center justify-center p-2.5 bg-indigo-50 text-indigo-700 border border-indigo-100 rounded-xl font-bold hover:bg-indigo-100 transition-colors text-xs lg:text-sm"
+              >
+                <ArrowRightLeft className="w-4 h-4 mr-2" /> Mover / copiar a otra vacante
+              </button>
+              <p className="mt-2 text-[11px] text-slate-400 text-center">Vacante: <strong className="text-slate-600">{application.vacancyTitle}</strong></p>
+              {Array.isArray(application.vacancyHistory) && application.vacancyHistory.length > 0 && (
+                <ul className="mt-2 space-y-1 text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2">
+                  {application.vacancyHistory.map((h: any, i: number) => (
+                    <li key={i}>
+                      {h.action === 'copy' ? '📋 Copiado' : '↔️ Movido'} de <strong>{h.fromVacancyTitle}</strong> a <strong>{h.toVacancyTitle}</strong>
+                      {h.at?.toDate ? ` · ${h.at.toDate().toLocaleDateString('es-DO')}` : ''}{h.by ? ` · ${h.by}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
           )}
 
@@ -694,7 +705,16 @@ export default function CandidateProfile() {
 
         {/* Right Column: AI Analysis & Details (Bento Grid) */}
         <div className="lg:col-span-2 space-y-4 lg:space-y-6">
-          
+
+          {/* Keyed so switching candidate remounts it (fresh draft and state). */}
+          <React.Fragment key={candidateId}>
+            <CandidateNotes
+              candidateId={candidateId!}
+              applicationId={application?.id}
+              vacancyTitle={application?.vacancyTitle}
+            />
+          </React.Fragment>
+
           {candidate.aiStatus === 'pending' || candidate.aiStatus === 'error' ? (
             <div className="glass-card rounded-2xl lg:rounded-3xl p-8 lg:p-12 text-center flex flex-col items-center justify-center border border-dashed border-violet-200 min-h-[200px]">
               <BrainCircuit className="w-12 h-12 lg:w-16 lg:h-16 text-violet-200 mb-4" />
@@ -761,7 +781,7 @@ export default function CandidateProfile() {
             {/* Interview Observation */}
             <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6">
                   <h3 className="text-[10px] lg:text-sm font-display font-bold text-slate-400 uppercase tracking-widest mb-3 lg:mb-4 flex items-center">
-                    <User className="w-4 h-4 mr-2 text-fuchsia-500" /> Entrevista
+                    <User className="w-4 h-4 mr-2 text-fuchsia-500" /> Entrevista {allApplications.length > 1 && <span className="ml-1 normal-case tracking-normal font-medium text-slate-400">· {application?.vacancyTitle}</span>}
                   </h3>
                   <div className="space-y-4">
                     <div>
@@ -779,7 +799,7 @@ export default function CandidateProfile() {
                       </div>
                     </div>
                     <div>
-                      <label className="block text-[10px] font-bold text-slate-500 mb-2">Notas</label>
+                      <label className="block text-[10px] font-bold text-slate-500 mb-2">Comentarios de la entrevista</label>
                       <textarea
                         value={interviewObs.notes}
                         onChange={e => setInterviewObs({...interviewObs, notes: e.target.value})}
@@ -1434,6 +1454,12 @@ export default function CandidateProfile() {
         onClose={() => setShowEditCandidate(false)}
         candidateId={candidateId!}
         candidate={candidate}
+      />
+
+      <MoveVacancyModal
+        isOpen={showMoveVacancy}
+        onClose={() => setShowMoveVacancy(false)}
+        apps={application ? [{ ...application, candidateName: application.candidateName || candidate.fullName || candidate.name }] : []}
       />
     </div>
   );

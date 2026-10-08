@@ -5,7 +5,7 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
-import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle, ArrowRightLeft } from 'lucide-react';
 
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
@@ -14,6 +14,9 @@ import { requestCvWorkerRun } from '../lib/api';
 import { getKanbanOrder, computeDropOrder } from '../lib/kanbanOrder';
 import BulkCvUploadModal, { type BulkEntry } from '../components/BulkCvUploadModal';
 import { normalizePhone } from '../lib/phone';
+import { smartMatch } from '../lib/smartSearch';
+import { loadAllNotesByCandidate, type CandidateNote } from '../lib/notes';
+import MoveVacancyModal from '../components/MoveVacancyModal';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -23,6 +26,12 @@ export default function KanbanBoard() {
   const [candidates, setCandidates] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  // Notes are searchable from the board too (loaded once; optional).
+  const [notesByCandidate, setNotesByCandidate] = useState<Map<string, CandidateNote[]>>(new Map());
+  const [showMoveVacancy, setShowMoveVacancy] = useState(false);
+  useEffect(() => {
+    loadAllNotesByCandidate().then(setNotesByCandidate).catch(e => console.warn('Notas no disponibles para la búsqueda:', e));
+  }, []);
   // CV preview modal (floating window) — shown in-place instead of a new tab.
   const [cvPreview, setCvPreview] = useState<{ url: string; name: string; fileType?: string } | null>(null);
 
@@ -499,18 +508,20 @@ export default function KanbanBoard() {
   if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="w-10 h-10 animate-spin text-violet-600" /></div>;
 
   // Filter applications based on search term
+  // Same smart search as the candidate list: accents, phone formats, notes, multi-word.
   const filteredApplications = applications.filter(app => {
-    if (!searchTerm) return true;
-    const term = searchTerm.toLowerCase();
+    if (!searchTerm.trim()) return true;
     const candidate = candidates[app.candidateId] || {};
-    
-    return (
-      app.candidateName?.toLowerCase().includes(term) ||
-      candidate.phone?.toLowerCase().includes(term) ||
-      candidate.email?.toLowerCase().includes(term) ||
-      candidate.city?.toLowerCase().includes(term) ||
-      candidate.aiExtraction?.relevant_experience_summary?.toLowerCase().includes(term)
-    );
+    const ai = candidate.aiExtraction || {};
+    return smartMatch([
+      { label: 'Nombre', value: app.candidateName },
+      { label: 'Teléfono', value: candidate.phone, kind: 'phone' },
+      { label: 'Correo', value: candidate.email },
+      { label: 'Ubicación', value: [candidate.city, ai.city, ai.location] },
+      { label: 'Notas', value: (notesByCandidate.get(app.candidateId) || []).map(n => n.text) },
+      { label: 'Notas de entrevista', value: [app.interviewObservation?.notes, app.interviewObservation?.redFlags] },
+      { label: 'CV', value: [ai.relevant_experience_summary, ...(ai.strengths_detected || [])] },
+    ], searchTerm).matched;
   });
 
   // Group applications by stage, ordered by their in-column position (kanbanOrder)
@@ -525,7 +536,7 @@ export default function KanbanBoard() {
   })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
-    <div className="h-[calc(100vh-5rem)] lg:h-[calc(100vh-7rem)] flex flex-col animate-fade-in relative">
+    <div className="h-[calc(100vh-9rem)] lg:h-[calc(100vh-11rem)] flex flex-col animate-fade-in relative">
       <div className="mb-4 lg:mb-8 flex flex-col md:flex-row md:items-center justify-between gap-3">
         <div>
           <h1 className="text-xl lg:text-3xl font-display font-bold text-slate-900 tracking-tight flex items-center">
@@ -545,7 +556,7 @@ export default function KanbanBoard() {
           <div className="relative flex-1 sm:flex-none">
             <input
               type="text"
-              placeholder="Buscar candidato..."
+              placeholder="Nombre, teléfono, lugar, notas…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full sm:w-48 lg:w-64 pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-violet-500 outline-none transition-all shadow-sm"
@@ -813,6 +824,14 @@ export default function KanbanBoard() {
             </select>
           </div>
 
+          <button
+            onClick={() => setShowMoveVacancy(true)}
+            disabled={bulkActionLoading}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800 border border-slate-700 hover:bg-slate-700 rounded-xl text-sm font-bold disabled:opacity-50 whitespace-nowrap"
+          >
+            <ArrowRightLeft className="w-4 h-4" /> Otra vacante
+          </button>
+
           <button 
             onClick={() => setSelectedApps(new Set())}
             disabled={bulkActionLoading}
@@ -822,6 +841,13 @@ export default function KanbanBoard() {
           </button>
         </div>
       )}
+
+      <MoveVacancyModal
+        isOpen={showMoveVacancy}
+        onClose={() => setShowMoveVacancy(false)}
+        apps={applications.filter(a => selectedApps.has(a.id))}
+        onDone={() => setSelectedApps(new Set())}
+      />
 
       {/* Bulk Upload Modal */}
       <BulkCvUploadModal
