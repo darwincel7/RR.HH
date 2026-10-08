@@ -6,6 +6,8 @@ import { Trophy, CheckCircle, XCircle, AlertCircle, Star, GitCompare, X } from '
 
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
+import CandidateAvatar from '../components/CandidateAvatar';
+import { useCandidatePhotos } from '../lib/useCandidatePhotos';
 
 export default function Ranking() {
   const { vacancyId } = useParams();
@@ -18,6 +20,7 @@ export default function Ranking() {
   // Comparison state
   const [selectedForComparison, setSelectedForComparison] = useState<string[]>([]);
   const [showComparison, setShowComparison] = useState(false);
+  const photos = useCandidatePhotos(candidates.map(c => c.candidateId));
 
   useEffect(() => {
     async function fetchData() {
@@ -206,6 +209,7 @@ export default function Ranking() {
                     <div className="flex items-center">
                       <Link to={`/candidates/${candidate.candidateId}`} className="text-sm font-bold text-slate-800 hover:text-blue-600 transition-colors flex items-center">
                         {index === 0 && <Trophy className="w-4 h-4 mr-2 text-amber-500" />}
+                        <CandidateAvatar photoUrl={photos[candidate.candidateId]} name={candidate.candidateName} size={36} className="mr-3" />
                         {index + 1}. {candidate.candidateName}
                       </Link>
                     </div>
@@ -270,9 +274,7 @@ export default function Ranking() {
                 {comparisonCandidates.map(candidate => (
                   <div key={candidate.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
                     <div className="p-5 border-b border-slate-100 bg-slate-50 text-center">
-                      <div className="w-16 h-16 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-2xl font-black mx-auto mb-3">
-                        {(candidate.candidateName || '?').charAt(0)}
-                      </div>
+                      <CandidateAvatar photoUrl={photos[candidate.candidateId]} name={candidate.candidateName} size={80} className="mx-auto mb-3 ring-4 ring-white shadow-md" />
                       <h3 className="text-lg font-bold text-slate-800">{candidate.candidateName || 'Sin nombre'}</h3>
                       <div className="mt-2 inline-flex items-center px-3 py-1 bg-amber-100 text-amber-800 rounded-full text-sm font-black">
                         <Star className="w-4 h-4 mr-1 fill-current" />

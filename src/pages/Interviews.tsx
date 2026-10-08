@@ -4,6 +4,8 @@ import { db } from '../lib/firebase';
 import { Calendar, Clock, User, MapPin, Plus, Loader2, CheckCircle, XCircle, Send, Users, Video } from 'lucide-react';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
+import CandidateAvatar from '../components/CandidateAvatar';
+import { useCandidatePhotos } from '../lib/useCandidatePhotos';
 
 export default function Interviews() {
   const [sessions, setSessions] = useState<any[]>([]);
@@ -20,6 +22,10 @@ export default function Interviews() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState('');
   const [availableCandidates, setAvailableCandidates] = useState<any[]>([]);
+  const photos = useCandidatePhotos([
+    ...Object.values(participants).flat().map((p: any) => p.candidateId),
+    ...availableCandidates.map((c: any) => c.candidateId),
+  ]);
   const [addingParticipant, setAddingParticipant] = useState(false);
 
   useEffect(() => {
@@ -275,9 +281,7 @@ export default function Interviews() {
                       {sessionParts.map(part => (
                         <div key={part.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-lg border border-slate-100">
                           <div className="flex items-center">
-                            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 font-bold text-xs mr-3">
-                              {(part.candidateName || '?').charAt(0)}
-                            </div>
+                            <CandidateAvatar photoUrl={photos[part.candidateId]} name={part.candidateName} size={36} className="mr-3" />
                             <div>
                               <p className="text-sm font-bold text-slate-800">{part.candidateName || 'Sin nombre'}</p>
                               <select
@@ -382,7 +386,10 @@ export default function Interviews() {
                 <div className="space-y-3">
                   {availableCandidates.map(cand => (
                     <div key={cand.id} className="flex items-center justify-between p-3 border border-slate-200 rounded-lg hover:border-blue-300 transition-colors">
-                      <span className="font-bold text-slate-700 text-sm">{cand.candidateName}</span>
+                      <span className="flex items-center font-bold text-slate-700 text-sm">
+                        <CandidateAvatar photoUrl={photos[cand.candidateId]} name={cand.candidateName} size={32} className="mr-2.5" />
+                        {cand.candidateName}
+                      </span>
                       <button
                         onClick={() => handleAddParticipant(cand.id, cand.candidateId, cand.candidateName)}
                         disabled={addingParticipant}

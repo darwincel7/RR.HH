@@ -86,6 +86,7 @@ error es silencioso y caro:
 | [`src/lib/smartSearch.test.ts`](src/lib/smartSearch.test.ts) | El buscador: acentos, formatos de teléfono, varias palabras, búsqueda en notas y tolerancia a errores de escritura |
 | [`src/lib/moveApplication.test.ts`](src/lib/moveApplication.test.ts) | Que mover/copiar perfiles entre vacantes nunca duplique a un candidato en la vacante destino |
 | [`src/lib/navigation.test.ts`](src/lib/navigation.test.ts) | A dónde lleva "Atrás" cuando no hay historial (pestaña nueva, recarga) |
+| [`serverPhotoBackfill.test.ts`](serverPhotoBackfill.test.ts) | El orden en que se buscan las fotos de los candidatos existentes: ventas primero, más avanzados primero, nunca a quien ya se revisó |
 | [`serverCvPhoto.test.ts`](serverCvPhoto.test.ts) | Extraer la foto del CV: imágenes de PDF/Word/imagen, descarte de íconos y máscaras, recorte cuadrado centrado en la cara |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
@@ -131,8 +132,17 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   400×400. Se guarda en Storage (`candidate_photos/`, URL con token) y en el candidato como
   `photoUrl` + `photoStatus` (`found`, `none`, `manual`, `removed`, `error`). En el perfil
   la foto se amplía con un clic y se puede **cambiar**, **buscar en el CV** o **quitar**; lo
-  que decide una persona nunca lo pisa la IA. Para los candidatos que ya existían, el botón
-  **Buscar fotos en los CV** de *Candidatos* los revisa en lotes (`/api/photos/backfill`).
+  que decide una persona nunca lo pisa la IA. La foto aparece también en **Ranking** y en
+  **Entrevistas** (`useCandidatePhotos`).
+- **Fotos de los candidatos que ya existían, solas y poco a poco**: tras cada pasada del
+  worker de CV (temporizador de 60 s y latido del navegador) el servidor revisa unos
+  pocos CV más (`PHOTO_BACKFILL_PER_PASS`, 3 por defecto), **primero las vacantes de
+  ventas** y dentro de ellas los más avanzados en el embudo
+  ([`serverPhotoBackfill.ts`](serverPhotoBackfill.ts)). No importa si el CV ya se analizó.
+  La cola se reconstruye cada 6 h; si una tanda entera falla se pausa 30 min.
+  `PHOTO_BACKFILL=off` lo apaga y `GET /api/photos/backfill/status` muestra el avance
+  (visible en *Candidatos*). El botón **Buscar fotos en los CV** sigue disponible para
+  acelerar a mano (`/api/photos/backfill`).
 
 > Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`). Se
 > publican solas al llegar a `main` (workflow *Deploy Firebase Rules*) o con

@@ -242,7 +242,7 @@ export default function CandidatesList() {
     if (photoScan) return;
     const rows = await loadAll();
     const ids = Array.from(new Set(rows
-      .filter(r => r.candidateId && r.cvUrl && !r.photoUrl && !r.photoStatus && r.aiStatus === 'completed')
+      .filter(r => r.candidateId && r.cvUrl && !r.photoUrl && !r.photoStatus && r.aiStatus !== 'processing')
       .map(r => r.candidateId as string)));
     if (ids.length === 0) {
       alert('Todos los CV ya fueron revisados en busca de foto. Los nuevos se revisan solos al llegar.');
@@ -270,6 +270,20 @@ export default function CandidatesList() {
     refresh();
     alert(`Listo: se encontraron ${found} foto(s) en ${ids.length} CV revisados.`);
   };
+
+  // The server also fills photos by itself in the background (sales vacancies first);
+  // show how far along it is.
+  const [autoPhotos, setAutoPhotos] = useState<{ enabled: boolean; queued: number; stats: { found: number; processed: number } } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => apiFetch('/api/photos/backfill/status')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (alive && d) setAutoPhotos(d); })
+      .catch(() => { /* informativo: sin estado no pasa nada */ });
+    load();
+    const t = setInterval(load, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, []);
 
   const anyFilterActive = !!(searchTerm || stageFilter || cityFilter || expFilter);
 
@@ -598,6 +612,15 @@ export default function CandidatesList() {
             Talent Pool. Al buscar o filtrar se incluye todo el histórico.
             {fullyLoaded && <span className="text-slate-400"> · {candidates.length} candidatos</span>}
           </p>
+          {autoPhotos?.enabled && (autoPhotos.queued > 0 || autoPhotos.stats.processed > 0) && (
+            <p className="text-xs text-slate-400 mt-1 flex items-center gap-1" title="El sistema busca solo la foto de perfil en los CV, unos pocos cada minuto, empezando por las vacantes de ventas.">
+              <ScanFace className="w-3.5 h-3.5" />
+              {autoPhotos.queued > 0
+                ? `Fotos automáticas: ${autoPhotos.queued} CV en cola (ventas primero)`
+                : 'Fotos automáticas: al día'}
+              {autoPhotos.stats.found > 0 && ` · ${autoPhotos.stats.found} encontradas desde el último reinicio`}
+            </p>
+          )}
         </div>
         <div className="flex gap-2 flex-wrap">
           {erroredCount > 0 && (
