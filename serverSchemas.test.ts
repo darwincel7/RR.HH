@@ -92,6 +92,18 @@ describe('answers de candidatos (score-stage2 / evaluate-test)', () => {
     expect(errorOf(evaluateTestSchema, { ...base, applicationId: '' })).toBe('applicationId inválido');
   });
 
+  it('keeps a valid testTemplateId and drops a junk one instead of failing the finished test', () => {
+    const ok = evaluateTestSchema.safeParse({ ...base, testTemplateId: 'tecnicos' });
+    expect(ok.success && ok.data.testTemplateId).toBe('tecnicos');
+    for (const junk of ['a/b', 42, 'x'.repeat(201), null]) {
+      const r = evaluateTestSchema.safeParse({ ...base, testTemplateId: junk });
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.testTemplateId).toBeUndefined();
+    }
+    const none = evaluateTestSchema.safeParse(base);
+    expect(none.success && none.data.testTemplateId).toBeUndefined();
+  });
+
   it('treats force as false unless it is literally true', () => {
     // force gates a paid AI re-run; a truthy string must not trigger it.
     for (const notTrue of ['true', 1, undefined, null]) {

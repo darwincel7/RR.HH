@@ -9,6 +9,7 @@ export function parentPath(pathname: string): string {
   if ((m = p.match(/^\/vacancies\/([^/]+)\/ranking$/))) return `/vacancies/${m[1]}/kanban`;
   if (/^\/vacancies\/[^/]+(\/kanban)?$/.test(p)) return '/vacancies';
   if (/^\/candidates\/[^/]+$/.test(p)) return '/candidates';
+  if (/^\/forms\/tests\/[^/]+$/.test(p)) return '/forms?seccion=tests';
   return '/';
 }
 

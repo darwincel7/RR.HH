@@ -153,6 +153,23 @@ service cloud.firestore {
       allow write: if isRecruiter(); // Only recruiters/admins can modify
     }
 
+    // Tests presenciales, one per position (each vacancy picks one in its testTemplateId).
+    // Team-only: they hold the expected answers. Candidates receive their test through
+    // /api/public/form-data (Admin SDK), which strips everything private.
+    match /test_templates/{templateId} {
+      allow read: if isRecruiter();
+      allow create, update: if isRecruiter()
+        && request.resource.data.name is string
+        && request.resource.data.questions is list
+        && request.resource.data.questions.size() <= 120
+        && request.resource.data.dimensions is list
+        // The general test is the fallback of every vacancy without a choice: never archived.
+        && !(templateId == 'default' && request.resource.data.get('archived', false) == true);
+      // "Eliminar" in the app archives (past results keep pointing to the test). A real
+      // delete would leave those results without their grading criteria: admins only.
+      allow delete: if isAdmin();
+    }
+
     match /interview_sessions/{sessionId} {
       allow read, write: if isRecruiter();
     }

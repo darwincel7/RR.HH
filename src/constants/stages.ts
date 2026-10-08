@@ -11,7 +11,7 @@ export const STAGE_INFO: Record<string, string> = {
   'Evaluación IA etapa 2': 'La IA calificó sus respuestas del formulario.',
   'Convocado a entrevista': 'Invitado por WhatsApp a entrevista con fecha, hora y lugar.',
   'Entrevista presencial': 'En entrevista cara a cara con el equipo.',
-  'Tests presenciales': 'Realizando las pruebas técnicas presenciales.',
+  'Tests presenciales': 'Realizando el test presencial de su vacante.',
   'Finalista': 'Superó todas las etapas: entre los mejores para el puesto.',
   'Oferta': 'Se le está presentando la oferta de trabajo.',
   'Contratado': 'Proceso completado con éxito: ya es parte del equipo.',
