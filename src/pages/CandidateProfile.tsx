@@ -5,11 +5,36 @@ import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowRightLeft, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
+import CandidateAvatar, { PhotoLightbox } from '../components/CandidateAvatar';
+
+/** Reads an image file and downsizes it in the browser (≤1200px JPEG) before upload:
+ * keeps the request small and lets the browser decode formats like HEIC for us. */
+function fileToJpegDataUrl(file: File, max = 1200): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { URL.revokeObjectURL(url); reject(new Error('canvas')); return; }
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/jpeg', 0.9));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo leer la imagen')); };
+    img.src = url;
+  });
+}
 
 export default function CandidateProfile() {
   const { candidateId } = useParams();
@@ -28,6 +53,9 @@ export default function CandidateProfile() {
   const [showCVModal, setShowCVModal] = useState(false);
   const [showEditCandidate, setShowEditCandidate] = useState(false);
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
+  const [showPhoto, setShowPhoto] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState<'' | 'extract' | 'upload' | 'remove'>('');
+  const photoInputRef = useRef<HTMLInputElement>(null);
   const [showScorecardModal, setShowScorecardModal] = useState(false);
   const [analyzingCV, setAnalyzingCV] = useState(false);
   
@@ -161,6 +189,60 @@ export default function CandidateProfile() {
     };
   }, [candidateId]);
 
+  // ---- Profile photo ----------------------------------------------------------
+  const extractPhotoFromCV = async (silent = false) => {
+    if (!candidateId) return;
+    if (!silent) setPhotoBusy('extract');
+    try {
+      const res = await apiFetch(`/api/candidates/${candidateId}/photo/extract`, { method: 'POST' });
+      const data = await res.json().catch(() => ({} as any));
+      if (silent) return;
+      if (!res.ok) alert(data?.error || 'No se pudo buscar la foto en el CV.');
+      else if (data.status === 'none') alert('No se encontró una foto de la persona en su CV. Puedes subir una con "Cambiar foto".');
+      // 'found' → the live candidate listener shows the new photo by itself.
+    } catch {
+      if (!silent) alert('No se pudo buscar la foto (error de red).');
+    } finally {
+      if (!silent) setPhotoBusy('');
+    }
+  };
+
+  const uploadPhoto = async (file: File | undefined) => {
+    if (!file || !candidateId) return;
+    setPhotoBusy('upload');
+    try {
+      const dataUrl = await fileToJpegDataUrl(file);
+      const res = await apiFetch(`/api/candidates/${candidateId}/photo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dataUrl }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({} as any));
+        alert(data?.error || 'No se pudo guardar la foto.');
+      }
+    } catch {
+      alert('No se pudo leer esa imagen. Prueba con una foto JPG o PNG.');
+    } finally {
+      setPhotoBusy('');
+      if (photoInputRef.current) photoInputRef.current.value = '';
+    }
+  };
+
+  const removePhoto = async () => {
+    if (!candidateId || !window.confirm('¿Quitar la foto de este candidato? No se volverá a poner sola desde el CV.')) return;
+    setPhotoBusy('remove');
+    try {
+      // 'removed' tells the automatic extraction never to put it back.
+      await updateDoc(doc(db, 'candidates', candidateId), { photoUrl: deleteField(), photoStatus: 'removed' });
+    } catch (e) {
+      console.error('No se pudo quitar la foto:', e);
+      alert('No se pudo quitar la foto.');
+    } finally {
+      setPhotoBusy('');
+    }
+  };
+
   const analyzeCVWithAI = async () => {
     if (!candidate || !candidate.cvUrl) return;
     setAnalyzingCV(true);
@@ -208,6 +290,8 @@ export default function CandidateProfile() {
       }
 
       setCandidate({ ...candidate, aiExtraction: parsedData, aiStatus: 'completed' });
+      // Same as the backend worker: the analysis saw a photo of the person → cut it out.
+      if (parsedData?.has_profile_photo && !candidate.photoUrl) extractPhotoFromCV(true);
       setAnalyzingCV(false);
       alert('Análisis completado con éxito');
     } catch (error: any) {
@@ -512,8 +596,39 @@ export default function CandidateProfile() {
         <div className="space-y-4 lg:space-y-6">
           <div className="glass-card rounded-2xl lg:rounded-3xl p-6 lg:p-8 text-center relative overflow-hidden">
             <div className="absolute top-0 left-0 w-full h-24 lg:h-32 bg-gradient-ai opacity-10"></div>
-            <div className="w-20 h-20 lg:w-24 lg:h-24 bg-white rounded-full mx-auto mb-4 flex items-center justify-center shadow-xl border-4 border-white relative z-10">
-              <User className="w-8 h-8 lg:w-10 lg:h-10 text-violet-300" />
+            <div className="relative z-10 mx-auto mb-3 w-28 h-28 lg:w-32 lg:h-32 rounded-full border-4 border-white shadow-xl bg-white">
+              <CandidateAvatar
+                photoUrl={candidate.photoUrl}
+                name={candidate.fullName || candidate.name}
+                size={120}
+                className="w-full h-full"
+                title={candidate.photoUrl ? 'Clic para ampliar la foto' : undefined}
+                onClick={candidate.photoUrl ? () => setShowPhoto(true) : undefined}
+              />
+              {photoBusy && (
+                <div className="absolute inset-0 rounded-full bg-white/70 flex items-center justify-center">
+                  <Loader2 className="w-7 h-7 animate-spin text-violet-600" />
+                </div>
+              )}
+            </div>
+            <div className="relative z-10 flex flex-wrap items-center justify-center gap-1 mb-3 text-[11px] font-bold">
+              <input ref={photoInputRef} type="file" accept="image/*" className="hidden" onChange={e => uploadPhoto(e.target.files?.[0])} />
+              <button onClick={() => photoInputRef.current?.click()} disabled={!!photoBusy}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-500 hover:text-violet-700 hover:bg-violet-50 disabled:opacity-50">
+                <Camera className="w-3.5 h-3.5" /> {candidate.photoUrl ? 'Cambiar foto' : 'Subir foto'}
+              </button>
+              {candidate.cvUrl && (
+                <button onClick={() => extractPhotoFromCV()} disabled={!!photoBusy} title="La IA busca la foto de la persona dentro de su CV"
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-500 hover:text-violet-700 hover:bg-violet-50 disabled:opacity-50">
+                  <ScanFace className="w-3.5 h-3.5" /> {photoBusy === 'extract' ? 'Buscando…' : 'Buscar en el CV'}
+                </button>
+              )}
+              {candidate.photoUrl && (
+                <button onClick={removePhoto} disabled={!!photoBusy}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 disabled:opacity-50">
+                  <Trash2 className="w-3.5 h-3.5" /> Quitar
+                </button>
+              )}
             </div>
             <h1 className="text-xl lg:text-2xl font-display font-bold text-slate-900 relative z-10 flex items-center justify-center gap-2">
               <span>{candidate.fullName || candidate.name}</span>
@@ -1454,6 +1569,13 @@ export default function CandidateProfile() {
         onClose={() => setShowEditCandidate(false)}
         candidateId={candidateId!}
         candidate={candidate}
+      />
+
+      <PhotoLightbox
+        isOpen={showPhoto}
+        onClose={() => setShowPhoto(false)}
+        photoUrl={candidate.photoUrl}
+        name={candidate.fullName || candidate.name}
       />
 
       <MoveVacancyModal

@@ -24,6 +24,7 @@ import crypto from "crypto";
 import { setLogLevel } from 'firebase/firestore';
 import { getAI, generateContentResilient, GEMINI_MODEL } from './serverGemini';
 import { runCvParse, CvParseError } from './serverCvParse';
+import { findCvPhoto, normalizeCvImage, renderAvatar } from './serverCvPhoto';
 import { packAuthBlob, unpackAuthBlob, AUTH_BLOB_VERSION } from './serverSessionBlob';
 import {
   nextSpacingMs, retryBackoffMs, afterFailure, drainAction, typingDelayMs,
@@ -34,7 +35,7 @@ import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema,
-  decodeImageDataUrl, firstIssueMessage, EMAIL_RE,
+  decodeImageDataUrl, firstIssueMessage, EMAIL_RE, isOurStorageUrl,
 } from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
 
@@ -663,6 +664,44 @@ let cvWorkerRunning = false;
 // helper already retries with backoff on transient errors).
 const CV_CONCURRENCY = 3;
 
+// ---------------------------------------------------------------------------
+// Profile photo from the CV (serverCvPhoto.ts)
+// ---------------------------------------------------------------------------
+// photoStatus on the candidate doc:
+//   'found'   → photoUrl came from the CV        'none'    → the CV has no photo of them
+//   'manual'  → a recruiter uploaded it           'removed' → a recruiter removed it
+//   'error'   → extraction failed (retryable from the profile)
+// Automatic runs never touch 'manual'/'removed'/'found': a human choice always wins.
+type PhotoOutcome = 'found' | 'none' | 'skipped';
+
+async function extractCandidatePhoto(candidateId: string, opts: { force?: boolean } = {}): Promise<{ status: PhotoOutcome; photoUrl?: string }> {
+  const cand = await db.getDocData('candidates', candidateId);
+  if (!cand) throw new Error('Candidato no encontrado');
+  if (!opts.force && ['found', 'manual', 'removed'].includes(cand.photoStatus)) return { status: 'skipped' };
+  // Only CVs in OUR bucket are fetched server-side (SSRF guard, as for /api/parse-cv).
+  if (!isOurStorageUrl(cand.cvUrl)) {
+    await db.setDocData('candidates', candidateId, { photoStatus: 'none', photoCheckedAt: new Date() });
+    return { status: 'none' };
+  }
+  try {
+    const fileRes = await fetch(cand.cvUrl);
+    if (!fileRes.ok) throw new Error(`No se pudo descargar el CV (${fileRes.status})`);
+    const file = Buffer.from(await fileRes.arrayBuffer());
+    const avatar = await findCvPhoto(file, cand.cvFileType || 'application/pdf');
+    if (!avatar) {
+      await db.setDocData('candidates', candidateId, { photoStatus: 'none', photoCheckedAt: new Date() });
+      return { status: 'none' };
+    }
+    const photoUrl = await db.uploadPublicFile(`candidate_photos/${candidateId}-${Date.now()}.jpg`, avatar, 'image/jpeg');
+    await db.setDocData('candidates', candidateId, { photoUrl, photoStatus: 'found', photoSource: 'cv', photoCheckedAt: new Date() });
+    return { status: 'found', photoUrl };
+  } catch (err: any) {
+    await db.setDocData('candidates', candidateId, { photoStatus: 'error', photoError: String(err?.message || err).slice(0, 300), photoCheckedAt: new Date() })
+      .catch(() => { /* best effort */ });
+    throw err;
+  }
+}
+
 // Parses one already-claimed candidate's CV and writes the results. Isolated so one
 // candidate's failure never aborts the others in the batch. Returns true when the CV
 // was scored, false when it ended in 'error', so a run can report what it achieved.
@@ -695,6 +734,16 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       await db.setDocData('applications', appId, appUpdate);
     }
     console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
+    // The CV analysis said there is a photo of the person → cut it out for the avatar.
+    // Never lets a photo problem fail the (already saved) CV analysis.
+    if (parsedData.has_profile_photo) {
+      try {
+        const r = await extractCandidatePhoto(cand.id);
+        if (r.status === 'found') console.log(`[server CV worker] Foto de perfil extraída para ${cand.id}`);
+      } catch (photoErr: any) {
+        console.warn(`[server CV worker] No se pudo extraer la foto de ${cand.id}:`, photoErr?.message || photoErr);
+      }
+    }
     return true;
   } catch (err: any) {
     console.error(`[server CV worker] Error processing ${cand.id}:`, err?.message || err);
@@ -2158,6 +2207,63 @@ async function startServer() {
       console.error("Test AI Error:", error);
       res.status(500).json({ success: false, error: error.message });
     }
+  });
+
+  // ---- Candidate profile photo ---------------------------------------------
+  const validCandidateId = (id: unknown): id is string =>
+    typeof id === 'string' && id.length > 0 && id.length <= 200 && !id.includes('/');
+
+  // Look for the photo inside the CV now (recruiter clicked "Buscar foto en el CV").
+  app.post("/api/candidates/:id/photo/extract", requireRecruiter, async (req, res) => {
+    const id = req.params.id;
+    if (!validCandidateId(id)) return res.status(400).json({ error: 'Candidato inválido' });
+    try {
+      const r = await extractCandidatePhoto(id, { force: true });
+      res.json(r);
+    } catch (error: any) {
+      console.error('[photo] extract error:', error?.message || error);
+      res.status(500).json({ error: 'No se pudo leer la foto del CV. Inténtalo de nuevo.' });
+    }
+  });
+
+  // Recruiter uploads / replaces the photo by hand.
+  app.post("/api/candidates/:id/photo", requireRecruiter, async (req, res) => {
+    const id = req.params.id;
+    if (!validCandidateId(id)) return res.status(400).json({ error: 'Candidato inválido' });
+    try {
+      const img = decodeImageDataUrl(req.body?.dataUrl);
+      if ('error' in img) return res.status(400).json({ error: img.error });
+      if (img.buffer.length > 8 * 1024 * 1024) return res.status(413).json({ error: 'La imagen supera 8MB.' });
+      if (!(await db.getDocData('candidates', id))) return res.status(404).json({ error: 'Candidato no encontrado' });
+      const norm = await normalizeCvImage(img.buffer);
+      if (!norm) return res.status(400).json({ error: 'No se pudo leer la imagen (formato no soportado o demasiado pequeña).' });
+      const avatar = await renderAvatar(norm.jpeg, null);
+      const photoUrl = await db.uploadPublicFile(`candidate_photos/${id}-${Date.now()}.jpg`, avatar, 'image/jpeg');
+      await db.setDocData('candidates', id, { photoUrl, photoStatus: 'manual', photoSource: 'manual', photoCheckedAt: new Date() });
+      res.json({ status: 'manual', photoUrl });
+    } catch (error: any) {
+      console.error('[photo] upload error:', error?.message || error);
+      res.status(500).json({ error: 'No se pudo guardar la foto.' });
+    }
+  });
+
+  // Existing candidates (processed before this feature): the list page sends small
+  // batches of ids so each request stays well inside Cloud Run's time limit.
+  app.post("/api/photos/backfill", requireRecruiter, async (req, res) => {
+    const ids: unknown = req.body?.candidateIds;
+    if (!Array.isArray(ids) || ids.length === 0 || ids.length > 3 || !ids.every(validCandidateId)) {
+      return res.status(400).json({ error: 'Envía entre 1 y 3 candidatos.' });
+    }
+    const results: Record<string, string> = {};
+    for (const id of ids as string[]) {
+      try {
+        results[id] = (await extractCandidatePhoto(id)).status;
+      } catch (error: any) {
+        console.warn(`[photo] backfill ${id}:`, error?.message || error);
+        results[id] = 'error';
+      }
+    }
+    res.json({ results });
   });
 
   app.post("/api/parse-cv", requireRecruiter, async (req, res) => {

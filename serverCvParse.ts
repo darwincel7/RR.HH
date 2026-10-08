@@ -57,6 +57,7 @@ export async function runCvParse(input: { pdfBase64?: string; mimeType?: string;
       risk_flags: { type: Type.ARRAY, items: { type: Type.STRING } },
       initial_score_1_to_5: { type: Type.NUMBER },
       recommendation: { type: Type.STRING, enum: ["advance", "review", "low_priority"] },
+      has_profile_photo: { type: Type.BOOLEAN, nullable: true },
       justification: { type: Type.STRING }
     },
     required: ["relevant_experience_summary", "education_summary", "strengths_detected", "risk_flags", "initial_score_1_to_5", "recommendation", "justification"]
@@ -80,6 +81,8 @@ export async function runCvParse(input: { pdfBase64?: string; mimeType?: string;
   Si faltan datos, lo indicas explícitamente en lugar de inventar.
 
   IMPORTANTE PARA EL TELÉFONO: Extrae el número de teléfono e incluye siempre el código de país. Si no lo tiene, asume +52. El formato ideal es solo números con el código de país (ej. +525551234567).
+
+  FOTO: en 'has_profile_photo' indica true si el CV incluye una fotografía real del candidato (retrato o foto de perfil), false si no la tiene (logos, íconos o dibujos no cuentan).
 
   Analiza el siguiente CV (que puede ser documento o imagen) y extrae la información solicitada.
   `;

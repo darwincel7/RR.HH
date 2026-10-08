@@ -17,6 +17,7 @@ import { normalizePhone } from '../lib/phone';
 import { smartMatch } from '../lib/smartSearch';
 import { loadAllNotesByCandidate, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
+import CandidateAvatar from '../components/CandidateAvatar';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -717,8 +718,16 @@ export default function KanbanBoard() {
                                   </div>
                                 </div>
 
-                                <div className="flex justify-between items-start mb-2 pr-10">
-                                  <h4 className="text-sm lg:text-base font-display font-bold text-slate-900 line-clamp-1">{item.candidateName}</h4>
+                                <div className="flex justify-between items-start gap-2 mb-2 pr-10">
+                                  <div className="flex items-center gap-2.5 min-w-0">
+                                    <CandidateAvatar
+                                      photoUrl={candidates[item.candidateId]?.photoUrl}
+                                      name={item.candidateName}
+                                      size={40}
+                                      className="ring-2 ring-white shadow-sm"
+                                    />
+                                    <h4 className="text-sm lg:text-base font-display font-bold text-slate-900 line-clamp-2 leading-tight">{item.candidateName}</h4>
+                                  </div>
                                   {item.scoreSummary && (
                                     <span className="flex items-center text-[10px] font-black text-white bg-gradient-ai px-1.5 py-0.5 rounded-md shadow-sm">
                                       <Star className="w-2.5 h-2.5 mr-1 fill-current" />
