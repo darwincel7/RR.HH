@@ -303,9 +303,11 @@ export default function Ranking() {
 
                       {/* Test Score */}
                       <div>
-                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Test Técnico/Psicométrico</h4>
+                        <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Test Presencial</h4>
                         <div className="flex items-center justify-between bg-slate-50 p-3 rounded-lg border border-slate-100">
-                          <span className="text-sm font-medium text-slate-700">Puntuación</span>
+                          <span className="text-sm font-medium text-slate-700 min-w-0 truncate" title={candidate.testResults?.testName || undefined}>
+                            {candidate.testResults?.testName || 'Puntuación'}
+                          </span>
                           <span className="font-black text-slate-800">{candidate.testResults?.score ?? 'N/A'}</span>
                         </div>
                       </div>

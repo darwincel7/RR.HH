@@ -23,6 +23,7 @@ const Interviews = lazy(() => import("./pages/Interviews"));
 const Ranking = lazy(() => import("./pages/Ranking"));
 const CandidateTest = lazy(() => import("./pages/CandidateTest"));
 const FormsSettings = lazy(() => import("./pages/FormsSettings"));
+const TestEditor = lazy(() => import("./pages/TestEditor"));
 const CandidatesList = lazy(() => import("./pages/CandidatesList"));
 const Careers = lazy(() => import("./pages/Careers"));
 
@@ -61,6 +62,7 @@ export default function App() {
               <Route path="candidates" element={<CandidatesList />} />
               <Route path="settings" element={<WhatsAppSettings />} />
               <Route path="forms" element={<FormsSettings />} />
+              <Route path="forms/tests/:testId" element={<TestEditor />} />
             </Route>
           </Routes>
         </Suspense>

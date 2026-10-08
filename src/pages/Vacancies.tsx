@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, CheckCircle, Star } from 'lucide-react';
+import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, CheckCircle, Star, FlaskConical } from 'lucide-react';
+import { useTestTemplates } from '../lib/useTestTemplates';
+import { DEFAULT_TEST_ID, vacancyTestId } from '../lib/testTemplates';
 
 export default function Vacancies() {
   const navigate = useNavigate();
@@ -19,6 +21,11 @@ export default function Vacancies() {
   const [functions, setFunctions] = useState('Atender consultas y requerimientos del área de ventas.\nGestionar procesos internos y seguimiento de tareas.\nSeguimiento de clientes para maximizar ventas.\nCumplir metas y reportar resultados.');
   const [requirements, setRequirements] = useState('Experiencia previa o no en el área (preferible).\nManejo básico de herramientas digitales.\nExcelente comunicación y capacidad de resolución.\nResponsable, puntual y orientado a resultados.\nIndispensable excelente ortografía.');
   const [offers, setOffers] = useState('Sueldo competitivo de $20.000 a $30.000\nCapacitación inicial y continua.\nOportunidad de crecimiento dentro de la empresa.\nCrecimiento profesional con capacitaciones externas constantes.');
+  // The test presencial this vacancy's candidates take (Formularios → Tests Presenciales).
+  const [testTemplateId, setTestTemplateId] = useState(DEFAULT_TEST_ID);
+  const { templates, loading: testsLoading } = useTestTemplates();
+  /** Name of a test, or null when it no longer exists (deleted after the vacancy chose it). */
+  const testName = (id: string) => templates.find(t => t.id === id)?.name ?? null;
   
   const [vacancyToDelete, setVacancyToDelete] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null); // which vacancy's details are open
@@ -59,6 +66,7 @@ export default function Vacancies() {
     setFunctions('Atender consultas y requerimientos del área de ventas.\nGestionar procesos internos y seguimiento de tareas.\nSeguimiento de clientes para maximizar ventas.\nCumplir metas y reportar resultados.');
     setRequirements('Experiencia previa o no en el área (preferible).\nManejo básico de herramientas digitales.\nExcelente comunicación y capacidad de resolución.\nResponsable, puntual y orientado a resultados.\nIndispensable excelente ortografía.');
     setOffers('Sueldo competitivo de $20.000 a $30.000\nCapacitación inicial y continua.\nOportunidad de crecimiento dentro de la empresa.\nCrecimiento profesional con capacitaciones externas constantes.');
+    setTestTemplateId(DEFAULT_TEST_ID);
   };
 
   const openEditModal = (vacancy: any) => {
@@ -70,6 +78,7 @@ export default function Vacancies() {
     setFunctions(vacancy.functions || 'Atender consultas y requerimientos del área.\nGestionar procesos internos y seguimiento de tareas.\nCumplir metas y reportar resultados.');
     setRequirements(vacancy.requirements || 'Experiencia previa en el área (preferible).\nManejo básico de herramientas digitales.\nExcelente comunicación y capacidad de resolución.\nResponsable, puntual y orientado a resultados.');
     setOffers(vacancy.offers || 'Sueldo base competitivo.\nCapacitación inicial y continua.\nOportunidad de crecimiento dentro de la empresa.');
+    setTestTemplateId(vacancyTestId(vacancy));
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -85,7 +94,8 @@ export default function Vacancies() {
           schedule,
           functions,
           requirements,
-          offers
+          offers,
+          testTemplateId
         });
         setIsEditing(null);
       } else {
@@ -99,6 +109,7 @@ export default function Vacancies() {
           functions,
           requirements,
           offers,
+          testTemplateId,
           active: true,
           createdAt: serverTimestamp()
         });
@@ -192,6 +203,17 @@ export default function Vacancies() {
                       <span>{vacancy.schedule}</span>
                     </>
                   )}
+                  {!testsLoading && (
+                    <Link
+                      to={`/forms/tests/${vacancyTestId(vacancy)}`}
+                      onClick={e => e.stopPropagation()}
+                      title="Test presencial que se aplica a los candidatos de esta vacante — clic para verlo o editarlo"
+                      className={`inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-full transition-colors ${testName(vacancyTestId(vacancy)) ? 'bg-violet-50 text-violet-700 hover:bg-violet-100' : 'bg-amber-50 text-amber-700 hover:bg-amber-100'}`}
+                    >
+                      <FlaskConical className="w-3 h-3 mr-1" />
+                      {testName(vacancyTestId(vacancy)) ?? 'Test eliminado: elige otro'}
+                    </Link>
+                  )}
                 </div>
               </div>
             </div>
@@ -273,7 +295,7 @@ export default function Vacancies() {
                   </ul>
                 </div>
                 <div className="md:col-span-3 flex flex-wrap gap-3 justify-between items-center pt-3 border-t border-slate-100">
-                  <span className="text-xs text-slate-400">📍 {vacancy.location || '—'}  ·  🕒 {vacancy.schedule || '—'}</span>
+                  <span className="text-xs text-slate-400">📍 {vacancy.location || '—'}  ·  🕒 {vacancy.schedule || '—'}  ·  🧪 {testName(vacancyTestId(vacancy)) ?? 'Test eliminado'}</span>
                   <button
                     onClick={() => openEditModal(vacancy)}
                     className="flex items-center px-4 py-2 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-sm"
@@ -357,6 +379,37 @@ export default function Vacancies() {
                     placeholder="Ej. 9:00AM A 6:00PM"
                   />
                 </div>
+              </div>
+
+              <div className="p-4 bg-violet-50/60 border border-violet-100 rounded-2xl">
+                <label htmlFor="vacancy-test" className="flex items-center text-sm font-semibold text-slate-700 mb-1.5">
+                  <FlaskConical className="w-4 h-4 mr-1.5 text-violet-600" /> Test presencial de esta vacante
+                </label>
+                <select
+                  id="vacancy-test"
+                  className="w-full p-3 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-violet-500 transition-all outline-none"
+                  value={testTemplateId}
+                  onChange={(e) => setTestTemplateId(e.target.value)}
+                  disabled={testsLoading}
+                >
+                  {testsLoading && <option value={testTemplateId}>Cargando tests…</option>}
+                  {!testsLoading && !testName(testTemplateId) && (
+                    <option value={testTemplateId}>⚠ Test eliminado — elige otro</option>
+                  )}
+                  {templates.map(t => (
+                    <option key={t.id} value={t.id}>
+                      {t.name}{t.id === DEFAULT_TEST_ID ? ' (general)' : ''} · {t.questions.length} preguntas
+                    </option>
+                  ))}
+                </select>
+                <p className="text-xs text-slate-500 mt-2">
+                  Es el test que se aplica en persona a los candidatos de esta vacante: sus preguntas y lo que la IA evalúa en ellas.{' '}
+                  {testName(testTemplateId) && (
+                    <a href={`/forms/tests/${testTemplateId}`} target="_blank" rel="noopener noreferrer" className="font-bold text-violet-600 hover:underline">Ver o editar este test ↗</a>
+                  )}
+                  {testName(testTemplateId) && ' · '}
+                  <a href="/forms/tests/new" target="_blank" rel="noopener noreferrer" className="font-bold text-violet-600 hover:underline">Crear un test nuevo ↗</a>
+                </p>
               </div>
 
               <div>

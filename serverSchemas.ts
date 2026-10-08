@@ -74,12 +74,15 @@ export const scoreStage2Schema = z.object({
   force: z.boolean().catch(false).default(false), // only honored for recruiter callers
 });
 
-/** POST /api/evaluate-test — `questions` is deliberately unvalidated: the handler
- * already tolerates any shape (non-arrays become []). */
+/** POST /api/evaluate-test — `questions` is deliberately unvalidated: the handler only
+ * reads it to label answers whose question left the test, and tolerates any shape.
+ * `testTemplateId` is the test the candidate had in hand; a junk value is dropped (the
+ * server then uses the vacancy's test) instead of failing a finished test. */
 export const evaluateTestSchema = z.object({
   applicationId: docIdField('applicationId inválido'),
   answers: answersField,
   questions: z.unknown().optional(),
+  testTemplateId: z.string().max(200).refine(v => !v.includes('/')).optional().catch(undefined),
   force: z.boolean().catch(false).default(false),
 });
 

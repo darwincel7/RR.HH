@@ -1,20 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
-import { Loader2, Save, FileText, CheckCircle, Plus, Trash2, ArrowUp, ArrowDown, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
-import { masterTestQuestions } from '../data/testQuestions';
+import { Link, useSearchParams } from 'react-router-dom';
+import { collection, doc, getDoc, onSnapshot, setDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { db, auth } from '../lib/firebase';
+import { Loader2, Save, CheckCircle, Plus, Trash2, ChevronDown, ChevronUp, Copy, Pencil, Briefcase, AlertTriangle } from 'lucide-react';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
-import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
-import { CSS } from '@dnd-kit/utilities';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import QuestionCard from '../components/QuestionCard';
+import { useTestTemplates } from '../lib/useTestTemplates';
+import { DEFAULT_TEST_ID, TEST_TEMPLATES_COLLECTION, vacanciesByTest, type TestQuestion, type TestTemplate } from '../lib/testTemplates';
 
-type QuestionType = 'text' | 'textarea' | 'multiple_choice' | 'scale' | 'multiple_selection';
-
-interface Question {
-  id: string;
-  text: string;
-  type: QuestionType;
-  options?: string[];
-}
+type Question = TestQuestion;
 
 interface ScorecardSettings {
   recommendedQuestions: string[];
@@ -43,132 +38,31 @@ const defaultScorecard: ScorecardSettings = {
   metrics: ['Puntualidad', 'Presentación personal', 'Contacto visual', 'Claridad al hablar', 'Energía', 'Cortesía y escucha activa']
 };
 
-interface SortableQuestionProps {
-  id: string;
-  question: Question;
-  index: number;
-  form: 'stage2' | 'test';
-  total: number;
-  updateQuestion: (form: 'stage2' | 'test', index: number, field: keyof Question, value: any) => void;
-  removeQuestion: (form: 'stage2' | 'test', index: number) => void;
-}
+const DEFAULT_STAGE2_QUESTIONS: Question[] = [
+  { id: 'q1', text: 'Cuéntanos más sobre tu experiencia previa relevante para este puesto.', type: 'textarea' },
+  { id: 'q2', text: 'Describe una situación de conflicto en el trabajo y cómo la resolviste.', type: 'textarea' },
+  { id: 'q3', text: 'Expectativa Salarial (Mensual)', type: 'text' },
+  { id: 'q4', text: 'Disponibilidad para iniciar', type: 'text' }
+];
 
-const SortableQuestion: React.FC<SortableQuestionProps> = ({ id, question: q, index, form, total, updateQuestion, removeQuestion }) => {
-  const {
-    attributes,
-    listeners,
-    setNodeRef,
-    transform,
-    transition,
-    isDragging,
-  } = useSortable({ id });
-
-  const style = {
-    transform: CSS.Transform.toString(transform),
-    transition,
-    opacity: isDragging ? 0.4 : 1,
-    zIndex: isDragging ? 10 : 1,
-  };
-
-  return (
-    <div ref={setNodeRef} style={style} className="p-4 border border-slate-200 rounded-xl bg-white space-y-3 relative group">
-      <div className="flex justify-between items-start gap-4">
-        {/* Drag Handle */}
-        <div {...attributes} {...listeners} className="mt-1 cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-500">
-          <GripVertical className="w-5 h-5" />
-        </div>
-        
-        <div className="flex-1 space-y-3">
-          <div>
-            <label className="block text-xs font-bold text-slate-500 mb-1">Pregunta {index + 1}</label>
-            <textarea
-              className="w-full p-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-              rows={2}
-              value={q.text}
-              onChange={e => updateQuestion(form, index, 'text', e.target.value)}
-            />
-          </div>
-          <div className="flex gap-4">
-            <div className="w-full md:w-1/2">
-              <label className="block text-xs font-bold text-slate-500 mb-1">Tipo de respuesta</label>
-              <select
-                className="w-full p-2 border border-slate-300 rounded-lg text-sm bg-white"
-                value={q.type}
-                onChange={e => updateQuestion(form, index, 'type', e.target.value as QuestionType)}
-              >
-                <option value="text">Texto corto</option>
-                <option value="textarea">Texto largo (Párrafo)</option>
-                <option value="multiple_choice">Opción múltiple</option>
-                <option value="multiple_selection">Selección múltiple (Casillas)</option>
-                <option value="scale">Escala (1 al 5)</option>
-              </select>
-            </div>
-          </div>
-
-          {(q.type === 'multiple_choice' || q.type === 'multiple_selection') && (
-            <div className="mt-3 bg-slate-50 p-3 rounded-lg border border-slate-100">
-              <label className="block text-xs font-bold text-slate-500 mb-2">Opciones de Respuesta</label>
-              <div className="space-y-2">
-                {(q.options || []).map((opt, optIndex) => (
-                  <div key={optIndex} className="flex items-center gap-2">
-                    <div className="w-4 h-4 rounded-full border-2 border-slate-300 flex-shrink-0"></div>
-                    <input
-                      type="text"
-                      className="flex-1 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                      value={opt}
-                      onChange={e => {
-                        const newOpts = [...(q.options || [])];
-                        newOpts[optIndex] = e.target.value;
-                        updateQuestion(form, index, 'options', newOpts);
-                      }}
-                      placeholder={`Opción ${optIndex + 1}`}
-                    />
-                    <button
-                      onClick={() => {
-                        const newOpts = [...(q.options || [])];
-                        newOpts.splice(optIndex, 1);
-                        updateQuestion(form, index, 'options', newOpts);
-                      }}
-                      className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md transition-colors"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  onClick={() => {
-                    const newOpts = [...(q.options || []), 'Nueva opción'];
-                    updateQuestion(form, index, 'options', newOpts);
-                  }}
-                  className="text-sm font-bold text-blue-600 hover:text-blue-700 flex items-center mt-2 px-2 py-1 hover:bg-blue-50 rounded-md transition-colors"
-                >
-                  <Plus className="w-4 h-4 mr-1" /> Añadir Opción
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-        
-        {/* Actions */}
-        <div className="flex flex-col gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button onClick={() => removeQuestion(form, index)} className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-md mt-2">
-            <Trash2 className="w-4 h-4" />
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+type Section = 'stage2' | 'tests' | 'scorecard';
 
 export default function FormsSettings() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'stage2' | 'test' | 'scorecard' | null>(null);
+  // ?seccion=tests opens the tests library (where the test editor's "Volver" lands).
+  const [expandedSection, setExpandedSection] = useState<Section | null>(() => {
+    const s = searchParams.get('seccion');
+    return s === 'stage2' || s === 'tests' || s === 'scorecard' ? s : null;
+  });
 
   const [stage2Questions, setStage2Questions] = useState<Question[]>([]);
-  const [testQuestions, setTestQuestions] = useState<Question[]>([]);
   const [scorecard, setScorecard] = useState<ScorecardSettings>(defaultScorecard);
+
+  const { templates, loading: testsLoading, error: testsError } = useTestTemplates();
+  const [vacancies, setVacancies] = useState<any[]>([]);
 
   useEffect(() => {
     async function fetchSettings() {
@@ -190,26 +84,7 @@ export default function FormsSettings() {
               { id: 'q4', text: data.stage2Form.q4 || '', type: 'text' }
             ]);
           } else {
-            setStage2Questions([
-              { id: 'q1', text: 'Cuéntanos más sobre tu experiencia previa relevante para este puesto.', type: 'textarea' },
-              { id: 'q2', text: 'Describe una situación de conflicto en el trabajo y cómo la resolviste.', type: 'textarea' },
-              { id: 'q3', text: 'Expectativa Salarial (Mensual)', type: 'text' },
-              { id: 'q4', text: 'Disponibilidad para iniciar', type: 'text' }
-            ]);
-          }
-
-          // Handle Test Form
-          if (data.testQuestions && Array.isArray(data.testQuestions) && !data.testQuestions.some((q: any) => q.id === 'C1')) {
-            setTestQuestions(data.testQuestions);
-          } else {
-            // Force load the new 62 question test from the database/master list since it's updated
-            const mappedQuestions = masterTestQuestions.map(q => ({
-              id: q.id,
-              text: q.text,
-              type: q.type,
-              options: q.options || undefined
-            }));
-            setTestQuestions(mappedQuestions);
+            setStage2Questions(DEFAULT_STAGE2_QUESTIONS);
           }
 
           // Handle Scorecard
@@ -223,19 +98,7 @@ export default function FormsSettings() {
           }
         } else {
           // Defaults if no document exists
-          setStage2Questions([
-            { id: 'q1', text: 'Cuéntanos más sobre tu experiencia previa relevante para este puesto.', type: 'textarea' },
-            { id: 'q2', text: 'Describe una situación de conflicto en el trabajo y cómo la resolviste.', type: 'textarea' },
-            { id: 'q3', text: 'Expectativa Salarial (Mensual)', type: 'text' },
-            { id: 'q4', text: 'Disponibilidad para iniciar', type: 'text' }
-          ]);
-          const mappedQuestions = masterTestQuestions.map(q => ({
-            id: q.id,
-            text: q.text,
-            type: q.type,
-            options: q.options || undefined
-          }));
-          setTestQuestions(mappedQuestions);
+          setStage2Questions(DEFAULT_STAGE2_QUESTIONS);
         }
       } catch (error) {
         console.error("Error fetching form settings:", error);
@@ -246,14 +109,24 @@ export default function FormsSettings() {
     fetchSettings();
   }, []);
 
+  // LIVE vacancies: which ones use each test (a test in use can't be deleted).
+  useEffect(() => {
+    const unsub = onSnapshot(collection(db, 'vacancies'),
+      snap => setVacancies(snap.docs.map(d => ({ ...d.data(), id: d.id }))),
+      err => console.error('Error cargando vacantes:', err));
+    return () => unsub();
+  }, []);
+  const usage = vacanciesByTest(vacancies);
+
   const handleSave = async () => {
     setSaving(true);
     setSuccess(false);
     try {
-      // Create a clean payload with no undefined values to prevent Firestore crashes
+      // Create a clean payload with no undefined values to prevent Firestore crashes.
+      // The test presencial is no longer saved here: each test is its own document
+      // (test_templates), edited on its own page.
       const payload = JSON.parse(JSON.stringify({
         stage2Questions,
-        testQuestions,
         scorecard
       }));
       
@@ -270,32 +143,16 @@ export default function FormsSettings() {
 
   const generateId = () => Math.random().toString(36).substr(2, 9);
 
-  const addQuestion = (form: 'stage2' | 'test') => {
-    const newQ: Question = { id: generateId(), text: 'Nueva pregunta', type: 'text' };
-    if (form === 'stage2') {
-      setStage2Questions([...stage2Questions, newQ]);
-    } else {
-      setTestQuestions([...testQuestions, newQ]);
-    }
+  const addStage2Question = () => {
+    setStage2Questions([...stage2Questions, { id: generateId(), text: 'Nueva pregunta', type: 'text' }]);
   };
 
-  const removeQuestion = (form: 'stage2' | 'test', index: number) => {
-    if (form === 'stage2') {
-      const newQs = [...stage2Questions];
-      newQs.splice(index, 1);
-      setStage2Questions(newQs);
-    } else {
-      const newQs = [...testQuestions];
-      newQs.splice(index, 1);
-      setTestQuestions(newQs);
-    }
+  const removeStage2Question = (id: string) => {
+    setStage2Questions(stage2Questions.filter(q => q.id !== id));
   };
 
-  const updateQuestion = (form: 'stage2' | 'test', index: number, field: keyof Question, value: any) => {
-    const qs = form === 'stage2' ? [...stage2Questions] : [...testQuestions];
-    qs[index] = { ...qs[index], [field]: value };
-    if (form === 'stage2') setStage2Questions(qs);
-    else setTestQuestions(qs);
+  const updateStage2Question = (id: string, patch: Partial<Question>) => {
+    setStage2Questions(stage2Questions.map(q => (q.id === id ? { ...q, ...patch } : q)));
   };
 
   const addScorecardItem = (field: keyof ScorecardSettings) => {
@@ -349,21 +206,35 @@ export default function FormsSettings() {
     </div>
   );
 
-  const handleDragEnd = (event: DragEndEvent, form: 'stage2' | 'test') => {
+  const handleStage2DragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
-    if (!over) return;
+    if (!over || active.id === over.id) return;
+    const oldIndex = stage2Questions.findIndex(item => item.id === active.id);
+    const newIndex = stage2Questions.findIndex(item => item.id === over.id);
+    if (oldIndex < 0 || newIndex < 0) return;
+    setStage2Questions(arrayMove(stage2Questions, oldIndex, newIndex));
+  };
 
-    if (active.id !== over.id) {
-      const items = form === 'stage2' ? [...stage2Questions] : [...testQuestions];
-      const oldIndex = items.findIndex(item => item.id === active.id);
-      const newIndex = items.findIndex(item => item.id === over.id);
-      
-      const newItems = arrayMove(items, oldIndex, newIndex);
-      if (form === 'stage2') {
-        setStage2Questions(newItems);
-      } else {
-        setTestQuestions(newItems);
-      }
+  // "Deleting" a test archives it: candidates who already took it keep their results,
+  // and a re-evaluation still grades them with that test's criteria.
+  const deleteTest = async (t: TestTemplate) => {
+    if (t.id === DEFAULT_TEST_ID) return;
+    const users = usage.get(t.id) || [];
+    if (users.length > 0) {
+      const names = users.map(v => `• ${v.title || 'Vacante sin título'}`).join('\n');
+      alert(`No se puede eliminar "${t.name}" porque ${users.length === 1 ? 'esta vacante lo usa' : 'estas vacantes lo usan'}:\n\n${names}\n\nElige otro test en ${users.length === 1 ? 'esa vacante' : 'esas vacantes'} (Vacantes → Editar) y vuelve a intentarlo.`);
+      return;
+    }
+    if (!window.confirm(`¿Eliminar el test "${t.name}"?\n\nYa no se podrá elegir en las vacantes. Los candidatos que ya lo hicieron conservan sus resultados.`)) return;
+    try {
+      await updateDoc(doc(db, TEST_TEMPLATES_COLLECTION, t.id), {
+        archived: true,
+        archivedAt: serverTimestamp(),
+        archivedBy: auth.currentUser?.displayName || auth.currentUser?.email || 'Equipo',
+      });
+    } catch (error) {
+      console.error('Error eliminando el test:', error);
+      alert('No se pudo eliminar el test. Inténtalo de nuevo.');
     }
   };
 
@@ -378,13 +249,20 @@ export default function FormsSettings() {
     })
   );
 
+  // The open section lives in the URL too, so coming back from a test (Atrás) finds it open.
+  const toggle = (section: Section) => {
+    const next = expandedSection === section ? null : section;
+    setExpandedSection(next);
+    setSearchParams(next ? { seccion: next } : {}, { replace: true });
+  };
+
   if (loading) {
     return <div className="flex items-center justify-center h-64"><Loader2 className="w-8 h-8 animate-spin text-blue-600" /></div>;
   }
 
   return (
     <div className="space-y-6 max-w-4xl mx-auto">
-      <div className="flex justify-between items-center">
+      <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Formularios y Evaluaciones</h1>
           <p className="text-slate-500">Configura las preguntas y evaluaciones de cada etapa del proceso.</p>
@@ -392,7 +270,8 @@ export default function FormsSettings() {
         <button
           onClick={handleSave}
           disabled={saving}
-          className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400"
+          title="Guarda el formulario de la etapa 2 y el scorecard. Cada test presencial se guarda en su propia página."
+          className="flex items-center justify-center px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors disabled:bg-blue-400"
         >
           {saving ? <Loader2 className="w-5 h-5 mr-2 animate-spin" /> : <Save className="w-5 h-5 mr-2" />}
           Guardar Cambios
@@ -410,11 +289,11 @@ export default function FormsSettings() {
         {/* Stage 2 Form (Etapa 2) */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
           <button 
-            onClick={() => setExpandedSection(expandedSection === 'stage2' ? null : 'stage2')}
+            onClick={() => toggle('stage2')}
             className="w-full p-4 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
           >
             <div className="flex items-center gap-4">
-              <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold">2</div>
+              <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center font-bold shrink-0">2</div>
               <div>
                 <h2 className="text-lg font-bold text-slate-800">Formulario de Filtro (Etapa 2)</h2>
                 <p className="text-sm text-slate-500">Enviado automáticamente al mover a "Etapa 2". Contiene {stage2Questions.length} preguntas.</p>
@@ -426,23 +305,20 @@ export default function FormsSettings() {
           {expandedSection === 'stage2' && (
             <div className="p-4 border-t border-slate-200 bg-slate-50">
               <div className="flex justify-end mb-4">
-                <button onClick={() => addQuestion('stage2')} className="flex items-center text-sm font-bold text-blue-600 hover:text-blue-700 bg-blue-50 px-3 py-1.5 rounded-lg">
+                <button onClick={addStage2Question} className="flex items-center text-sm font-bold text-blue-600 hover:text-blue-700 bg-blue-50 px-3 py-1.5 rounded-lg">
                   <Plus className="w-4 h-4 mr-1" /> Añadir Pregunta
                 </button>
               </div>
               <div className="space-y-3">
-                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(e) => handleDragEnd(e, 'stage2')}>
+                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleStage2DragEnd}>
                   <SortableContext items={stage2Questions.map(q => q.id)} strategy={verticalListSortingStrategy}>
                     {stage2Questions.map((q, i) => (
-                      <SortableQuestion
+                      <QuestionCard
                         key={q.id}
-                        id={q.id}
                         question={q}
                         index={i}
-                        form="stage2"
-                        total={stage2Questions.length}
-                        updateQuestion={updateQuestion}
-                        removeQuestion={removeQuestion}
+                        onChange={patch => updateStage2Question(q.id, patch)}
+                        onRemove={() => removeStage2Question(q.id)}
                       />
                     ))}
                   </SortableContext>
@@ -453,48 +329,88 @@ export default function FormsSettings() {
           )}
         </div>
 
-        {/* Test Form (Etapa 3) */}
+        {/* Tests presenciales: a library — each vacancy picks the one its candidates take */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
           <button 
-            onClick={() => setExpandedSection(expandedSection === 'test' ? null : 'test')}
+            onClick={() => toggle('tests')}
             className="w-full p-4 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
           >
             <div className="flex items-center gap-4">
-              <div className="w-8 h-8 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center font-bold">3</div>
+              <div className="w-8 h-8 rounded-full bg-violet-100 text-violet-600 flex items-center justify-center font-bold shrink-0">3</div>
               <div>
-                <h2 className="text-lg font-bold text-slate-800">Test de Conocimientos (Etapa 3)</h2>
-                <p className="text-sm text-slate-500">Se aplica en persona: copia el link del test desde el perfil del candidato. Contiene {testQuestions.length} preguntas.</p>
+                <h2 className="text-lg font-bold text-slate-800">Tests Presenciales</h2>
+                <p className="text-sm text-slate-500">
+                  Cada vacante elige su test, con sus propias preguntas y criterios de evaluación. Se aplican en persona: abre o copia el link desde el perfil del candidato.
+                  {!testsLoading && ` ${templates.length} ${templates.length === 1 ? 'test' : 'tests'}.`}
+                </p>
               </div>
             </div>
-            {expandedSection === 'test' ? <ChevronUp className="w-5 h-5 text-slate-400" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
+            {expandedSection === 'tests' ? <ChevronUp className="w-5 h-5 text-slate-400 shrink-0" /> : <ChevronDown className="w-5 h-5 text-slate-400 shrink-0" />}
           </button>
-          
-          {expandedSection === 'test' && (
-            <div className="p-4 border-t border-slate-200 bg-slate-50">
-              <div className="flex justify-end mb-4">
-                <button onClick={() => addQuestion('test')} className="flex items-center text-sm font-bold text-violet-600 hover:text-violet-700 bg-violet-50 px-3 py-1.5 rounded-lg">
-                  <Plus className="w-4 h-4 mr-1" /> Añadir Pregunta
-                </button>
+
+          {expandedSection === 'tests' && (
+            <div className="p-4 border-t border-slate-200 bg-slate-50 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs text-slate-500 max-w-xl">
+                  Crea un test por posición (técnicos, caja, redes…) o duplica uno existente para adaptarlo. Luego elígelo en <Link to="/vacancies" className="font-bold text-violet-600 hover:underline">Vacantes → Editar</Link>.
+                </p>
+                <Link to="/forms/tests/new" className="flex items-center text-sm font-bold text-violet-600 hover:text-violet-700 bg-violet-50 px-3 py-1.5 rounded-lg">
+                  <Plus className="w-4 h-4 mr-1" /> Nuevo test
+                </Link>
               </div>
-              <div className="space-y-3">
-                <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(e) => handleDragEnd(e, 'test')}>
-                  <SortableContext items={testQuestions.map(q => q.id)} strategy={verticalListSortingStrategy}>
-                    {testQuestions.map((q, i) => (
-                      <SortableQuestion
-                        key={q.id}
-                        id={q.id}
-                        question={q}
-                        index={i}
-                        form="test"
-                        total={testQuestions.length}
-                        updateQuestion={updateQuestion}
-                        removeQuestion={removeQuestion}
-                      />
-                    ))}
-                  </SortableContext>
-                </DndContext>
-                {testQuestions.length === 0 && <p className="text-center text-slate-400 py-4 text-sm">No hay preguntas configuradas.</p>}
-              </div>
+
+              {testsError && (
+                <div className="bg-rose-50 text-rose-700 p-3 rounded-lg text-sm flex items-start">
+                  <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 shrink-0" /> {testsError}
+                </div>
+              )}
+              {testsLoading ? (
+                <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-violet-600" /></div>
+              ) : (
+                templates.map(t => {
+                  const isDefault = t.id === DEFAULT_TEST_ID;
+                  const users = usage.get(t.id) || [];
+                  return (
+                    <div key={t.id} className="bg-white border border-slate-200 rounded-xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="font-bold text-slate-800">{t.name}</h3>
+                          {isDefault && (
+                            <span className="text-[10px] font-bold uppercase tracking-wider bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full" title="Se aplica en las vacantes que no tienen otro test elegido">
+                              General · por defecto
+                            </span>
+                          )}
+                        </div>
+                        {t.description && <p className="text-sm text-slate-500 mt-0.5">{t.description}</p>}
+                        <p className="text-xs text-slate-500 mt-1">
+                          {t.questions.length} preguntas · {t.dimensions.length} {t.dimensions.length === 1 ? 'criterio' : 'criterios'} de evaluación
+                        </p>
+                        <p className="text-xs text-slate-500 mt-1 flex items-start gap-1">
+                          <Briefcase className="w-3.5 h-3.5 mt-px shrink-0" />
+                          <span>
+                            {users.length > 0
+                              ? <>Lo usa{users.length === 1 ? '' : 'n'}: <span className="font-medium text-slate-700">{users.map(v => v.title || 'Vacante sin título').join(', ')}</span></>
+                              : isDefault ? 'Se aplica en las vacantes que no eligen otro test.' : 'Ninguna vacante lo usa todavía.'}
+                          </span>
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap gap-2 shrink-0">
+                        <Link to={`/forms/tests/${t.id}`} className="flex items-center text-xs font-bold text-white bg-violet-600 hover:bg-violet-700 px-3 py-1.5 rounded-lg">
+                          <Pencil className="w-3.5 h-3.5 mr-1" /> Editar
+                        </Link>
+                        <Link to={`/forms/tests/new?from=${encodeURIComponent(t.id)}`} className="flex items-center text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-lg" title="Crear un test nuevo a partir de este">
+                          <Copy className="w-3.5 h-3.5 mr-1" /> Duplicar
+                        </Link>
+                        {!isDefault && (
+                          <button onClick={() => deleteTest(t)} className="flex items-center text-xs font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 px-3 py-1.5 rounded-lg">
+                            <Trash2 className="w-3.5 h-3.5 mr-1" /> Eliminar
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           )}
         </div>
@@ -502,11 +418,11 @@ export default function FormsSettings() {
         {/* Scorecard (Etapa 4) */}
         <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
           <button 
-            onClick={() => setExpandedSection(expandedSection === 'scorecard' ? null : 'scorecard')}
+            onClick={() => toggle('scorecard')}
             className="w-full p-4 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
           >
             <div className="flex items-center gap-4">
-              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold">4</div>
+              <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold shrink-0">4</div>
               <div>
                 <h2 className="text-lg font-bold text-slate-800">Scorecard de Entrevista (Etapa 4)</h2>
                 <p className="text-sm text-slate-500">Guía de evaluación utilizada por el reclutador durante la entrevista presencial/virtual.</p>

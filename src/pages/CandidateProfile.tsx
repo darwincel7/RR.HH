@@ -5,12 +5,14 @@ import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, FlaskConical } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar, { PhotoLightbox } from '../components/CandidateAvatar';
+import { useTestTemplates } from '../lib/useTestTemplates';
+import { DEFAULT_TEST_ID, testDimensionScores, vacancyTestId } from '../lib/testTemplates';
 
 /** Reads an image file and downsizes it in the browser (≤1200px JPEG) before upload:
  * keeps the request small and lets the browser decode formats like HEIC for us. */
@@ -82,6 +84,9 @@ export default function CandidateProfile() {
   const initedAppRef = useRef<string | null>(null);
   const scorecardTemplateRef = useRef<any>(null);
   const vacTitlesRef = useRef<Record<string, string>>({});
+  // vacancyId → the test presencial it applies (to tell the recruiter which test the link opens).
+  const vacTestRef = useRef<Record<string, string>>({});
+  const { templates: testTemplates } = useTestTemplates();
 
   // A fresh, empty scorecard for an application that has none yet. Used when loading /
   // switching applications so one candidate's scorecard NEVER bleeds into another.
@@ -115,7 +120,10 @@ export default function CandidateProfile() {
       } catch { /* scorecard es opcional */ }
       try {
         const vsnap = await getDocs(collection(db, 'vacancies'));
-        vsnap.docs.forEach(d => { vacTitlesRef.current[d.id] = d.data().title; });
+        vsnap.docs.forEach(d => {
+          vacTitlesRef.current[d.id] = d.data().title;
+          vacTestRef.current[d.id] = vacancyTestId(d.data());
+        });
       } catch { /* títulos opcionales */ }
       if (cancelled) return;
 
@@ -434,12 +442,18 @@ export default function CandidateProfile() {
     const url = `${window.location.origin}/test/${application.id}`;
     try {
       await navigator.clipboard.writeText(url);
-      alert('Link de test copiado');
+      alert('Link del test presencial copiado');
     } catch {
       // Clipboard can be blocked (permissions / insecure context) — show the link to copy manually.
       window.prompt('Copia este link de test manualmente:', url);
     }
   };
+
+  // The test presencial this application's link opens today: the one its vacancy chose.
+  const currentTestId = application ? (vacTestRef.current[application.vacancyId] || DEFAULT_TEST_ID) : DEFAULT_TEST_ID;
+  const currentTestName = testTemplates.find(t => t.id === currentTestId)?.name;
+  // Took another test than the vacancy uses now (it switched tests after they did it).
+  const tookOtherTest = !!application?.testResults?.testTemplateId && application.testResults.testTemplateId !== currentTestId;
 
   const [reEvaluatingTest, setReEvaluatingTest] = useState(false);
   const [reEvaluatingStage2, setReEvaluatingStage2] = useState(false);
@@ -449,12 +463,13 @@ export default function CandidateProfile() {
     if (!application?.testResults?.answers) return;
     setReEvaluatingTest(true);
     try {
+      // The server re-grades the stored answers with the criteria of the test the candidate
+      // took, and saves the result itself — the live listener above shows it right away.
       const response = await apiFetch('/api/evaluate-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           applicationId: application.id,
-          questions: Object.keys(application.testResults.answers),
           answers: application.testResults.answers,
           force: true,
         })
@@ -463,36 +478,11 @@ export default function CandidateProfile() {
       if (!response.ok) {
         throw new Error('Error en la evaluación de IA');
       }
-
-      const text = await response.text();
-      let aiEvaluation;
-      try {
-        aiEvaluation = JSON.parse(text);
-      } catch (e) {
+      const data = await response.json().catch(() => null);
+      if (!data?.testResults) {
         throw new Error('Respuesta inválida del servidor al evaluar. Intenta de nuevo.');
       }
-      
-      const updatedTestResults = {
-        ...application.testResults,
-        score: aiEvaluation.score,
-        customer_service_score: aiEvaluation.customer_service_score,
-        practical_intelligence_score: aiEvaluation.practical_intelligence_score,
-        behavioral_fit_score: aiEvaluation.behavioral_fit_score,
-        stability_responsibility_score: aiEvaluation.stability_responsibility_score,
-        improvement_desire_score: aiEvaluation.improvement_desire_score,
-        orthography_score: aiEvaluation.orthography_score,
-        aiFeedback: aiEvaluation.justification,
-        redFlags: aiEvaluation.red_flags,
-        positiveSignals: aiEvaluation.positive_signals,
-        spellingMistakes: aiEvaluation.spelling_mistakes,
-        incorrectAnswers: aiEvaluation.incorrect_answers,
-        status: 'completed'
-      };
-
-      await updateDoc(doc(db, 'applications', application.id), {
-        testResults: updatedTestResults
-      });
-      setApplication({ ...application, testResults: updatedTestResults });
+      setApplication((prev: any) => (prev && prev.id === application.id ? { ...prev, testResults: data.testResults } : prev));
 
       alert('Test reevaluado con éxito');
     } catch (error) {
@@ -540,7 +530,7 @@ export default function CandidateProfile() {
   };
 
   const handleDeleteTest = async () => {
-    if (!application?.id || !window.confirm("¿Estás seguro de que quieres eliminar las respuestas del Test? El candidato tendrá que hacerlo de nuevo.")) return;
+    if (!application?.id || !window.confirm("¿Estás seguro de que quieres eliminar las respuestas del Test Presencial? El candidato tendrá que hacerlo de nuevo.")) return;
     
     try {
       await updateDoc(doc(db, 'applications', application.id), {
@@ -554,7 +544,7 @@ export default function CandidateProfile() {
         testResults: undefined,
         testSubmittedAt: undefined
       });
-      alert('Respuestas del Test eliminadas con éxito. El candidato puede usar el mismo link para volver a realizarlo.');
+      alert('Respuestas del Test Presencial eliminadas. El candidato puede usar el mismo link para volver a realizarlo (verá el test que tenga su vacante hoy).');
     } catch (error) {
       console.error("Error deleting test answers:", error);
       alert('Error al eliminar las respuestas del Test.');
@@ -932,11 +922,11 @@ export default function CandidateProfile() {
                   </div>
                 </div>
 
-                {/* Test Results */}
+                {/* Test presencial: the one its vacancy chose (Vacantes → Editar) */}
                 <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6 flex flex-col">
                   <div className="flex items-center justify-between mb-3 lg:mb-4">
                     <h3 className="text-[10px] lg:text-sm font-display font-bold text-slate-400 uppercase tracking-widest flex items-center">
-                      <FileText className="w-4 h-4 mr-2 text-violet-500" /> Resultados Test
+                      <FlaskConical className="w-4 h-4 mr-2 text-violet-500" /> Test Presencial
                     </h3>
                     {application?.testResults && (
                       <div className="flex gap-2">
@@ -963,48 +953,29 @@ export default function CandidateProfile() {
                   
                   {application?.testResults ? (
                     <div className="flex-1 flex flex-col">
+                      {application.testResults.testName && (
+                        <p className="text-[10px] lg:text-xs font-bold text-violet-700 mb-2 flex items-center" title="Test que respondió el candidato">
+                          <FileText className="w-3 h-3 mr-1 shrink-0" /> {application.testResults.testName}
+                        </p>
+                      )}
+                      {tookOtherTest && (
+                        <p className="text-[10px] lg:text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-2 mb-2">
+                          Su vacante ahora usa otro test{currentTestName ? ` (${currentTestName})` : ''}. Si quieres que haga ese, elimina este resultado y vuelve a abrirle el link.
+                        </p>
+                      )}
                       <div className="flex flex-col gap-2 mb-4">
                         <div className="flex items-center justify-between bg-violet-50 p-3 lg:p-4 rounded-xl lg:rounded-2xl border border-violet-100">
                           <span className="text-xs lg:text-sm font-bold text-violet-900">Puntuación IA</span>
                           <span className="text-xl lg:text-2xl font-black text-violet-600">{application.testResults.score}/100</span>
                         </div>
+                        {/* Each test is graded on its own criteria; older results keep their six. */}
                         <div className="grid grid-cols-2 gap-2">
-                          {application.testResults.customer_service_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Servicio al Cliente</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.customer_service_score}/20</span>
+                          {testDimensionScores(application.testResults).map(d => (
+                            <div key={d.id} className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
+                              <span className="text-[9px] font-bold text-slate-500">{d.name}</span>
+                              <span className="text-xs font-black text-slate-700">{d.score ?? '—'}/{d.max}</span>
                             </div>
-                          )}
-                          {application.testResults.practical_intelligence_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Inteligencia Práctica</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.practical_intelligence_score}/20</span>
-                            </div>
-                          )}
-                          {application.testResults.behavioral_fit_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Ajuste Conductual</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.behavioral_fit_score}/20</span>
-                            </div>
-                          )}
-                          {application.testResults.stability_responsibility_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Estabilidad y Resp.</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.stability_responsibility_score}/20</span>
-                            </div>
-                          )}
-                          {application.testResults.improvement_desire_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Deseo de Mejora</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.improvement_desire_score}/10</span>
-                            </div>
-                          )}
-                          {application.testResults.orthography_score !== undefined && (
-                            <div className="flex flex-col bg-slate-50 p-2 rounded-lg border border-slate-200">
-                              <span className="text-[9px] font-bold text-slate-500">Ortografía y Redacción</span>
-                              <span className="text-xs font-black text-slate-700">{application.testResults.orthography_score}/10</span>
-                            </div>
-                          )}
+                          ))}
                         </div>
                       </div>
                       
@@ -1061,7 +1032,7 @@ export default function CandidateProfile() {
                         <h4 className="text-[10px] font-bold text-slate-400 uppercase mb-2">Respuestas Originales</h4>
                         {Object.entries(application.testResults.answers).map(([qText, answer]: any, idx) => (
                           <div key={idx} className="bg-slate-50 p-2 lg:p-3 rounded-lg lg:rounded-xl border border-slate-100">
-                            <p className="text-[9px] lg:text-xs font-bold text-slate-400 mb-0.5">{qText.startsWith('q') ? `Pregunta ${qText}` : qText}</p>
+                            <p className="text-[9px] lg:text-xs font-bold text-slate-400 mb-0.5">{/^q_?[a-z0-9]+$/i.test(qText) ? `Pregunta ${qText}` : qText}</p>
                             <p className="text-xs lg:text-sm font-medium text-slate-800 whitespace-pre-wrap">
                               {Array.isArray(answer) ? answer.join(', ') : answer}
                             </p>
@@ -1075,12 +1046,29 @@ export default function CandidateProfile() {
                         <AlertTriangle className="w-6 h-6 lg:w-8 lg:h-8 text-slate-300" />
                       </div>
                       <p className="text-[10px] lg:text-sm font-medium text-slate-500">Test pendiente.</p>
-                      <button
-                        onClick={copyTestLink}
-                        className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
-                      >
-                        <Copy className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Copiar Link
-                      </button>
+                      {application && (
+                        <p className="text-[10px] lg:text-xs text-slate-500">
+                          Se aplicará: <span className="font-bold text-violet-700">{currentTestName || 'Test Presencial'}</span>
+                          <span className="block text-slate-400">(el test de su vacante)</span>
+                        </p>
+                      )}
+                      <div className="flex flex-wrap justify-center gap-2">
+                        <a
+                          href={application ? `/test/${application.id}` : undefined}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Abre el test en otra pestaña para que el candidato lo haga aquí mismo"
+                          className="flex items-center px-3 py-1.5 bg-violet-600 text-white text-[10px] lg:text-xs font-bold rounded-lg hover:bg-violet-700 transition-all shadow-sm"
+                        >
+                          <ExternalLink className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Abrir test
+                        </a>
+                        <button
+                          onClick={copyTestLink}
+                          className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
+                        >
+                          <Copy className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Copiar Link
+                        </button>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1504,7 +1492,7 @@ export default function CandidateProfile() {
                       <h4 className="font-bold text-sm text-violet-900">
                         Tests presenciales
                       </h4>
-                      <p className="text-xs text-slate-600 mt-1">Examen presencial que aplica el reclutador durante la entrevista. No se envía ningún mensaje ni link automático al candidato.</p>
+                      <p className="text-xs text-slate-600 mt-1">Examen presencial que aplica el reclutador durante la entrevista. Cada vacante tiene su test (Vacantes → Editar → Test presencial). No se envía ningún mensaje ni link automático al candidato: ábrelo o copia el link desde la tarjeta "Test Presencial" del perfil.</p>
                     </div>
                   </div>
                 </div>

@@ -29,13 +29,15 @@ Cada etapa filtra candidatos mediante puntuaciones de IA:
 
 1. **CV** → `/api/parse-cv` extrae y puntúa el currículum (0.1–5.0 ⭐).
 2. **Formulario Etapa 2** → `/api/score-stage2` evalúa estabilidad, integridad, ética y redacción (sobre 100).
-3. **Test situacional presencial** → `/api/evaluate-test` evalúa 6 dimensiones conductuales (sobre 100).
+3. **Test presencial** (uno por posición: cada vacante elige el suyo) → `/api/evaluate-test` lo
+   califica con los criterios de **ese** test (sobre 100). Ver [Tests presenciales por posición](#tests-presenciales-por-posición).
 4. **Ranking** combina todas las puntuaciones para la decisión final (contratar / descartar).
 
 ## Rutas principales
 
 - Públicas: `/careers`, `/apply/:vacancyId`, `/eval/:applicationId`, `/test/:applicationId`
-- Internas (requieren login): `/` (dashboard), `/vacancies`, `/candidates`, `/interviews`, `/forms`, `/settings`
+- Internas (requieren login): `/` (dashboard), `/vacancies`, `/candidates`, `/interviews`, `/forms`
+  (y `/forms/tests/:id`, el editor de cada test presencial), `/settings`
 
 ## Ejecutar localmente
 
@@ -88,6 +90,8 @@ error es silencioso y caro:
 | [`src/lib/navigation.test.ts`](src/lib/navigation.test.ts) | A dónde lleva "Atrás" cuando no hay historial (pestaña nueva, recarga) |
 | [`serverPhotoBackfill.test.ts`](serverPhotoBackfill.test.ts) | El orden en que se buscan las fotos de los candidatos existentes: ventas primero, más avanzados primero, nunca a quien ya se revisó |
 | [`serverCvPhoto.test.ts`](serverCvPhoto.test.ts) | Extraer la foto del CV: imágenes de PDF/Word/imagen, descarte de íconos y máscaras, recorte cuadrado centrado en la cara |
+| [`src/lib/testTemplates.test.ts`](src/lib/testTemplates.test.ts) | Tests presenciales por posición: qué test aplica cada vacante, que el candidato nunca reciba las respuestas esperadas, la validación del editor (pesos que suman 100, preguntas repetidas…) y que los resultados viejos se sigan leyendo |
+| [`serverTestEval.test.ts`](serverTestEval.test.ts) | Que la IA califique cada test con **sus** criterios, que la respuesta esperada quede fuera del bloque del candidato y que nadie pueda colar instrucciones en sus respuestas |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -147,6 +151,37 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
 > Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`). Se
 > publican solas al llegar a `main` (workflow *Deploy Firebase Rules*) o con
 > `npm run deploy:rules`.
+
+## Tests presenciales por posición
+
+El test que el candidato hace **en persona** ya no es uno solo: cada vacante elige el suyo,
+porque a un técnico, a un cajero y a un asesor de ventas se les evalúan cosas distintas.
+
+- **Biblioteca** (*Formularios → Tests Presenciales*): crear un test nuevo, **duplicar** uno
+  existente para adaptarlo a otra posición, editar o eliminar. Cada test muestra qué vacantes lo
+  usan; uno en uso no se puede eliminar, y "eliminar" en realidad **archiva** (los candidatos que
+  ya lo hicieron conservan sus resultados y se pueden reevaluar con sus criterios).
+- **Editor** (`/forms/tests/:id`): nombre, instrucciones que ve el candidato, **perfil buscado** y
+  **criterios de calificación con su peso** (suman 100) — es lo que la IA evalúa — y las
+  preguntas (arrastrar para ordenar, texto corto/largo, opción múltiple, casillas, escala 1–5).
+  Cada pregunta puede llevar una **respuesta esperada** (privada: el candidato nunca la ve; la IA
+  la usa para saber si acertó) y una sección.
+- **Vacante → test** (*Vacantes → Editar → Test presencial*): se guarda en la vacante como
+  `testTemplateId`. Las vacantes que no eligieron usan el **Test Presencial** general (el de
+  siempre, id `default`, que no se puede eliminar). La tarjeta de cada vacante muestra su test.
+- **Candidato**: el link `/test/<postulación>` (perfil → tarjeta *Test Presencial* → *Abrir test*
+  o *Copiar link*) carga el test de su vacante desde `/api/public/form-data/test/…`, que lo
+  resuelve en el servidor y **quita las respuestas esperadas**. El avance guardado en el
+  navegador es por test.
+- **Evaluación**: `/api/evaluate-test` arma el prompt y el esquema de Gemini con los criterios del
+  test ([`serverTestEval.ts`](serverTestEval.ts)) y guarda en `testResults` qué test se hizo
+  (`testTemplateId`, `testName`) y el puntaje por criterio (`dimensionScores`). *Reevaluar IA*
+  usa las respuestas guardadas y el test que el candidato hizo, no el que la vacante tenga hoy.
+
+Los tests viven en la colección `test_templates`, que **solo el equipo** puede leer (reglas de
+Firestore). El test general existe solo en código (más las preguntas que se hubieran
+personalizado en `settings/forms`) hasta que alguien lo edita y lo guarda: desde ahí es un
+documento más. La lógica compartida está en [`src/lib/testTemplates.ts`](src/lib/testTemplates.ts).
 
 ## Mensajería de WhatsApp: cola durable y propietario único
 
