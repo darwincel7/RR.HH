@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc, writeBatch } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc, writeBatch, documentId } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
@@ -132,28 +132,38 @@ export default function KanbanBoard() {
 
     // Listen to applications for this vacancy
     const q = query(collection(db, 'applications'), where('vacancyId', '==', vacancyId));
-    const unsubscribe = onSnapshot(q, async (snapshot) => {
+    const unsubscribe = onSnapshot(q, (snapshot) => {
       const apps = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id })) as any[];
       setApplications(apps);
-      
-      // Fetch candidate details for all apps
-      const candidateIds = [...new Set(apps.map(a => a.candidateId))];
-      const candidatesData: Record<string, any> = {};
-      
-      await Promise.all(candidateIds.map(async (cId) => {
-        if (!cId) return;
-        const cSnap = await getDoc(doc(db, 'candidates', cId));
-        if (cSnap.exists()) {
-          candidatesData[cId] = cSnap.data();
-        }
-      }));
-      
-      setCandidates(prev => ({ ...prev, ...candidatesData }));
       setLoading(false);
     });
 
     return () => unsubscribe();
   }, [vacancyId]);
+
+  // Candidate docs (photo, phone, CV…) — LIVE. A photo the background backfill or a
+  // colleague adds shows up on the card without reloading. One listener per 30 ids
+  // (Firestore's `in` limit); it used to re-read every candidate on each card move.
+  const candidateIdsKey = Array.from(new Set(applications.map(a => a.candidateId).filter(Boolean))).sort().join('|');
+  useEffect(() => {
+    const ids = candidateIdsKey ? candidateIdsKey.split('|') : [];
+    const unsubs: Array<() => void> = [];
+    for (let i = 0; i < ids.length; i += 30) {
+      const chunk = ids.slice(i, i + 30);
+      unsubs.push(onSnapshot(
+        query(collection(db, 'candidates'), where(documentId(), 'in', chunk)),
+        (snap) => {
+          setCandidates(prev => {
+            const next = { ...prev };
+            snap.docs.forEach(d => { next[d.id] = d.data(); });
+            return next;
+          });
+        },
+        (e) => console.error('candidates snapshot error:', e),
+      ));
+    }
+    return () => unsubs.forEach(u => u());
+  }, [candidateIdsKey]);
 
   // Changing the search clears the selection: otherwise cards selected under a
   // previous search stay silently selected while INVISIBLE, and a bulk move would
