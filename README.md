@@ -56,6 +56,7 @@ npm run dev                  # levanta Express + Vite en http://localhost:3000
 | `APP_URL` | URL pública donde se hospeda la app |
 | `GEMINI_MODEL` | *(Opcional)* Modelo de IA. El valor por defecto es una versión **preview** y Google las retira sin aviso: si la IA deja de responder, pon aquí el modelo vigente y reinicia — sin tocar código |
 | `CV_WORKER_TOKEN` | *(Opcional)* Secreto para que un ping programado externo vacíe la cola de CV (ver más abajo) |
+| `WA_SEND_HOURS` | *(Opcional)* Horario (hora de RD) en que salen los WhatsApp **automáticos**, p. ej. `8-20` (por defecto: 8:00 a. m. – 7:59 p. m.); `off` lo desactiva. El chat manual no se limita |
 
 > La configuración de Firebase vive en `firebase-applet-config.json`. La `apiKey` de Firebase
 > **no es un secreto** (es identificadora, no de autorización); la seguridad real la imponen
@@ -88,6 +89,12 @@ error es silencioso y caro:
 | [`src/lib/navigation.test.ts`](src/lib/navigation.test.ts) | A dónde lleva "Atrás" cuando no hay historial (pestaña nueva, recarga) |
 | [`serverPhotoBackfill.test.ts`](serverPhotoBackfill.test.ts) | El orden en que se buscan las fotos de los candidatos existentes: ventas primero, más avanzados primero, nunca a quien ya se revisó |
 | [`serverCvPhoto.test.ts`](serverCvPhoto.test.ts) | Extraer la foto del CV: imágenes de PDF/Word/imagen, descarte de íconos y máscaras, recorte cuadrado centrado en la cara |
+| [`src/lib/interviewScorecard.test.ts`](src/lib/interviewScorecard.test.ts) | El scorecard de entrevista: banco de preguntas compartido vs. respuestas de cada candidato — editar o quitar una pregunta nunca borra lo que alguien ya respondió |
+| [`serverInterviewEval.test.ts`](serverInterviewEval.test.ts) | Qué ve la IA de una entrevista (solo respuestas descritas, señales, métricas, contexto) y qué se guarda de su respuesta |
+| [`src/lib/candidateScore.test.ts`](src/lib/candidateScore.test.ts) | El puntaje total del Ranking: la entrevista cuenta una sola vez (entrevistador + IA) y un "sin puntuar" no resta |
+| [`src/lib/messageVariation.test.ts`](src/lib/messageVariation.test.ts) | Variaciones `{a\|b}` de las plantillas: un envío masivo no manda el mismo texto a todos, pero un reintento produce exactamente el mismo (no duplica) |
+| [`src/lib/sendWindow.test.ts`](src/lib/sendWindow.test.ts) / [`src/lib/whatsappPacing.test.ts`](src/lib/whatsappPacing.test.ts) | Horario de envío en hora de RD y la estimación de cuánto tardan en salir los mensajes de un movimiento masivo |
+| [`src/lib/whatsapp.automation.test.ts`](src/lib/whatsapp.automation.test.ts) | Lo que de verdad envía un cambio de etapa: redacción distinta por candidato pero idéntica en un reintento, claves de la notificación, canal "solo correo" y que un reintento nunca repita el correo |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -124,6 +131,20 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   duplica a alguien que ya está en la vacante destino y no envía WhatsApp.
   `/api/apply` detecta duplicados por el campo `vacancyId`, no por el id del documento.
 
+- **Entrevista estructurada con respuestas** (perfil → *Evaluar Entrevista*): además de
+  señales, red flags y métricas 1–5, el entrevistador **marca las preguntas que hizo** y solo
+  entonces aparece la caja para **describir lo que respondió el candidato**. Desde el mismo
+  modal se **editan, crean o quitan** preguntas del banco de sugeridas (se guardan al instante
+  en `settings/forms`, con transacción, y aplican a todas las entrevistas) o se añaden
+  preguntas **solo para esa entrevista**. Cada respuesta guarda el texto de su pregunta, así
+  que editar o quitar una pregunta del banco nunca borra lo que alguien ya respondió.
+  Al guardar, **la IA analiza la entrevista** (`/api/evaluate-interview`, solo reclutadores):
+  lee del documento guardado las respuestas descritas, las señales, las métricas y el
+  comentario del entrevistador, con el CV, la etapa 2 y el test como contexto, y deja en la
+  postulación `interviewAiEvaluation` (puntaje, recomendación, fortalezas, dudas, análisis
+  respuesta por respuesta, consistencia y preguntas para validar). En el **Ranking** la
+  entrevista cuenta una vez: promedio de la nota del entrevistador y la de la IA
+  ([`candidateScore.ts`](src/lib/candidateScore.ts)).
 - **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
   CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
   ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del
@@ -152,8 +173,8 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
 
 Ningún mensaje se envía "a ver si sale". En modo admin, **todo** mensaje (automatización
 de etapa y también el chat manual) se **persiste primero** en `whatsapp_outbox` y un
-drenador único lo entrega: de a uno, con espaciado aleatorio de 8–20 s y una pausa larga
-de 45–90 s cada ~6 mensajes, presencia "escribiendo…" proporcional al largo del texto,
+drenador único lo entrega: de a uno (el chat manual con espaciado aleatorio de 8–20 s; los
+automáticos, mucho más lento — ver *Refuerzos* abajo), presencia "escribiendo…" proporcional al largo del texto,
 reintentos con backoff (30 s → 1 h, máx. 6 intentos; los errores permanentes tipo
 `forbidden`/`item-not-found` fallan al primer intento), reconexión automática previa y
 alerta por correo si un mensaje se declara imposible o la cola queda varada esperando a
@@ -171,8 +192,34 @@ señal #1 de baneo. La huella del cliente es estándar (`Browsers.macOS('Chrome'
 y todas las vías de reconexión respetan una única puerta de backoff. Ajustables por env:
 `WA_HOURLY_CAP`, `WA_DAILY_CAP`, `WA_QUARANTINE_HOURS`.
 
+Refuerzos para los envíos masivos (oct 2026, tras nuevos bloqueos):
+
+- **Ritmo propio para los automáticos**: ~1 por minuto con espacios irregulares (35–95 s) y
+  un descanso de 3–7 min tras ráfagas de 4 a 7 mensajes, también al azar
+  ([`serverWhatsAppQueue.ts`](serverWhatsAppQueue.ts)). El espacio **se respeta entre
+  pasadas del drenador** (`autoNextAt` persistido en `send_stats`): antes, una pasada que
+  terminaba justo después de enviar y la siguiente, segundos después, mandaban dos plantillas
+  seguidas. El chat manual va **primero** y no espera ese ritmo.
+- **Horario de envío** (`WA_SEND_HOURS`, por defecto 8:00 a. m. – 7:59 p. m., hora de RD):
+  fuera de él los automáticos esperan a la mañana ([`sendWindow.ts`](src/lib/sendWindow.ts)).
+- **Ningún mensaje idéntico**: las plantillas aceptan variaciones `{Hola|Saludos|Buenas}` y
+  cada candidato recibe una combinación distinta ([`messageVariation.ts`](src/lib/messageVariation.ts)).
+  La elección es **determinista por destinatario** (teléfono + etapa + vacante), así que un
+  reintento genera el mismo texto; además la cola deduplica por la notificación
+  (`dedupeKey`), no solo por el texto. Nuevo `{{primer_nombre}}` ("Hola María", y los
+  nombres en MAYÚSCULAS se escriben normal). Las plantillas por defecto
+  ([`whatsappTemplates.ts`](src/lib/whatsappTemplates.ts), una sola copia para el envío y el
+  editor) ya traen variaciones; el editor muestra cuántas versiones tiene cada una, avisa si
+  todas salen iguales, ofrece **vista previa** y **"Usar versión recomendada"**.
+- **Confirmación antes de un movimiento masivo** (Kanban y Candidatos) a una etapa que avisa:
+  cuántos mensajes son, **cuánto tardarán** en salir a este ritmo (con el límite diario y el
+  horario), si la plantilla varía, y la opción de avisar **solo por correo** (sin riesgo para
+  el número) o **solo mover**. "Reintentar envíos fallidos" ya no reenvía el correo.
+- La fecha límite del formulario de etapa 2 (`{{fecha}}`) ya no sale vacía ("antes del :"):
+  si nadie la fijó, se usan 3 días.
+
 Todo esto es **visible en Ajustes de WhatsApp**: panel de protección (enviados hoy vs
-límite, cuarentena, fecha de vinculación) y la **cola de mensajes** (en espera y fallidos
+límite, cuarentena, fecha de vinculación, ritmo, horario de envío y próximo automático) y la **cola de mensajes** (en espera y fallidos
 con su motivo, con Reintentar/Descartar vía `/api/whatsapp/outbox`). El perfil del
 candidato marca a quien pidió no recibir WhatsApp (chat bloqueado) y a los números sin
 cuenta de WhatsApp.

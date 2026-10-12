@@ -3,6 +3,7 @@ import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { Loader2, Save, FileText, CheckCircle, Plus, Trash2, ArrowUp, ArrowDown, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
 import { masterTestQuestions } from '../data/testQuestions';
+import { DEFAULT_SCORECARD, type ScorecardTemplate } from '../lib/interviewScorecard';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -16,32 +17,9 @@ interface Question {
   options?: string[];
 }
 
-interface ScorecardSettings {
-  recommendedQuestions: string[];
-  positiveSignals: string[];
-  redFlags: string[];
-  metrics: string[];
-}
-
-const defaultScorecard: ScorecardSettings = {
-  recommendedQuestions: [
-    'Cuéntame de una vez que atendiste a un cliente difícil. ¿Qué pasó y cómo lo resolviste?',
-    '¿Qué haces cuando un cliente tiene razón, pero te habla mal?',
-    '¿Qué significa para ti dar un excelente servicio?',
-    'Háblame de una ocasión en la que un supervisor te corrigió. ¿Cómo reaccionaste?',
-    '¿Cómo te manejas trabajando con normas, políticas o procesos definidos?',
-    'Si no estás de acuerdo con una instrucción, ¿qué haces?',
-    '¿Cuál ha sido el trabajo en el que más has durado y por qué?',
-    '¿Por qué saliste de tus últimos dos trabajos?',
-    '¿Qué tendría que ofrecerte una empresa para que quieras durar mucho tiempo en ella?',
-    '¿Qué fue lo último importante que aprendiste en un trabajo?',
-    '¿Qué haces cuando cometes un error?',
-    '¿En qué aspecto te gustaría mejorar más dentro del trabajo?'
-  ],
-  positiveSignals: ['Sonrisa natural', 'Tono amable', 'Empatía genuina', 'Seguridad sin arrogancia', 'Respeto', 'Facilidad para aprender', 'Interés real en el trabajo', 'Madurez emocional'],
-  redFlags: ['Habla mal de todos sus jefes', 'Se contradice mucho', 'Culpa siempre a otros', 'Poca paciencia', 'Arrogancia', 'Actitud conflictiva', 'Poca estabilidad', 'Resistencia a correcciones', 'Respuestas vacías o muy ensayadas', 'Baja energía o apatía'],
-  metrics: ['Puntualidad', 'Presentación personal', 'Contacto visual', 'Claridad al hablar', 'Energía', 'Cortesía y escucha activa']
-};
+// The scorecard's defaults live in one place, shared with the interview modal.
+type ScorecardSettings = ScorecardTemplate;
+const defaultScorecard: ScorecardSettings = DEFAULT_SCORECARD;
 
 interface SortableQuestionProps {
   id: string;
@@ -509,7 +487,7 @@ export default function FormsSettings() {
               <div className="w-8 h-8 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center font-bold">4</div>
               <div>
                 <h2 className="text-lg font-bold text-slate-800">Scorecard de Entrevista (Etapa 4)</h2>
-                <p className="text-sm text-slate-500">Guía de evaluación utilizada por el reclutador durante la entrevista presencial/virtual.</p>
+                <p className="text-sm text-slate-500">Guía de evaluación utilizada por el reclutador durante la entrevista presencial/virtual. En la entrevista se marcan las preguntas hechas y se describe lo que respondió el candidato (la IA lo analiza); el banco también se puede editar desde ahí.</p>
               </div>
             </div>
             {expandedSection === 'scorecard' ? <ChevronUp className="w-5 h-5 text-slate-400" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}

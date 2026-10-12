@@ -7,7 +7,8 @@ import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
 import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle, ArrowRightLeft } from 'lucide-react';
 
-import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
 import Modal from '../components/ui/Modal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { requestCvWorkerRun } from '../lib/api';
@@ -42,6 +43,8 @@ export default function KanbanBoard() {
   // Post-bulk-move WhatsApp delivery report (who did NOT get the automated message).
   const [sendReport, setSendReport] = useState<{ stage: string; sent: number; failed: any[] } | null>(null);
   const [retryingSends, setRetryingSends] = useState(false);
+  // "How do we notify this batch?" — asked before a bulk move to a messaging stage.
+  const { ask: askBulkNotify, element: bulkNotifyModal } = useBulkNotifyConfirm();
 
   // Non-blocking floating notices (replace the old alert() popups): they appear at the
   // right-middle edge, never intercept clicks elsewhere, and fade out on their own —
@@ -203,25 +206,21 @@ export default function KanbanBoard() {
       }
     }
 
-    // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
-    // BEFORE moving anyone. Better to stop the whole batch than to move candidates
-    // whose messages will silently fail (a half-notified batch confuses the process).
-    if (stageMayAutoSend(targetStage)) {
-      const wa = await getWhatsAppStatus();
-      if (!wa.connected) {
-        // With the durable outbox, a disconnected socket does NOT lose messages: they
-        // queue server-side and go out on reconnection. Say so instead of scaring.
-        const proceed = window.confirm(wa.outbox
-          ? `📨 WhatsApp está desconectado en este momento.\n\nLos mensajes de los ${appsToMove.length} candidato(s) quedarán EN COLA y se enviarán solos en cuanto WhatsApp se reconecte. No se pierde ninguno.\n\n¿Continuar?`
-          : `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
-        );
-        if (!proceed) { setBulkActionLoading(false); return; }
-      }
+    // PRE-FLIGHT: a stage that messages candidates asks HOW to notify this batch — with
+    // the WhatsApp state, the delivery estimate at the protective pace and the template's
+    // variation in view — before moving anyone (never a half-notified batch).
+    let notify: BulkNotifyChoice = 'whatsapp';
+    if (stageMayAutoSend(targetStage) || isInterviewStage(targetStage)) {
+      const withEmail = appsToMove.filter(a => !!candidates[a.candidateId]?.email).length;
+      const choice = await askBulkNotify(targetStage, appsToMove.length, withEmail);
+      if (!choice) { setBulkActionLoading(false); return; }
+      notify = choice;
     }
 
     let movedCount = 0;
     let sentCount = 0;
     let queuedCount = 0;
+    let emailedCount = 0;
     const failedSends: any[] = [];
     const failed: string[] = [];
 
@@ -235,6 +234,9 @@ export default function KanbanBoard() {
           lastStageUpdate: serverTimestamp()
         });
         movedCount++;
+
+        // "Solo mover, sin avisar": nothing else to do for this candidate.
+        if (notify === 'none') continue;
 
         // 2. Trigger automation as best-effort: a failed WhatsApp/email must NOT undo the move.
         try {
@@ -256,11 +258,13 @@ export default function KanbanBoard() {
               email: candSnap.data().email,
               ...interviewVarsFor(targetStage)
             };
-            const r = await sendWhatsAppAutomation(phone, targetStage, vars);
+            const r = await sendWhatsAppAutomation(phone, targetStage, vars, { channels: { whatsapp: notify === 'whatsapp' } });
             if (r.status === 'sent') sentCount++;
             if (r.status === 'queued') queuedCount++;
-            if (r.status === 'failed') {
-              failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: phone || '—', vars });
+            if (r.reason === 'solo_correo') emailedCount++;
+            // The report offers a WhatsApp retry — only for a batch that chose WhatsApp.
+            if (r.status === 'failed' && notify === 'whatsapp') {
+              failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: phone || '—', vars, emailed: !!r.emailed });
             }
             // Direct (dev) sends need client-side spacing; queued ones are paced by the
             // server's drain, so enqueueing can go fast.
@@ -271,7 +275,7 @@ export default function KanbanBoard() {
           // Keep the real phone (from the already-loaded candidates map) so the
           // report's retry can actually resend instead of failing on '—' forever.
           const knownPhone = candidates[movedApp.candidateId]?.phone || '';
-          failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: knownPhone || '—', vars: { nombre: movedApp.candidateName, vacante: vacancy?.title, link: '', email: candidates[movedApp.candidateId]?.email || '' } });
+          if (notify === 'whatsapp') failedSends.push({ id: movedApp.id, name: movedApp.candidateName || 'Sin nombre', phone: knownPhone || '—', vars: { nombre: movedApp.candidateName, vacante: vacancy?.title, link: '', email: candidates[movedApp.candidateId]?.email || '' }, emailed: false });
         }
       } catch (err) {
         console.error(`Error moving application ${movedApp.id}:`, err);
@@ -291,7 +295,9 @@ export default function KanbanBoard() {
     } else if (failed.length === 0) {
       const parts = [
         sentCount > 0 ? `${sentCount} WhatsApp enviados` : '',
-        queuedCount > 0 ? `${queuedCount} WhatsApp en cola (se envían solos)` : '',
+        queuedCount > 0 ? `${queuedCount} WhatsApp en cola (salen poco a poco)` : '',
+        emailedCount > 0 ? `${emailedCount} avisados por correo` : '',
+        notify === 'none' ? 'sin avisos' : '',
       ].filter(Boolean).join(' · ');
       showToast('success', `${movedCount} candidato(s) movidos a "${targetStage}"${parts ? ` · ${parts}` : ''}`, 4500);
       if (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage)) {
@@ -308,8 +314,9 @@ export default function KanbanBoard() {
     let sentNow = sendReport.sent;
     for (const f of sendReport.failed) {
       try {
-        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
-        if (r.status === 'failed') still.push(f);
+        // Never the same email twice: only if it didn't go out on an earlier attempt.
+        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars, { channels: { email: !f.emailed } });
+        if (r.status === 'failed') still.push({ ...f, emailed: f.emailed || !!r.emailed });
         else if (r.status === 'sent' || r.status === 'queued') sentNow++;
       } catch {
         still.push(f);
@@ -875,6 +882,8 @@ export default function KanbanBoard() {
         subtitle="Sube múltiples CVs para esta vacante y añade los datos que ya conozcas; la IA completa el resto."
         uploadEntries={uploadBulkEntries}
       />
+
+      {bulkNotifyModal}
 
       {/* WhatsApp delivery report after a bulk move — who didn't get the message + retry. */}
       <WhatsAppSendReport

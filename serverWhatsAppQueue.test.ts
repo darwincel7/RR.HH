@@ -5,6 +5,9 @@ import {
   OUTBOX_MAX_ATTEMPTS, SEND_SPACING_MIN_MS, SEND_SPACING_MAX_MS,
   LONG_PAUSE_EVERY, LONG_PAUSE_MIN_MS, LONG_PAUSE_MAX_MS,
   HOURLY_SEND_CAP, WA_MATURE_DAILY_CAP,
+  nextAutomationGap, randomBurstTarget, sanitizeAutoNextAt, automationMessagesPerHour,
+  AUTO_SPACING_MIN_MS, AUTO_SPACING_MAX_MS, AUTO_BURST_MIN, AUTO_BURST_MAX,
+  AUTO_LONG_PAUSE_MIN_MS, AUTO_LONG_PAUSE_MAX_MS, AUTO_MAX_SCHEDULED_GAP_MS,
 } from './serverWhatsAppQueue';
 
 describe('nextSpacingMs', () => {
@@ -30,6 +33,64 @@ describe('nextSpacingMs', () => {
     // ...but not on ordinary messages, and never on the very first one.
     expect(nextSpacingMs(0, () => 1)).toBe(SEND_SPACING_MAX_MS);
     expect(nextSpacingMs(LONG_PAUSE_EVERY + 1, () => 1)).toBe(SEND_SPACING_MAX_MS);
+  });
+});
+
+describe('nextAutomationGap (bulk template pacing)', () => {
+  it('spaces automated messages about a minute apart, irregularly', () => {
+    const lo = nextAutomationGap({ burstCount: 0, burstTarget: AUTO_BURST_MAX }, () => 0);
+    const hi = nextAutomationGap({ burstCount: 0, burstTarget: AUTO_BURST_MAX }, () => 0.9999);
+    expect(lo.gapMs).toBe(AUTO_SPACING_MIN_MS);
+    expect(hi.gapMs).toBeLessThanOrEqual(AUTO_SPACING_MAX_MS);
+    expect(hi.gapMs).toBeGreaterThan(lo.gapMs);
+  });
+
+  it('is much slower than the 1:1 chat spacing (bursts were the ban pattern)', () => {
+    expect(AUTO_SPACING_MIN_MS).toBeGreaterThanOrEqual(SEND_SPACING_MAX_MS);
+  });
+
+  it('rests longer after each burst, and the burst size itself varies', () => {
+    let state = { burstCount: 0, burstTarget: 4 };
+    const gaps: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      const r = nextAutomationGap(state, () => 0);
+      gaps.push(r.gapMs);
+      state = r.state;
+    }
+    expect(gaps.slice(0, 3).every(g => g < AUTO_LONG_PAUSE_MIN_MS)).toBe(true);
+    expect(gaps[3]).toBeGreaterThanOrEqual(AUTO_LONG_PAUSE_MIN_MS);
+    expect(gaps[3]).toBeLessThanOrEqual(AUTO_LONG_PAUSE_MAX_MS);
+    expect(state.burstCount).toBe(0); // a fresh burst after the rest
+    const sizes = new Set(Array.from({ length: 200 }, () => randomBurstTarget()));
+    expect(Math.min(...sizes)).toBe(AUTO_BURST_MIN);
+    expect(Math.max(...sizes)).toBe(AUTO_BURST_MAX);
+  });
+
+  it('recovers from a missing/corrupt persisted burst state', () => {
+    const r = nextAutomationGap({ burstCount: NaN as any, burstTarget: 999 }, () => 0);
+    expect(r.gapMs).toBeGreaterThanOrEqual(AUTO_SPACING_MIN_MS);
+    expect(r.state.burstTarget).toBeGreaterThanOrEqual(AUTO_BURST_MIN);
+    expect(r.state.burstTarget).toBeLessThanOrEqual(AUTO_BURST_MAX);
+  });
+});
+
+describe('sanitizeAutoNextAt', () => {
+  const now = 1_700_000_000_000;
+  it('honors a sane persisted schedule, ignores a corrupt one', () => {
+    expect(sanitizeAutoNextAt(now + 60_000, now)).toBe(now + 60_000);
+    expect(sanitizeAutoNextAt(now - 60_000, now)).toBe(now - 60_000); // already due
+    expect(sanitizeAutoNextAt(now + AUTO_MAX_SCHEDULED_GAP_MS + 1, now)).toBe(now); // skew: don't block for hours
+    expect(sanitizeAutoNextAt(undefined, now)).toBe(0);
+    expect(sanitizeAutoNextAt('x', now)).toBe(0);
+  });
+});
+
+describe('automationMessagesPerHour', () => {
+  it('is what the bulk-move estimate promises: modest, and never above the hourly cap', () => {
+    const perHour = automationMessagesPerHour(HOURLY_SEND_CAP);
+    expect(perHour).toBeGreaterThan(10);
+    expect(perHour).toBeLessThanOrEqual(HOURLY_SEND_CAP);
+    expect(automationMessagesPerHour(5)).toBe(5);
   });
 });
 
