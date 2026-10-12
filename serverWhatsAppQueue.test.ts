@@ -8,6 +8,7 @@ import {
   nextAutomationGap, randomBurstTarget, sanitizeAutoNextAt, automationMessagesPerHour,
   AUTO_SPACING_MIN_MS, AUTO_SPACING_MAX_MS, AUTO_BURST_MIN, AUTO_BURST_MAX,
   AUTO_LONG_PAUSE_MIN_MS, AUTO_LONG_PAUSE_MAX_MS, AUTO_MAX_SCHEDULED_GAP_MS,
+  outboxFate, outboxQueuedAtMs, PREVIOUS_QUEUE_CUTOFF_MS, OUTBOX_MAX_AGE_HOURS, isDuplicateInOutbox,
 } from './serverWhatsAppQueue';
 
 describe('nextSpacingMs', () => {
@@ -33,6 +34,78 @@ describe('nextSpacingMs', () => {
     // ...but not on ordinary messages, and never on the very first one.
     expect(nextSpacingMs(0, () => 1)).toBe(SEND_SPACING_MAX_MS);
     expect(nextSpacingMs(LONG_PAUSE_EVERY + 1, () => 1)).toBe(SEND_SPACING_MAX_MS);
+  });
+});
+
+describe('outboxFate (messages from the past never go out)', () => {
+  const H = 3_600_000;
+  const maxAge = OUTBOX_MAX_AGE_HOURS * H;
+  const cutoff = PREVIOUS_QUEUE_CUTOFF_MS;
+
+  it('the queue that existed before the cutoff is discarded, whatever its age', () => {
+    expect(outboxFate(cutoff - 1, cutoff + 60_000, cutoff, maxAge)).toBe('previous');
+    expect(outboxFate(cutoff - 30 * 24 * H, cutoff + H, cutoff, maxAge)).toBe('previous');
+  });
+
+  it('new messages go out normally, including after the night or the daily limit', () => {
+    expect(outboxFate(cutoff + 1, cutoff + 2, cutoff, maxAge)).toBe('send');
+    expect(outboxFate(cutoff + H, cutoff + H + 36 * H, cutoff, maxAge)).toBe('send');
+  });
+
+  it('a message that waited longer than the max age expires instead of going out late', () => {
+    expect(outboxFate(cutoff + H, cutoff + H + maxAge + 1, cutoff, maxAge)).toBe('expired');
+  });
+
+  it('a manual re-queue (Reintentar) restarts the clock — even for a message from before the cutoff', () => {
+    const created = cutoff - 5 * 24 * H;
+    const requeued = cutoff + 10 * H;
+    expect(outboxFate(outboxQueuedAtMs(created, requeued), requeued + H, cutoff, maxAge)).toBe('send');
+  });
+
+  it('never drops a message whose queue time is unknown', () => {
+    expect(outboxFate(outboxQueuedAtMs(0, 0), cutoff + 100 * H, cutoff, maxAge)).toBe('send');
+  });
+
+  it('the cutoff is the moment the old queue was declared "del pasado" (12 oct 2026, 5:45 p. m. RD)', () => {
+    expect(new Date(PREVIOUS_QUEUE_CUTOFF_MS).toISOString()).toBe('2026-10-12T21:45:00.000Z');
+    expect(OUTBOX_MAX_AGE_HOURS).toBeGreaterThanOrEqual(36); // a night + a full sending day must fit
+  });
+});
+
+describe('isDuplicateInOutbox', () => {
+  const H = 3_600_000;
+  const maxAge = OUTBOX_MAX_AGE_HOURS * H;
+  const cutoff = PREVIOUS_QUEUE_CUTOFF_MS;
+  const now = cutoff + 10 * H;
+  const entry = (over: object) => ({ status: 'queued', message: 'Hola', dedupeKey: 'k', createdAtMs: now - H, queuedAtMs: now - H, ...over });
+  const auto = { message: 'Hola', origin: 'automation' as const, dedupeKey: 'k' };
+
+  it('an automation already waiting for this phone is not queued twice (same text or same notification)', () => {
+    expect(isDuplicateInOutbox([entry({})], auto, now, cutoff, maxAge)).toBe(true);
+    expect(isDuplicateInOutbox([entry({ message: 'Otra redacción' })], auto, now, cutoff, maxAge)).toBe(true);
+    expect(isDuplicateInOutbox([entry({ status: 'sending' })], auto, now, cutoff, maxAge)).toBe(true);
+  });
+
+  it('a message from the old queue never blocks the new one (it will be discarded, not sent)', () => {
+    const old = entry({ createdAtMs: cutoff - 3 * 24 * H, queuedAtMs: cutoff - 3 * 24 * H });
+    expect(isDuplicateInOutbox([old], auto, now, cutoff, maxAge)).toBe(false);
+  });
+
+  it('an expired one does not block it either', () => {
+    const stale = entry({ createdAtMs: now - maxAge - H, queuedAtMs: now - maxAge - H });
+    expect(isDuplicateInOutbox([stale], auto, now, cutoff, maxAge)).toBe(false);
+  });
+
+  it('sent, failed or dismissed messages never count', () => {
+    for (const status of ['sent', 'failed', 'dismissed']) {
+      expect(isDuplicateInOutbox([entry({ status })], auto, now, cutoff, maxAge), status).toBe(false);
+    }
+  });
+
+  it('manual chat only dedupes the identical text within 2 minutes (a double click)', () => {
+    const manual = { message: 'ok', origin: 'manual' as const };
+    expect(isDuplicateInOutbox([entry({ message: 'ok', createdAtMs: now - 30_000, queuedAtMs: now - 30_000 })], manual, now, cutoff, maxAge)).toBe(true);
+    expect(isDuplicateInOutbox([entry({ message: 'ok', createdAtMs: now - 5 * 60_000, queuedAtMs: now - 5 * 60_000 })], manual, now, cutoff, maxAge)).toBe(false);
   });
 });
 

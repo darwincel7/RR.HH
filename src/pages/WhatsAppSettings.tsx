@@ -111,7 +111,11 @@ export default function WhatsAppSettings() {
   }, []);
 
   // ---- Message queue viewer ----
-  const [outbox, setOutbox] = useState<{ pending: any[]; failed: any[] } | null>(null);
+  const [outbox, setOutbox] = useState<{
+    pending: any[]; failed: any[];
+    maxQueueHours?: number;
+    previousQueue?: { cutoff: string; discarded: number };
+  } | null>(null);
   const [outboxLoading, setOutboxLoading] = useState(false);
   const [outboxBusy, setOutboxBusy] = useState<string | null>(null);
 
@@ -764,6 +768,13 @@ export default function WhatsAppSettings() {
           </button>
         </div>
         <div className="p-6 space-y-5">
+          {outbox && (
+            <p className="text-xs text-slate-500 bg-slate-50 border border-slate-100 rounded-lg px-3 py-2">
+              Los mensajes del pasado no se envían: lo que estaba en cola antes del {fmtDate(outbox.previousQueue?.cutoff) || '12 oct 2026'} se
+              descartó{outbox.previousQueue?.discarded ? ` (${outbox.previousQueue.discarded} mensaje(s))` : ''}, y un mensaje que no logra salir
+              en {outbox.maxQueueHours || 48} h vence y aparece abajo en "Fallidos" (con Reintentar, por si todavía aplica).
+            </p>
+          )}
           {!outbox ? (
             <div className="flex justify-center py-6"><Loader2 className="w-6 h-6 animate-spin text-blue-500" /></div>
           ) : outbox.pending.length === 0 && outbox.failed.length === 0 ? (

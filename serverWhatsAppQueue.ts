@@ -12,6 +12,68 @@
 /** Give up on a message after this many failed attempts (then it's flagged + alerted). */
 export const OUTBOX_MAX_ATTEMPTS = 6;
 
+/**
+ * Messages from the past never go out. A queued notification is tied to its moment — a
+ * stage-2 form with a deadline, an interview on a date — and sending it days late is
+ * worse than not sending it: the candidate gets stale information, and a burst of old
+ * templates after a reconnection is exactly the traffic that gets numbers blocked.
+ *
+ * - PREVIOUS_QUEUE_CUTOFF_MS: everything that was waiting in the queue when this rule was
+ *   decided (12 oct 2026, 5:45 p. m. RD — much of it piled up while the number was
+ *   blocked) is discarded, never sent. Messages queued after it go out normally.
+ * - Max age: from then on, a message that couldn't go out within this long (WhatsApp
+ *   disconnected, daily limit) expires instead of going out late. It shows under
+ *   "Fallidos" so the recruiter knows who wasn't notified, and "Reintentar" re-queues it
+ *   (that resets its clock) if it still applies.
+ */
+export const PREVIOUS_QUEUE_CUTOFF_MS = Date.parse('2026-10-12T21:45:00Z');
+export const OUTBOX_MAX_AGE_HOURS = 48;
+
+export type OutboxFate = 'send' | 'previous' | 'expired';
+
+/** When a message entered the queue: its creation, or a later manual re-queue. */
+export function outboxQueuedAtMs(createdAtMs: number, requeuedAtMs: number): number {
+  return Math.max(createdAtMs || 0, requeuedAtMs || 0);
+}
+
+/** May this queued message still go out? An unknown queue time (0) never drops anything. */
+export function outboxFate(queuedAtMs: number, nowMs: number, cutoffMs: number, maxAgeMs: number): OutboxFate {
+  if (!queuedAtMs) return 'send';
+  if (queuedAtMs < cutoffMs) return 'previous';
+  if (nowMs - queuedAtMs > maxAgeMs) return 'expired';
+  return 'send';
+}
+
+/** What the dedupe needs to know about a message already in the outbox for this phone. */
+export interface OutboxEntry {
+  status?: string;
+  message?: string;
+  dedupeKey?: string;
+  createdAtMs: number;
+  /** outboxQueuedAtMs(createdAt, requeuedAt). */
+  queuedAtMs: number;
+}
+
+/**
+ * Is this message already on its way to the phone? Only entries still pending count —
+ * and never one from the past ('previous'/'expired'): it will be discarded instead of
+ * sent, so letting it block the new message would leave the candidate with nothing.
+ * Automations match by exact text OR by notification (dedupeKey); manual chat only by
+ * identical text within 2 minutes (a double click), since "ok" is legitimately repeated.
+ */
+export function isDuplicateInOutbox(
+  recent: OutboxEntry[],
+  msg: { message: string; origin: 'manual' | 'automation'; dedupeKey?: string },
+  nowMs: number, cutoffMs: number, maxAgeMs: number,
+): boolean {
+  return recent.some(q => {
+    if (q.status !== 'queued' && q.status !== 'sending') return false;
+    if (q.status === 'queued' && outboxFate(q.queuedAtMs, nowMs, cutoffMs, maxAgeMs) !== 'send') return false;
+    if (msg.origin === 'manual') return q.message === msg.message && nowMs - q.createdAtMs < 2 * 60_000;
+    return q.message === msg.message || (!!msg.dedupeKey && q.dedupeKey === msg.dedupeKey);
+  });
+}
+
 /** A message stuck in 'sending' longer than this was orphaned by a crash/restart. */
 export const OUTBOX_STUCK_MS = 3 * 60 * 1000;
 

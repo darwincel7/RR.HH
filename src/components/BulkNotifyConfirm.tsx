@@ -140,6 +140,7 @@ function BulkNotifyConfirmModal({ request, onDone }: { request: NotifyRequest | 
                       <span>
                         {describeBulkEta(eta, status?.pacing, now)}
                         {status && status.pending > 0 ? ` Ya hay ${status.pending === 1 ? '1 mensaje' : `${status.pending} mensajes`} en cola antes que estos.` : ''}
+                        {eta.later > 0 ? ` Los que no alcancen a salir en ${status?.pacing?.maxQueueHours || 48} h vencen y no se envían (para no mandar información vieja).` : ''}
                       </span>
                     </p>
                   )}

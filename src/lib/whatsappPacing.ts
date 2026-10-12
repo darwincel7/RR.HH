@@ -20,6 +20,8 @@ export interface PacingInfo {
   autoPerHour?: number;
   quarantineUntil?: string | null;
   sendWindow?: { start: number; end: number; open?: boolean; opensAt?: string } | null;
+  /** A queued message that can't go out within this many hours expires (not sent). */
+  maxQueueHours?: number;
 }
 
 export interface BulkEta {
