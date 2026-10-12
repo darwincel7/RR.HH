@@ -8,6 +8,7 @@ import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { useCandidatePhotos } from '../lib/useCandidatePhotos';
+import { computeOverallScore } from '../lib/candidateScore';
 
 export default function Ranking() {
   const { vacancyId } = useParams();
@@ -36,29 +37,8 @@ export default function Ranking() {
       
       const apps = appSnap.docs.map(doc => {
         const data = doc.data();
-        let totalScore = 0;
-        let stagesCompleted = 0;
-        
-        if (data.scoreSummary !== undefined && data.scoreSummary !== null) {
-          totalScore += (data.scoreSummary * 20); // 1-5 to 20-100
-          stagesCompleted++;
-        }
-        if (data.stage2Scoring?.total_score !== undefined && data.stage2Scoring?.total_score !== null) {
-          totalScore += data.stage2Scoring.total_score;
-          stagesCompleted++;
-        }
-        if (data.interviewObservation?.score !== undefined && data.interviewObservation?.score !== null) {
-          totalScore += (data.interviewObservation.score * 20);
-          stagesCompleted++;
-        }
-        if (data.testResults?.score !== undefined && data.testResults?.score !== null) {
-          totalScore += data.testResults.score;
-          stagesCompleted++;
-        }
-        
-        const calculatedTotalScore = stagesCompleted > 0 ? Math.round(totalScore / stagesCompleted) : 0;
-        
-        return { ...data, id: doc.id, calculatedTotalScore };
+        // Same blended score as Candidatos (the interview counts once: interviewer + AI).
+        return { ...data, id: doc.id, calculatedTotalScore: computeOverallScore(data) };
       });
 
       // Sort by score descending
@@ -315,9 +295,16 @@ export default function Ranking() {
                         <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Entrevista</h4>
                         <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 space-y-2">
                           <div className="flex items-center justify-between">
-                            <span className="text-sm font-medium text-slate-700">Puntuación</span>
+                            <span className="text-sm font-medium text-slate-700">Entrevistador</span>
                             <span className="font-black text-slate-800">{candidate.interviewObservation?.score ? (candidate.interviewObservation.score * 20) : 'N/A'}</span>
                           </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm font-medium text-slate-700">Análisis IA</span>
+                            <span className="font-black text-violet-700">{candidate.interviewAiEvaluation?.score ?? 'N/A'}</span>
+                          </div>
+                          {candidate.interviewAiEvaluation?.summary && (
+                            <p className="text-xs text-slate-600 italic">"{candidate.interviewAiEvaluation.summary}"</p>
+                          )}
                           {candidate.interviewObservation?.notes && (
                             <div className="pt-2 border-t border-slate-200 mt-2">
                               <span className="text-xs font-bold text-slate-500 block mb-1">Notas:</span>

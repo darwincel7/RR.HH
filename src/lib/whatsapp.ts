@@ -2,6 +2,10 @@ import { doc, getDoc, addDoc, collection, serverTimestamp, query, where, getDocs
 import { db } from './firebase';
 import { sendEmail, getEmailTemplate } from './email';
 import { apiFetch } from './api';
+import { normalizePhone } from './phone';
+import { renderMessage, messageSeed, seededRandom } from './messageVariation';
+import { DEFAULT_WA_TEMPLATES, STAGE2_DEADLINE_DAYS } from './whatsappTemplates';
+import type { PacingInfo } from './whatsappPacing';
 
 // Distinguishes an intentional skip (no message was meant to go out) from a real
 // delivery failure, so callers can warn the recruiter only when something actually
@@ -11,6 +15,8 @@ import { apiFetch } from './api';
 export type AutomationResult = {
   status: 'sent' | 'queued' | 'skipped' | 'failed';
   reason?: string;
+  /** The email notice went out — a later WhatsApp-only retry must not send it again. */
+  emailed?: boolean;
 };
 
 // True when moving to this stage would attempt an automatic WhatsApp message from a
@@ -41,21 +47,24 @@ export function stageNeedsScheduling(stage: string): boolean {
 // Live connection + queue snapshot from the server.
 // `outbox` — the server has a durable queue: messages sent while disconnected are NOT
 // lost, they wait and go out on reconnection. `pending` — how many are waiting now.
-export type WhatsAppStatus = { connected: boolean; outbox: boolean; pending: number; suspended: boolean };
+// `pacing` — the anti-ban budget and pace (daily limit, send window, messages/hour).
+export type WhatsAppStatus = { connected: boolean; outbox: boolean; pending: number; suspended: boolean; pacing: PacingInfo | null };
 
 export async function getWhatsAppStatus(): Promise<WhatsAppStatus> {
+  const offline: WhatsAppStatus = { connected: false, outbox: false, pending: 0, suspended: false, pacing: null };
   try {
     const res = await apiFetch('/api/whatsapp/status');
-    if (!res.ok) return { connected: false, outbox: false, pending: 0, suspended: false };
+    if (!res.ok) return offline;
     const data = await res.json();
     return {
       connected: data.status === 'connected',
       outbox: !!data.outbox,
       pending: Number(data.pending) || 0,
       suspended: !!data.suspended,
+      pacing: data.pacing && typeof data.pacing === 'object' ? data.pacing : null,
     };
   } catch {
-    return { connected: false, outbox: false, pending: 0, suspended: false };
+    return offline;
   }
 }
 
@@ -70,11 +79,41 @@ export async function isWhatsAppConnected(): Promise<boolean> {
 export const SEND_SPACING_MS = 3000;
 export const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
 
+/**
+ * The template a stage sends: the one configured in Configuración, else the default
+ * (with variations). Empty means the stage sends nothing. Throws if the settings can't
+ * be read — sending a different text than the one the recruiter configured is worse
+ * than reporting the failure.
+ */
+export async function getStageTemplate(stage: string): Promise<string> {
+  const snap = await getDoc(doc(db, 'settings', 'whatsapp_templates'));
+  const custom = snap.exists() ? snap.data()?.templates?.[stage] : undefined;
+  if (typeof custom === 'string' && custom.trim()) return custom;
+  return DEFAULT_WA_TEMPLATES[stage] || '';
+}
+
+// "jueves 15 de octubre": the stage-2 form's deadline when nobody set one. The template
+// says "antes del {{fecha}}" and used to go out as "antes del :".
+function defaultDeadline(days: number): string {
+  const d = new Date(Date.now() + days * 86_400_000);
+  const timeZone = 'America/Santo_Domingo'; // the candidate's calendar, whatever this device's is
+  return `${d.toLocaleDateString('es-DO', { weekday: 'long', timeZone })} ${d.toLocaleDateString('es-DO', { day: 'numeric', month: 'long', timeZone })}`;
+}
+
+export type AutomationChannels = {
+  /** Default true. False = only the email goes out (no risk at all for the WhatsApp number). */
+  whatsapp?: boolean;
+  /** Default true (when the candidate has an email). */
+  email?: boolean;
+};
+
 export async function sendWhatsAppAutomation(
   phone: string,
   stage: string,
-  variables: { nombre: string; vacante?: string; link?: string; fecha?: string; hora?: string; ubicacion?: string; email?: string }
+  variables: { nombre: string; vacante?: string; link?: string; fecha?: string; hora?: string; ubicacion?: string; email?: string },
+  options: { channels?: AutomationChannels } = {}
 ): Promise<AutomationResult> {
+  let emailed = false;
   try {
     // Stages handled in person NEVER trigger an automatic message, even if a
     // custom template is configured in settings:
@@ -93,9 +132,10 @@ export async function sendWhatsAppAutomation(
       return { status: 'skipped', reason: 'falta_fecha_hora' };
     }
 
-    // Fetch templates
-    const docRef = doc(db, 'settings', 'whatsapp_templates');
-    const docSnap = await getDoc(docRef);
+    const sendWhatsApp = options.channels?.whatsapp !== false;
+    const sendEmailToo = options.channels?.email !== false;
+
+    const template = await getStageTemplate(stage);
 
     // Company identity: every template opens by saying WHO is writing. A message from
     // an unknown, unsaved number that never names the company is what recipients
@@ -111,72 +151,46 @@ export async function sendWhatsAppAutomation(
       }
     } catch { /* branding is best-effort */ }
 
-    let template = "";
-    if (docSnap.exists() && docSnap.data().templates && docSnap.data().templates[stage]) {
-      template = docSnap.data().templates[stage];
-    } else {
-      // Fallbacks if not configured. Written to read like a person from HR, not a
-      // broadcast: the company introduces itself in the first line, 1-2 emojis at
-      // most, and every message invites a reply — incoming replies are the best
-      // legitimacy signal a WhatsApp number can earn.
-      switch (stage) {
-        case "Formulario etapa 2 enviado":
-          template = "Hola {{nombre}}, te saluda el equipo de reclutamiento de {{empresa}} 👋\n\nRecibimos tu aplicación a la vacante de {{vacante}} y nos gustó tu perfil: queremos avanzar contigo a la siguiente etapa.\n\nEl próximo paso es completar este formulario antes del {{fecha}}:\n{{link}}\n\n¿Contamos contigo? Respóndenos por aquí para saber que recibiste este mensaje. Y si prefieres no continuar en el proceso, también puedes decírnoslo.";
-          break;
-        case "Convocado a entrevista":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}} por el proceso de {{vacante}}.\n\n¡Buenas noticias! Queremos invitarte a una entrevista virtual:\n\nFecha: {{fecha}}\nHora: {{hora}}\nModalidad: Virtual ({{ubicacion}})\n\n¿Te queda bien ese horario? Respóndenos por aquí para confirmar; si no puedes ese día, lo coordinamos. ¡Gracias!";
-          break;
-        case "Entrevista presencial":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}}. Pasaste a la etapa final del proceso para {{vacante}} 🎉\n\nQueremos conocerte en persona:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas tu asistencia respondiendo este mensaje? Si necesitas otro horario, dinos y lo buscamos.";
-          break;
-        case "Recordatorio de entrevista":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}} para recordarte tu entrevista para {{vacante}}:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas que podrás asistir? ¡Te esperamos!";
-          break;
-        case "Oferta":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}} con una excelente noticia: fuiste seleccionado(a) para el puesto de {{vacante}} 🎉\n\nQueremos reunirnos contigo para revisar los detalles y formalizar el inicio:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas por aquí? ¡Nos alegra mucho poder darte la bienvenida al equipo!";
-          break;
-        // "Contratado" intentionally has NO template: hiring is handled in person,
-        // so no automatic WhatsApp is sent when a candidate is marked as hired.
-        case "Descartado":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. En esta ocasión decidimos continuar con otros perfiles, pero valoramos de verdad el tiempo y el interés que dedicaste.\n\nTe deseamos muchos éxitos, y ojalá coincidamos en una próxima oportunidad.";
-          break;
-        case "Banco de talento":
-          template = "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por tu excelente participación en el proceso para {{vacante}}. Esta vez el proceso concluyó con otro perfil, pero tu desempeño nos gustó mucho.\n\nNos encantaría guardar tus datos en nuestro banco de talento para futuras oportunidades. ¿Nos autorizas? Responde \"Sí, autorizo\" y quedas dentro.";
-          break;
-      }
-    }
-
     if (!template) return { status: 'skipped', reason: 'sin_plantilla' };
 
-    // Replace variables
-    let message = template.replace(/{{nombre}}/g, variables.nombre || '');
-    message = message.replace(/{{vacante}}/g, variables.vacante || 'la vacante');
-    message = message.replace(/{{empresa}}/g, companyName);
-    message = message.replace(/{{link}}/g, variables.link || '');
-    message = message.replace(/{{fecha}}/g, variables.fecha || '');
-    message = message.replace(/{{hora}}/g, variables.hora || '');
-    message = message.replace(/{{ubicacion}}/g, variables.ubicacion || '');
+    // One wording per recipient: {a|b} variations are resolved with a seed made from
+    // THIS phone + notification, so a bulk move never sends the same text to everyone,
+    // while a retry renders the identical text (the server dedupes on it). Seed and
+    // dedupe key use the caller's values — never the default deadline added below,
+    // which changes from one day to the next.
+    const seed = messageSeed(normalizePhone(phone || ''), stage, variables);
+    // dedupeKey = this exact notification; topicKey = its kind (stage + vacancy): a newer
+    // one of the same kind (a rescheduled interview) replaces one still waiting in the queue.
+    const topicKey = JSON.stringify([stage, variables.vacante || '']).slice(0, 300);
+    const dedupeKey = JSON.stringify([stage, variables.vacante || '', variables.fecha || '', variables.hora || '']).slice(0, 300);
+    const vars = { ...variables, empresa: companyName };
+    if (stage === 'Formulario etapa 2 enviado' && !vars.fecha) vars.fecha = defaultDeadline(STAGE2_DEADLINE_DAYS);
+    const message = renderMessage(template, vars, seededRandom(seed));
 
     // Send Email Automation if email is provided
-    if (variables.email) {
+    if (variables.email && sendEmailToo) {
       try {
         const emailHtml = getEmailTemplate(
           `Actualización de tu proceso: ${stage}`,
           message,
           companyLogoUrl
         );
-        await sendEmail(variables.email, `Actualización de tu proceso - ${companyName}`, emailHtml);
+        const r = await sendEmail(variables.email, `Actualización de tu proceso - ${companyName}`, emailHtml);
+        emailed = !!r?.success;
       } catch (emailError) {
         console.error("Error sending email automation:", emailError);
       }
     }
+
+    // Email-only move (chosen in the bulk confirmation): the WhatsApp number stays out of it.
+    if (!sendWhatsApp) return { status: 'skipped', reason: emailed ? 'solo_correo' : 'sin_envio', emailed };
 
     // Send message via API. stage/candidateName ride along so the durable outbox can
     // write the conversation history server-side when the message ACTUALLY goes out.
     const res = await apiFetch('/api/automations/stage-change', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ phone, message, stage, candidateName: variables.nombre || '' })
+      body: JSON.stringify({ phone, message, stage, candidateName: variables.nombre || '', dedupeKey, topicKey })
     });
 
     let data;
@@ -184,21 +198,21 @@ export async function sendWhatsAppAutomation(
       data = await res.json();
     } catch (parseError) {
       console.error("Failed to parse API response. Status:", res.status);
-      return { status: 'failed', reason: `respuesta_invalida_${res.status}` };
+      return { status: 'failed', reason: `respuesta_invalida_${res.status}`, emailed };
     }
 
     // The candidate asked not to receive WhatsApp messages; the server honors that
     // and skips silently. For the recruiter this is a deliberate skip, not a failure
     // (a failure would invite retries against someone who said stop).
     if (data.success && data.skipped === 'opt_out') {
-      return { status: 'skipped', reason: 'candidato_pidio_no_contactar' };
+      return { status: 'skipped', reason: 'candidato_pidio_no_contactar', emailed };
     }
 
     // Durable outbox path: the server persisted the message and delivers it itself
     // (it also writes the history entry on actual delivery — no client write here,
     // that would duplicate the record).
     if (data.success && data.queued) {
-      return { status: 'queued' };
+      return { status: 'queued', emailed };
     }
 
     if (data.success && data.messageSent) {
@@ -218,12 +232,12 @@ export async function sendWhatsAppAutomation(
           stage
         });
       }
-      return { status: 'sent' };
+      return { status: 'sent', emailed };
     }
     // API reachable but the message did not go out (e.g. WhatsApp socket disconnected).
-    return { status: 'failed', reason: data?.error || 'whatsapp_no_conectado' };
+    return { status: 'failed', reason: data?.error || 'whatsapp_no_conectado', emailed };
   } catch (error) {
     console.error("Error sending WhatsApp automation:", error);
-    return { status: 'failed', reason: 'error_de_red' };
+    return { status: 'failed', reason: 'error_de_red', emailed };
   }
 }

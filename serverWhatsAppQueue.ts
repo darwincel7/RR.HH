@@ -41,6 +41,76 @@ export function nextSpacingMs(sentInBurst = 0, random: () => number = Math.rando
 }
 
 /**
+ * AUTOMATED (template) messages pace far slower than the 1:1 chat above: roughly one a
+ * minute at irregular gaps, plus a longer rest after every few — bursts of 4 to 7, at
+ * random, so not even the rhythm repeats. Many strangers receiving near-identical texts
+ * within the same few minutes is the pattern behind the bans; a recruiter inviting
+ * people by hand takes about this long per message. The queue is durable, so the
+ * recruiter never waits on it: a bulk move of 20 just goes out over ~40 minutes.
+ *
+ * The gap is enforced ACROSS drain passes (the server persists when the next one may go
+ * out): previously a pass that ended right after a send and the next pass, seconds
+ * later, sent two templates back to back.
+ */
+export const AUTO_SPACING_MIN_MS = 35_000;
+export const AUTO_SPACING_MAX_MS = 95_000;
+export const AUTO_BURST_MIN = 4;
+export const AUTO_BURST_MAX = 7;
+export const AUTO_LONG_PAUSE_MIN_MS = 3 * 60_000;
+export const AUTO_LONG_PAUSE_MAX_MS = 7 * 60_000;
+/** A persisted "next automated send" further out than this is treated as corrupt. */
+export const AUTO_MAX_SCHEDULED_GAP_MS = 15 * 60_000;
+
+export interface AutoPacingState {
+  /** Automated messages sent since the last long rest. */
+  burstCount: number;
+  /** How many this burst allows before the next long rest. */
+  burstTarget: number;
+}
+
+export function randomBurstTarget(random: () => number = Math.random): number {
+  return AUTO_BURST_MIN + Math.min(AUTO_BURST_MAX - AUTO_BURST_MIN, Math.floor(random() * (AUTO_BURST_MAX - AUTO_BURST_MIN + 1)));
+}
+
+/** After an automated message goes out: how long until the next may, and the new burst state. */
+export function nextAutomationGap(state: AutoPacingState, random: () => number = Math.random): { gapMs: number; state: AutoPacingState } {
+  const target = state.burstTarget >= AUTO_BURST_MIN && state.burstTarget <= AUTO_BURST_MAX
+    ? state.burstTarget
+    : randomBurstTarget(random);
+  const burstCount = Math.max(0, state.burstCount || 0) + 1;
+  if (burstCount >= target) {
+    return {
+      gapMs: Math.round(AUTO_LONG_PAUSE_MIN_MS + (AUTO_LONG_PAUSE_MAX_MS - AUTO_LONG_PAUSE_MIN_MS) * random()),
+      state: { burstCount: 0, burstTarget: randomBurstTarget(random) },
+    };
+  }
+  return {
+    gapMs: Math.round(AUTO_SPACING_MIN_MS + (AUTO_SPACING_MAX_MS - AUTO_SPACING_MIN_MS) * random()),
+    state: { burstCount, burstTarget: target },
+  };
+}
+
+/** The earliest a persisted "next automated send" may be honored: never in the past
+ * beyond now, never absurdly far in the future (clock skew, corrupt doc). */
+export function sanitizeAutoNextAt(persisted: unknown, nowMs: number): number {
+  const v = typeof persisted === 'number' && Number.isFinite(persisted) ? persisted : 0;
+  return v > nowMs + AUTO_MAX_SCHEDULED_GAP_MS ? nowMs : v;
+}
+
+/**
+ * Average automated messages per hour this pacing yields, never above the hourly cap
+ * (typing time included). Feeds the delivery estimate shown before a bulk move.
+ */
+export function automationMessagesPerHour(hourlyCap: number): number {
+  const avgGap = (AUTO_SPACING_MIN_MS + AUTO_SPACING_MAX_MS) / 2;
+  const avgLong = (AUTO_LONG_PAUSE_MIN_MS + AUTO_LONG_PAUSE_MAX_MS) / 2;
+  const avgBurst = (AUTO_BURST_MIN + AUTO_BURST_MAX) / 2;
+  const avgTyping = 5_000;
+  const perMessage = ((avgBurst - 1) * avgGap + avgLong) / avgBurst + avgTyping;
+  return Math.max(1, Math.min(hourlyCap, Math.floor(3_600_000 / perMessage)));
+}
+
+/**
  * "Typing…" time shown to the recipient before a message goes out (presence update
  * `composing`). A message that materializes with zero typing time is a bot tell;
  * scale with length like a person would, capped so long templates don't stall the

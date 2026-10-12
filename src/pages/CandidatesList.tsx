@@ -2,7 +2,8 @@ import React, { useState, useEffect, useRef, useMemo, useDeferredValue } from 'r
 import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, serverTimestamp, orderBy, limit, startAfter, getCountFromServer } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
-import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, getWhatsAppStatus, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles, ScanFace } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
@@ -15,6 +16,7 @@ import { smartMatch, prepareSearch, type SearchField, type SearchHit } from '../
 import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar from '../components/CandidateAvatar';
+import { computeOverallScore } from '../lib/candidateScore';
 
 // Everything the smart search looks at for one row (application + candidate + notes).
 function searchFieldsFor(c: any): SearchField[] {
@@ -62,6 +64,8 @@ export default function CandidatesList() {
   // Post-bulk-move WhatsApp delivery report (who did NOT get the automated message).
   const [sendReport, setSendReport] = useState<{ stage: string; sent: number; failed: any[] } | null>(null);
   const [retryingSends, setRetryingSends] = useState(false);
+  // "How do we notify this batch?" — asked before a bulk move to a messaging stage.
+  const { ask: askBulkNotify, element: bulkNotifyModal } = useBulkNotifyConfirm();
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
 
   const PAGE_SIZE = 100;
@@ -85,13 +89,8 @@ export default function CandidatesList() {
       const app = { id: d.id, ...d.data() } as any;
       const cData = candMap.get(app.candidateId) || {};
 
-      let totalScore = 0;
-      let stagesCompleted = 0;
-      if (app.scoreSummary !== undefined && app.scoreSummary !== null) { totalScore += (app.scoreSummary * 20); stagesCompleted++; }
-      if (app.stage2Scoring?.total_score !== undefined && app.stage2Scoring?.total_score !== null) { totalScore += app.stage2Scoring.total_score; stagesCompleted++; }
-      if (app.interviewObservation?.score !== undefined && app.interviewObservation?.score !== null) { totalScore += (app.interviewObservation.score * 20); stagesCompleted++; }
-      if (app.testResults?.score !== undefined && app.testResults?.score !== null) { totalScore += app.testResults.score; stagesCompleted++; }
-      const calculatedTotalScore = stagesCompleted > 0 ? Math.round(totalScore / stagesCompleted) : 0;
+      // Shared with the Ranking (the interview counts once: interviewer + AI analysis).
+      const calculatedTotalScore = computeOverallScore(app);
 
       return {
         ...app,
@@ -346,18 +345,14 @@ export default function CandidatesList() {
       // Only VISIBLE selected rows move — never rows hidden by the current filters.
       const appsToMove = filteredCandidates.filter(c => selectedApps.includes(c.id));
 
-      // PRE-FLIGHT: if this stage sends an automatic WhatsApp, verify the connection
-      // BEFORE moving anyone — never leave a batch half-notified.
+      // PRE-FLIGHT: a stage that messages candidates asks HOW to notify this batch — with
+      // the WhatsApp state, the delivery estimate at the protective pace and the
+      // template's variation in view — before moving anyone (never half-notified).
+      let notify: BulkNotifyChoice = 'whatsapp';
       if (stageMayAutoSend(newStage)) {
-        const wa = await getWhatsAppStatus();
-        if (!wa.connected) {
-          // With the durable outbox, a disconnected socket does NOT lose messages.
-          const proceed = window.confirm(wa.outbox
-            ? `📨 WhatsApp está desconectado en este momento.\n\nLos mensajes de los ${appsToMove.length} candidato(s) quedarán EN COLA y se enviarán solos en cuanto WhatsApp se reconecte. No se pierde ninguno.\n\n¿Continuar?`
-            : `⚠️ WhatsApp está DESCONECTADO.\n\nSi mueves los ${appsToMove.length} candidato(s) ahora, los mensajes automáticos NO se enviarán.\n\nRecomendado: pulsa Cancelar, conecta WhatsApp en Configuración y vuelve a intentarlo.\n\n¿Mover de todas formas SIN enviar mensajes?`
-          );
-          if (!proceed) { setBulkActionLoading(false); return; }
-        }
+        const choice = await askBulkNotify(newStage, appsToMove.length, appsToMove.filter(a => !!a.email).length);
+        if (!choice) { setBulkActionLoading(false); return; }
+        notify = choice;
       }
 
       const batch = writeBatch(db);
@@ -373,8 +368,9 @@ export default function CandidatesList() {
       let sentCount = 0;
       let queuedCount = 0;
       const failedSends: any[] = [];
-      for (const app of appsToMove) {
-        if (!app.phone) continue;
+      // "Solo mover, sin avisar" skips the whole loop.
+      for (const app of notify === 'none' ? [] : appsToMove) {
+        if (!app.phone && notify === 'whatsapp') continue;
         try {
           let link = '';
           if (newStage === 'Tests presenciales' || newStage === 'Pruebas técnicas') {
@@ -388,18 +384,19 @@ export default function CandidatesList() {
             link,
             email: app.email
           };
-          const r = await sendWhatsAppAutomation(app.phone, newStage, vars);
+          const r = await sendWhatsAppAutomation(app.phone, newStage, vars, { channels: { whatsapp: notify === 'whatsapp' } });
           if (r.status === 'sent') sentCount++;
           if (r.status === 'queued') queuedCount++;
-          if (r.status === 'failed') {
-            failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars });
+          // The report offers a WhatsApp retry — only for a batch that chose WhatsApp.
+          if (r.status === 'failed' && notify === 'whatsapp') {
+            failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars, emailed: !!r.emailed });
           }
           // Direct (dev) sends need client-side spacing; queued ones are paced by the
           // server's drain, so enqueueing can go fast.
           if (r.status === 'sent') await sleep(SEND_SPACING_MS);
         } catch (autoErr) {
           console.error(`Automation failed for ${app.id} (stage saved anyway):`, autoErr);
-          failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars: { nombre: app.candidateName, vacante: app.vacancyTitle, link: '', email: app.email } });
+          if (notify === 'whatsapp') failedSends.push({ id: app.id, name: app.candidateName || 'Sin nombre', phone: app.phone, vars: { nombre: app.candidateName, vacante: app.vacancyTitle, link: '', email: app.email }, emailed: false });
         }
       }
 
@@ -427,8 +424,9 @@ export default function CandidatesList() {
     let sentNow = sendReport.sent;
     for (const f of sendReport.failed) {
       try {
-        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars);
-        if (r.status === 'failed') still.push(f);
+        // Never the same email twice: only if it didn't go out on an earlier attempt.
+        const r = await sendWhatsAppAutomation(f.phone, sendReport.stage, f.vars, { channels: { email: !f.emailed } });
+        if (r.status === 'failed') still.push({ ...f, emailed: f.emailed || !!r.emailed });
         else if (r.status === 'sent' || r.status === 'queued') sentNow++;
       } catch {
         still.push(f);
@@ -936,6 +934,8 @@ export default function CandidatesList() {
           </div>
         )}
       </div>
+
+      {bulkNotifyModal}
 
       {/* WhatsApp delivery report after a bulk move — who didn't get the message + retry. */}
       <WhatsAppSendReport

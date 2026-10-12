@@ -3,7 +3,10 @@ import { doc, getDoc, setDoc, collection, getDocs, updateDoc } from 'firebase/fi
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock, Inbox, RotateCcw, Trash2 } from 'lucide-react';
+import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock, Inbox, RotateCcw, Trash2, Shuffle, Eye, EyeOff, Moon, Timer } from 'lucide-react';
+import { DEFAULT_WA_TEMPLATES } from '../lib/whatsappTemplates';
+import { countVariations, variationProblem, renderMessage, seededRandom } from '../lib/messageVariation';
+import { formatWindowHour } from '../lib/sendWindow';
 
 export default function WhatsAppSettings() {
   const { isAdmin, user } = useAuth();
@@ -24,18 +27,13 @@ export default function WhatsAppSettings() {
   const [uploadingCareersImage, setUploadingCareersImage] = useState(false);
   const careersFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Same defaults as src/lib/whatsapp.ts (keep in sync). Deliberately written like a
-  // person from HR, not a broadcast: the company introduces itself ({{empresa}}), 1-2
-  // emojis at most, and every message invites a reply — messages that look like mass
-  // campaigns get reported by recipients, and reports get the number banned.
-  const [templates, setTemplates] = useState({
-    "Formulario etapa 2 enviado": "Hola {{nombre}}, te saluda el equipo de reclutamiento de {{empresa}} 👋\n\nRecibimos tu aplicación a la vacante de {{vacante}} y nos gustó tu perfil: queremos avanzar contigo a la siguiente etapa.\n\nEl próximo paso es completar este formulario antes del {{fecha}}:\n{{link}}\n\n¿Contamos contigo? Respóndenos por aquí para saber que recibiste este mensaje. Y si prefieres no continuar en el proceso, también puedes decírnoslo.",
-    "Convocado a entrevista": "Hola {{nombre}}, te escribimos de {{empresa}} por el proceso de {{vacante}}.\n\n¡Buenas noticias! Queremos invitarte a una entrevista virtual:\n\nFecha: {{fecha}}\nHora: {{hora}}\nModalidad: Virtual ({{ubicacion}})\n\n¿Te queda bien ese horario? Respóndenos por aquí para confirmar; si no puedes ese día, lo coordinamos. ¡Gracias!",
-    "Entrevista presencial": "Hola {{nombre}}, te escribimos de {{empresa}}. Pasaste a la etapa final del proceso para {{vacante}} 🎉\n\nQueremos conocerte en persona:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas tu asistencia respondiendo este mensaje? Si necesitas otro horario, dinos y lo buscamos.",
-    "Oferta": "Hola {{nombre}}, te escribimos de {{empresa}} con una excelente noticia: fuiste seleccionado(a) para el puesto de {{vacante}} 🎉\n\nQueremos reunirnos contigo para revisar los detalles y formalizar el inicio:\n\nFecha: {{fecha}}\nHora: {{hora}}\nLugar: {{ubicacion}}\n\n¿Nos confirmas por aquí? ¡Nos alegra mucho poder darte la bienvenida al equipo!",
-    "Descartado": "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por participar en nuestro proceso para la vacante de {{vacante}}. En esta ocasión decidimos continuar con otros perfiles, pero valoramos de verdad el tiempo y el interés que dedicaste.\n\nTe deseamos muchos éxitos, y ojalá coincidamos en una próxima oportunidad.",
-    "Banco de talento": "Hola {{nombre}}, te escribimos de {{empresa}}.\n\nGracias por tu excelente participación en el proceso para {{vacante}}. Esta vez el proceso concluyó con otro perfil, pero tu desempeño nos gustó mucho.\n\nNos encantaría guardar tus datos en nuestro banco de talento para futuras oportunidades. ¿Nos autorizas? Responde \"Sí, autorizo\" y quedas dentro."
-  });
+  // Defaults (with {a|b} variations) come from the same module the sender uses, so the
+  // editor and what actually goes out can never drift apart again.
+  const [templates, setTemplates] = useState<Record<string, string>>({ ...DEFAULT_WA_TEMPLATES });
+  // Last saved version, to tell the recruiter when edits are still unsaved.
+  const savedTemplatesRef = useRef<string>(JSON.stringify(DEFAULT_WA_TEMPLATES));
+  // Per-stage preview: absent = hidden; a number = the seed of the example shown.
+  const [previewSeeds, setPreviewSeeds] = useState<Record<string, number>>({});
 
   const fetchStatus = async () => {
     try {
@@ -64,7 +62,9 @@ export default function WhatsAppSettings() {
       const docRef = doc(db, 'settings', 'whatsapp_templates');
       const docSnap = await getDoc(docRef);
       if (docSnap.exists() && docSnap.data().templates) {
-        setTemplates({ ...templates, ...docSnap.data().templates });
+        const merged = { ...DEFAULT_WA_TEMPLATES, ...docSnap.data().templates };
+        setTemplates(merged);
+        savedTemplatesRef.current = JSON.stringify(merged);
       }
       
       // Fetch Company Profile
@@ -307,6 +307,7 @@ export default function WhatsAppSettings() {
     try {
       // Save templates
       await setDoc(doc(db, 'settings', 'whatsapp_templates'), { templates }, { merge: true });
+      savedTemplatesRef.current = JSON.stringify(templates);
       
       // Save company profile
       await setDoc(doc(db, 'settings', 'company'), {
@@ -324,6 +325,8 @@ export default function WhatsAppSettings() {
       setSaving(false);
     }
   };
+
+  const templatesDirty = JSON.stringify(templates) !== savedTemplatesRef.current;
 
   if (loading) return <div className="flex justify-center p-12"><Loader2 className="animate-spin" /></div>;
 
@@ -698,9 +701,48 @@ export default function WhatsAppSettings() {
                 <p className="text-sm font-bold text-slate-800 mt-1">{fmtDate(status.pacing.linkedAt) || '—'}</p>
               </div>
             </div>
+            {(status.pacing.sendWindow || status.pacing.autoPerHour) && (
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {status.pacing.autoPerHour && (
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 flex items-start">
+                    <Timer className="w-4 h-4 text-indigo-500 mr-2 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-xs text-slate-500 font-medium">Ritmo de los mensajes automáticos</p>
+                      <p className="text-sm font-bold text-slate-800">
+                        ~1 por minuto, con pausas irregulares (≈{status.pacing.autoPerHour}/hora)
+                      </p>
+                      {status.pacing.nextAutoSendAt && (
+                        <p className="text-[11px] text-slate-400 mt-0.5">
+                          Próximo automático: {new Date(status.pacing.nextAutoSendAt).toLocaleTimeString('es-DO', { hour: 'numeric', minute: '2-digit' })}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {status.pacing.sendWindow && (
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 flex items-start">
+                    <Moon className="w-4 h-4 text-indigo-500 mr-2 mt-0.5 shrink-0" />
+                    <div>
+                      <p className="text-xs text-slate-500 font-medium">Horario de envío (hora de RD)</p>
+                      <p className="text-sm font-bold text-slate-800">
+                        {status.pacing.sendWindow.start === 0 && status.pacing.sendWindow.end === 24
+                          ? 'Todo el día'
+                          : `${formatWindowHour(status.pacing.sendWindow.start)} – ${formatWindowHour(status.pacing.sendWindow.end)}`}
+                      </p>
+                      <p className={`text-[11px] mt-0.5 font-medium ${status.pacing.sendWindow.open ? 'text-emerald-600' : 'text-amber-600'}`}>
+                        {status.pacing.sendWindow.open
+                          ? 'Ahora: dentro del horario'
+                          : `Ahora: fuera de horario — los automáticos salen desde ${fmtDate(status.pacing.sendWindow.opensAt) || 'la mañana'}`}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
             <p className="text-[11px] text-slate-400 mt-3">
-              El límite diario sube solo a medida que el número gana antigüedad. Si la cola espera, es la protección
-              trabajando — no una falla: nada se pierde.
+              El límite diario sube solo a medida que el número gana antigüedad. Los mensajes automáticos salen uno a uno,
+              con una redacción distinta para cada candidato y solo dentro del horario; el chat manual no espera. Si la cola
+              espera, es la protección trabajando — no una falla: nada se pierde.
             </p>
           </div>
         )}
@@ -803,34 +845,128 @@ export default function WhatsAppSettings() {
 
       {/* Templates */}
       <div className="bg-white shadow-sm border border-slate-200 rounded-xl overflow-hidden">
-        <div className="p-6 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+        <div className="p-6 border-b border-slate-200 flex flex-wrap gap-3 justify-between items-center bg-slate-50">
           <div className="flex items-center">
             <MessageSquare className="w-5 h-5 text-green-600 mr-2" />
             <h2 className="text-lg font-bold text-slate-800">Plantillas por Etapa</h2>
           </div>
+          {templatesDirty && (
+            <button
+              onClick={handleSaveSettings}
+              disabled={saving}
+              className="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold hover:bg-indigo-700 transition-colors disabled:opacity-50"
+            >
+              {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+              Guardar plantillas
+            </button>
+          )}
         </div>
 
         <div className="p-6 space-y-6">
           <div className="bg-blue-50 border border-blue-100 p-4 rounded-lg">
             <h3 className="text-sm font-bold text-blue-900 mb-2">Variables dinámicas disponibles:</h3>
             <div className="flex flex-wrap gap-2">
-              {['{{nombre}}', '{{empresa}}', '{{vacante}}', '{{link}}', '{{fecha}}', '{{hora}}', '{{ubicacion}}'].map(v => (
+              {['{{primer_nombre}}', '{{nombre}}', '{{empresa}}', '{{vacante}}', '{{link}}', '{{fecha}}', '{{hora}}', '{{ubicacion}}'].map(v => (
                 <span key={v} className="px-2 py-1 bg-white border border-blue-200 text-blue-700 text-xs font-mono rounded shadow-sm">{v}</span>
               ))}
             </div>
+            <p className="text-xs text-blue-800/80 mt-2">
+              <span className="font-mono">{'{{primer_nombre}}'}</span> saluda solo por el nombre ("Hola María"), como lo haría una persona.
+            </p>
           </div>
 
-          {Object.entries(templates).map(([stage, template]) => (
-            <div key={stage}>
-              <label className="block text-sm font-bold text-slate-700 mb-2">{stage}</label>
-              <textarea
-                className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 text-sm"
-                rows={3}
-                value={template}
-                onChange={e => setTemplates({...templates, [stage]: e.target.value})}
-              />
-            </div>
-          ))}
+          <div className="bg-emerald-50 border border-emerald-100 p-4 rounded-lg">
+            <h3 className="text-sm font-bold text-emerald-900 mb-1 flex items-center">
+              <Shuffle className="w-4 h-4 mr-1.5" /> Variaciones: que ningún mensaje salga idéntico
+            </h3>
+            <p className="text-xs text-emerald-800 leading-relaxed">
+              Escribe opciones entre llaves separadas por <span className="font-mono font-bold">|</span> y el sistema elige una
+              distinta para cada candidato. Ejemplo: <span className="font-mono bg-white px-1 rounded">{'{Hola|Saludos|Buenas} {{primer_nombre}}'}</span>.
+              Enviar exactamente el mismo texto a muchas personas a la vez es una de las señales que WhatsApp usa para bloquear
+              números; con variaciones, cada mensaje sale con una redacción diferente.
+            </p>
+          </div>
+
+          {(Object.entries(templates) as [string, string][]).map(([stage, template]) => {
+            const variants = countVariations(template);
+            const problem = variationProblem(template);
+            const recommended = DEFAULT_WA_TEMPLATES[stage];
+            const seed = previewSeeds[stage];
+            return (
+              <div key={stage}>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <label className="block text-sm font-bold text-slate-700">{stage}</label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {variants > 1 ? (
+                      <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">
+                        ✓ {variants >= 1000 ? 'Más de 1.000' : variants} versiones distintas
+                      </span>
+                    ) : (
+                      <span className="text-[11px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-full">
+                        ⚠️ Todos reciben el mismo texto
+                      </span>
+                    )}
+                    <button
+                      onClick={() => setPreviewSeeds(prev => {
+                        const next = { ...prev };
+                        if (stage in next) delete next[stage]; else next[stage] = Date.now();
+                        return next;
+                      })}
+                      className="inline-flex items-center px-2 py-1 text-xs font-medium border border-slate-200 text-slate-600 bg-white rounded-lg hover:bg-slate-50"
+                    >
+                      {seed !== undefined ? <EyeOff className="w-3.5 h-3.5 mr-1" /> : <Eye className="w-3.5 h-3.5 mr-1" />}
+                      {seed !== undefined ? 'Ocultar vista previa' : 'Vista previa'}
+                    </button>
+                    {recommended && template !== recommended && (
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`¿Reemplazar la plantilla de "${stage}" por la versión recomendada (con variaciones)?\n\nLuego pulsa "Guardar plantillas".`)) {
+                            setTemplates({ ...templates, [stage]: recommended });
+                          }
+                        }}
+                        className={`inline-flex items-center px-2 py-1 text-xs font-bold rounded-lg ${variants > 1 ? 'border border-slate-200 text-slate-600 bg-white hover:bg-slate-50' : 'text-white bg-emerald-600 hover:bg-emerald-700'}`}
+                      >
+                        <Shuffle className="w-3.5 h-3.5 mr-1" /> Usar versión recomendada
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <textarea
+                  className="w-full p-3 border border-slate-300 rounded-lg focus:ring-2 focus:ring-green-500 focus:border-green-500 text-sm"
+                  rows={5}
+                  value={template}
+                  onChange={e => setTemplates({ ...templates, [stage]: e.target.value })}
+                />
+                {problem && <p className="text-xs font-medium text-rose-600 mt-1">{problem}</p>}
+                {seed !== undefined && (
+                  <div className="mt-2 bg-emerald-50/60 border border-emerald-100 rounded-lg p-3">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[11px] font-bold text-slate-500">Así le llegaría a un candidato (ejemplo)</span>
+                      {variants > 1 && (
+                        <button
+                          onClick={() => setPreviewSeeds(prev => ({ ...prev, [stage]: (prev[stage] || 0) + 1 }))}
+                          className="inline-flex items-center text-[11px] font-bold text-emerald-700 hover:text-emerald-900"
+                        >
+                          <Shuffle className="w-3.5 h-3.5 mr-1" /> Otra versión
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-sm text-slate-800 whitespace-pre-wrap">
+                      {renderMessage(template, {
+                        nombre: 'MARÍA PÉREZ',
+                        vacante: 'Vendedor(a) de tienda',
+                        empresa: companyName || 'Darwin Cell',
+                        link: `${window.location.origin}/eval/ejemplo`,
+                        fecha: 'jueves 15 de octubre',
+                        hora: '10:00 a. m.',
+                        ubicacion: 'Calle Duarte #10, Baní',
+                      }, seededRandom(seed))}
+                    </p>
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       </div>
     </div>

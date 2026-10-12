@@ -91,11 +91,12 @@ service cloud.firestore {
       allow list: if isRecruiter();
       // Recruiters (e.g. bulk upload) may create freely. A public applicant may only
       // create a fresh 'Nuevo' application and CANNOT preset any evaluation field
-      // (no injecting a fake top-ranked candidate).
+      // (no injecting a fake top-ranked candidate) — the interview rating and its AI
+      // analysis included: both feed the Ranking score.
       allow create: if isRecruiter() ||
         (isAuthenticated()
           && request.resource.data.stage == 'Nuevo'
-          && !request.resource.data.keys().hasAny(['stage2Scoring', 'testResults', 'scoreSummary', 'recommendation', 'interviewScorecard']));
+          && !request.resource.data.keys().hasAny(['stage2Scoring', 'testResults', 'scoreSummary', 'recommendation', 'interviewScorecard', 'interviewObservation', 'interviewAiEvaluation']));
       // Scores/answers are now written ONLY server-side (Admin SDK, which bypasses
       // rules) or by a recruiter. Candidates can no longer forge their own scores.
       allow update: if isRecruiter();

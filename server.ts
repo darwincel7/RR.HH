@@ -31,14 +31,21 @@ import {
   nextSpacingMs, retryBackoffMs, afterFailure, drainAction, typingDelayMs,
   dailySendLimit, isOptOutMessage, HOURLY_SEND_CAP, WA_MATURE_DAILY_CAP,
   OUTBOX_STUCK_MS, OUTBOX_DRAIN_DEADLINE_MS,
+  nextAutomationGap, sanitizeAutoNextAt, automationMessagesPerHour,
 } from './serverWhatsAppQueue';
+import { parseSendWindow, isWithinSendWindow, nextSendWindowOpenMs, formatWindowHour } from './src/lib/sendWindow';
 import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
-  emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema,
+  emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
   decodeImageDataUrl, firstIssueMessage, EMAIL_RE, isOurStorageUrl,
 } from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
+import { hasInterviewEvidence } from './src/lib/interviewScorecard';
+import {
+  buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
+  INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
+} from './serverInterviewEval';
 
 import nodemailer from "nodemailer";
 
@@ -945,6 +952,13 @@ const WA_DAILY_CAP_MATURE = parseInt(process.env.WA_DAILY_CAP || '', 10) || WA_M
 // companion session are the most scrutinized moment in the account's life.
 const WA_QUARANTINE_HOURS = process.env.WA_QUARANTINE_HOURS !== undefined
   ? Math.max(0, Number(process.env.WA_QUARANTINE_HOURS) || 0) : 12;
+// Automated messages only go out within these hours, DR time: "8-20" (8:00 a.m. to
+// 7:59 p.m.) unless WA_SEND_HOURS says otherwise ("off" disables it). A recruiting
+// message from an unknown number at night is the kind people block and report.
+const WA_SEND_WINDOW = parseSendWindow(process.env.WA_SEND_HOURS);
+// After an in-pass wait, the send itself still needs this long (ready-check ≤25s +
+// typing ≤10s + the send) — a wait that wouldn't leave it is left to the next pass.
+const AUTO_SEND_RESERVE_MS = 45_000;
 
 const tsToMs = (v: any): number => (v?.toMillis ? v.toMillis() : (v ? new Date(v).getTime() : 0));
 
@@ -992,8 +1006,13 @@ async function getWhatsAppLinkInfo(): Promise<{ number: string; linkedAtMs: numb
   return waLinkInfoCache;
 }
 
-// Hour/day counters, persisted so restarts and redeploys can't reset the budget.
-type SendStats = { day: string; hour: string; sentDay: number; sentHour: number };
+// Hour/day counters, persisted so restarts and redeploys can't reset the budget — and
+// the automated-message pacing (when the next one may go out, where we are in the
+// current burst), persisted so it holds ACROSS drain passes and restarts.
+type SendStats = {
+  day: string; hour: string; sentDay: number; sentHour: number;
+  autoNextAt: number; autoBurst: number; autoBurstTarget: number;
+};
 
 async function loadSendStats(nowMs: number): Promise<SendStats> {
   const doc = await db.getDocData('whatsapp_runtime', 'send_stats').catch(() => null);
@@ -1002,6 +1021,9 @@ async function loadSendStats(nowMs: number): Promise<SendStats> {
     day, hour,
     sentDay: doc?.day === day ? (doc.sentDay || 0) : 0,
     sentHour: doc?.hour === hour ? (doc.sentHour || 0) : 0,
+    autoNextAt: sanitizeAutoNextAt(doc?.autoNextAt, nowMs),
+    autoBurst: Number(doc?.autoBurst) || 0,
+    autoBurstTarget: Number(doc?.autoBurstTarget) || 0,
   };
 }
 
@@ -1014,13 +1036,27 @@ function rollSendStats(stats: SendStats, nowMs: number) {
   if (stats.hour !== hour) { stats.hour = hour; stats.sentHour = 0; }
 }
 
-async function bumpSendStats(stats: SendStats) {
-  rollSendStats(stats, Date.now());
-  stats.sentDay++;
-  stats.sentHour++;
+// After a send attempt: count it (if it went out) and, for an AUTOMATED message, schedule
+// when the next automated one may go — also after a failure that reached the socket:
+// WhatsApp saw an attempt either way.
+async function recordSend(stats: SendStats, { counted, automation }: { counted: boolean; automation: boolean }) {
+  const now = Date.now();
+  rollSendStats(stats, now);
+  if (counted) {
+    stats.sentDay++;
+    stats.sentHour++;
+  }
+  if (automation) {
+    const next = nextAutomationGap({ burstCount: stats.autoBurst, burstTarget: stats.autoBurstTarget });
+    stats.autoNextAt = now + next.gapMs;
+    stats.autoBurst = next.state.burstCount;
+    stats.autoBurstTarget = next.state.burstTarget;
+  }
+  waPacingCache = null; // the protection panel shows the new numbers right away
   await db.setDocData('whatsapp_runtime', 'send_stats', {
     day: stats.day, sentDay: stats.sentDay,
     hour: stats.hour, sentHour: stats.sentHour,
+    autoNextAt: stats.autoNextAt, autoBurst: stats.autoBurst, autoBurstTarget: stats.autoBurstTarget,
   }).catch((e: any) => console.error('[wa-pacing] no se pudo guardar el contador:', e));
 }
 
@@ -1047,20 +1083,36 @@ async function checkNumberOnWhatsApp(number: string): Promise<{ exists: boolean;
   }
 }
 
-// Is an identical message already on its way to this phone? Covers 'sending' too (the
-// claim window a client retry lands in). Automations dedupe against anything still
-// pending — a re-dragged card or a retry-after-timeout must not double-send a template.
-// Manual chat only dedupes within a short window: a recruiter legitimately sends the
-// same short text ("ok", "¿me confirmas?") twice on different occasions.
-async function isDuplicateOutboxMessage(phone: string, message: string, origin: 'manual' | 'automation'): Promise<boolean> {
+// Is this message already on its way to this phone? Covers 'sending' too (the claim
+// window a client retry lands in). Automations dedupe against anything still pending —
+// a re-dragged card or a retry-after-timeout must not double-send a template — by the
+// exact text OR by the notification itself (dedupeKey = stage + vacancy + date/time):
+// templates carry {a|b} variations and may be edited between attempts, so the text
+// alone is not a reliable identity. Manual chat only dedupes identical text within a
+// short window: a recruiter legitimately sends "ok" twice on different occasions.
+async function isDuplicateOutboxMessage(phone: string, message: string, origin: 'manual' | 'automation', dedupeKey = ''): Promise<boolean> {
   const recent = await db.listOutboxByPhone(phone);
   const now = Date.now();
   return recent.some((q: any) => {
-    if (q.message !== message) return false;
     if (q.status !== 'queued' && q.status !== 'sending') return false;
-    if (origin === 'manual') return now - tsToMs(q.createdAt) < 2 * 60_000;
-    return true;
+    if (origin === 'manual') return q.message === message && now - tsToMs(q.createdAt) < 2 * 60_000;
+    return q.message === message || (!!dedupeKey && q.dedupeKey === dedupeKey);
   });
+}
+
+// A newer automated notification of the same kind for this phone (same stage + vacancy,
+// e.g. a rescheduled interview) retires one that is still WAITING in the queue. With the
+// slow pace and the night-time send window, a message can wait for hours — without this
+// the candidate would get the old date and the new one back to back. One already being
+// sent (or sent) is left alone.
+async function supersedeQueuedAutomations(phone: string, topicKey: string, dedupeKey: string) {
+  const recent = await db.listOutboxByPhone(phone);
+  for (const q of recent) {
+    if (q.status !== 'queued' || q.origin === 'manual' || q.topicKey !== topicKey || q.dedupeKey === dedupeKey) continue;
+    if (await db.dismissOutboxIfQueued(q.id, 'Reemplazado por un mensaje más reciente de la misma etapa (p. ej. una cita reprogramada)')) {
+      console.log(`[wa-outbox] mensaje ${q.id} (${q.stage || 'automatización'}) reemplazado por uno más reciente antes de salir.`);
+    }
+  }
 }
 
 // Has this phone asked us to stop? (see registerOptOut)
@@ -1102,6 +1154,29 @@ async function waitForWhatsAppReady(maxWaitMs: number): Promise<'connected' | 's
 }
 
 let waDrainRunning = false;
+// Set when a recruiter's chat message is queued on THIS instance: a drain resting between
+// automated sends wakes up to deliver it instead of holding a live conversation hostage.
+let waManualWaiting = false;
+// The closed send window / the quarantine are logged once per period, not on every 60s pass.
+let waWindowClosedLoggedFor = 0;
+let waQuarantineLoggedFor = 0;
+
+// Rests `ms` — or less, if a chat message arrives meanwhile (see waManualWaiting).
+async function restUnlessManualArrives(ms: number) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (waManualWaiting) return;
+    await waSleep(Math.min(1_000, Math.max(0, until - Date.now())));
+  }
+}
+
+// What happened to one message:
+//  'sent'    — delivered to the socket;
+//  'failed'  — the send reached the point of failing (requeued with backoff, or final);
+//  'dropped' — refused before any send (opt-out, no WhatsApp, invalid phone): no pacing;
+//  'skipped' — another drain claimed it first;
+//  'stop'    — WhatsApp can't send right now (it stays queued, unburned).
+type SendOutcome = 'sent' | 'failed' | 'dropped' | 'skipped' | 'stop';
 
 async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; failedFinal: number; stopped: boolean; paced: boolean; busy: boolean }> {
   const result = { sent: 0, requeued: 0, failedFinal: 0, stopped: false, paced: false, busy: false };
@@ -1132,176 +1207,211 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
     const stats = await loadSendStats(started);
 
     const budgetLeft = () => OUTBOX_DRAIN_DEADLINE_MS - (Date.now() - started);
-    // manual-only mode: quarantine starts in it, and hitting an hour/day cap switches
-    // into it — automations pause but the recruiter's own chat (cap-exempt) keeps
-    // flowing. The dedicated query matters: fetching the generic queue and filtering
-    // afterwards let ≥30 queued automations occupy the whole batch window and starve
-    // the manual messages behind them.
-    let manualOnly = inQuarantine;
-    let quarantineNoticed = false;
     let consecutiveSendFailures = 0;
+    let manualSent = 0;
+
+    // One message, start to finish: ready-check, atomic claim, then the send.
+    const sendOne = async (msg: any): Promise<SendOutcome> => {
+      const ready = await waitForWhatsAppReady(Math.max(1_000, Math.min(25_000, budgetLeft())));
+      if (ready !== 'connected') return 'stop';
+
+      // Claim atomically so two drains (e.g. interval + HTTP) never double-send.
+      if (!await db.claimOutboxMessage(msg.id)) return 'skipped';
+
+      // ---- Phase 1: everything BEFORE the message reaches the socket. A failure
+      // here means the message was NOT delivered, so retrying is always safe.
+      try {
+        const jid = formatWhatsAppNumber(msg.phone);
+        const number = jid.split('@')[0];
+
+        // A recipient who asked us to stop never hears from the queue again.
+        if (await isOptedOut(msg.phone)) {
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El candidato pidió no recibir mensajes (opt-out)' });
+          result.failedFinal++;
+          return 'dropped';
+        }
+
+        // Verify the number actually exists on WhatsApp before sending at it.
+        const check = await checkNumberOnWhatsApp(number);
+        if (check && !check.exists) {
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El número no tiene WhatsApp' });
+          result.failedFinal++;
+          if (msg.candidateId) {
+            db.setDocData('candidates', msg.candidateId, { whatsappExists: false }).catch(() => { /* best effort */ });
+          }
+          return 'dropped';
+        }
+        const targetJid = check?.jid || jid; // WhatsApp's own JID mapping when we have it
+
+        // Pace like a person: a length-proportional "composing" pause before the
+        // send. (The visible "escribiendo…" bubble needs an 'available' presence we
+        // deliberately don't broadcast — what matters here is the pacing pattern the
+        // servers see, not the bubble.)
+        try {
+          await sock!.sendPresenceUpdate('composing', targetJid);
+          await waSleep(typingDelayMs(String(msg.message || '').length));
+          await sock!.sendPresenceUpdate('paused', targetJid);
+        } catch { /* presence is best-effort — never blocks the send */ }
+
+        const info = await sock!.sendMessage(targetJid, { text: msg.message });
+        rememberSentMessage(info);
+      } catch (err: any) {
+        const emsg = err?.message || String(err);
+        if (emsg === 'phone_invalido') {
+          // Bad data never improves with retries — fail it immediately and visibly.
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'Teléfono inválido' });
+          result.failedFinal++;
+          return 'dropped';
+        }
+        const next = afterFailure(msg.attempts || 0, Date.now(), emsg.slice(0, 500));
+        await db.markOutbox(msg.id, next).catch(e => console.error('[wa-outbox] no se pudo marcar el fallo:', e));
+        if (next.status === 'failed') {
+          result.failedFinal++;
+          notifyAdmin('wa-outbox-failed', 'Un mensaje de WhatsApp no se pudo entregar tras varios intentos',
+            `<p>Un mensaje para <b>${String(msg.candidateName || msg.phone)}</b> agotó sus ${next.attempts} intentos de envío.</p>
+             <p>Último error: <code>${emsg.slice(0, 300).replace(/</g, '&lt;')}</code></p>
+             <p>Queda marcado como fallido en la cola; revisa la conexión de WhatsApp en Ajustes.</p>`);
+        } else {
+          result.requeued++;
+        }
+        return 'failed';
+      }
+
+      // ---- Phase 2: the message IS out. Bookkeeping failures here must NEVER flow
+      // into the retry path — that requeued and re-sent an already-delivered text
+      // (the recipient got it twice). Mark 'sent' with its own retries; a Firestore
+      // blip no longer duplicates. (If Firestore stays down for minutes, the stuck-
+      // message reclaim can still redeliver once — the inherent at-least-once edge.)
+      result.sent++;
+      let marked = false;
+      for (let attempt = 0; attempt < 3 && !marked; attempt++) {
+        try {
+          await db.markOutbox(msg.id, { status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null });
+          marked = true;
+        } catch (markErr) {
+          console.error(`[wa-outbox] enviado pero no se pudo marcar como 'sent' (intento ${attempt + 1}):`, markErr);
+          await waSleep(1_000 * (attempt + 1));
+        }
+      }
+
+      // Conversation history — written on ACTUAL delivery to the socket, not on
+      // enqueue, so the profile chat reflects what really went out.
+      try {
+        const candidateId = msg.candidateId || await db.findCandidateIdByPhone(msg.phone);
+        if (candidateId) {
+          await db.addWhatsappMessage({
+            candidateId, text: msg.message, direction: 'outbound',
+            isAutomated: msg.origin !== 'manual', ...(msg.stage ? { stage: msg.stage } : {}),
+          });
+        }
+      } catch (histErr) {
+        console.error('[wa-outbox] no se pudo guardar el historial del mensaje:', histErr);
+      }
+      return 'sent';
+    };
+
+    // Circuit breaker: several sends failing in a row means WhatsApp is refusing us
+    // RIGHT NOW — pushing the rest of the queue is hammering. The pass stops; the
+    // backoffs decide when to retry.
+    const tripsBreaker = (outcome: SendOutcome): boolean => {
+      if (outcome === 'sent') consecutiveSendFailures = 0;
+      if (outcome !== 'failed' || ++consecutiveSendFailures < 3) return false;
+      console.error('[wa-outbox] 3 envíos fallidos seguidos — se detiene esta pasada para no insistir.');
+      result.stopped = true;
+      return true;
+    };
+
     outer: for (;;) {
       if (budgetLeft() <= 0) break;
-      const batch = manualOnly ? await db.listQueuedOutboxManual(10) : await db.listOutboxSendable(10);
-      if (inQuarantine && !quarantineNoticed) {
-        quarantineNoticed = true;
-        const pending = await db.countOutboxPending().catch(() => 0);
-        if (pending > batch.length) {
-          result.paced = true;
-          const mins = Math.ceil((quarantineUntil - started) / 60_000);
+
+      // 1) The recruiter's own chat goes first, always: human-paced 1:1 replies are the
+      //    LOW-risk traffic, exempt from the caps, the send window and the automation
+      //    gap (they still count in the stats). The dedicated query matters: fetched
+      //    from the generic queue, a pile of automations could starve them.
+      waManualWaiting = false;
+      const manuals = await db.listQueuedOutboxManual(10);
+      if (manuals.length > 0) {
+        for (const msg of manuals) {
+          if (budgetLeft() <= 0) break outer;
+          const outcome = await sendOne(msg);
+          if (outcome === 'stop') { result.stopped = true; break outer; }
+          if (outcome === 'skipped' || outcome === 'dropped') continue;
+          if (outcome === 'sent') {
+            manualSent++;
+            await recordSend(stats, { counted: true, automation: false });
+          }
+          if (tripsBreaker(outcome)) break outer;
+          // Keep a human rhythm between chat messages too (also after a failure).
+          const pause = Math.min(nextSpacingMs(manualSent), Math.max(0, budgetLeft()));
+          if (pause > 0) await waSleep(pause);
+        }
+        continue; // more chat may have arrived meanwhile — it still goes first
+      }
+
+      // 2) Automated messages: ONE at a time, and only when every guard allows it.
+      const next = (await db.listOutboxSendable(10)).find((m: any) => m.origin !== 'manual');
+      if (!next) break; // nothing left to send
+
+      const now = Date.now();
+      if (inQuarantine) {
+        result.paced = true;
+        const mins = Math.ceil((quarantineUntil - now) / 60_000);
+        if (waQuarantineLoggedFor !== quarantineUntil) {
+          waQuarantineLoggedFor = quarantineUntil;
           console.log(`[wa-warmup] cuarentena post-vinculación: mensajes automáticos en espera ~${mins} min más.`);
-          notifyAdmin('wa-quarantine', 'WhatsApp en calentamiento: los mensajes automáticos esperan unas horas',
-            `<p>El número se vinculó hace poco, así que los mensajes automáticos están <b>en pausa preventiva</b> (quedan ~${Math.max(1, Math.ceil(mins / 60))}h). El chat manual sí funciona.</p>
-             <p>Esto es normal y protege el número de un bloqueo: no hay que hacer nada. Los mensajes en cola saldrán solos, poco a poco, cuando termine la pausa.</p>`,
-            20 * 60 * 60 * 1000);
         }
+        notifyAdmin('wa-quarantine', 'WhatsApp en calentamiento: los mensajes automáticos esperan unas horas',
+          `<p>El número se vinculó hace poco, así que los mensajes automáticos están <b>en pausa preventiva</b> (quedan ~${Math.max(1, Math.ceil(mins / 60))}h). El chat manual sí funciona.</p>
+           <p>Esto es normal y protege el número de un bloqueo: no hay que hacer nada. Los mensajes en cola saldrán solos, poco a poco, cuando termine la pausa.</p>`,
+          20 * 60 * 60 * 1000);
+        break;
       }
-      if (batch.length === 0) break;
 
-      for (const msg of batch) {
-        if (budgetLeft() <= 0) break outer;
-
-        // Budget check BEFORE claiming: over-budget messages stay queued untouched
-        // and go out in a later pass, next hour, or next day. Manual 1:1 chat is
-        // exempt (human-paced replies in open conversations are the LOW-risk traffic;
-        // the caps exist for template blasts) but still counts toward the stats.
-        rollSendStats(stats, Date.now());
-        const isManual = msg.origin === 'manual';
-        if (!isManual && (stats.sentDay >= dailyCap || stats.sentHour >= WA_HOURLY_CAP)) {
-          if (stats.sentDay >= dailyCap) {
-            console.log(`[wa-pacing] tope diario alcanzado (${stats.sentDay}/${dailyCap}); el resto de la cola espera a mañana.`);
-            notifyAdmin('wa-pacing-daily', 'WhatsApp: tope diario de envíos alcanzado (protección anti-bloqueo)',
-              `<p>Hoy ya salieron <b>${stats.sentDay}</b> mensajes de WhatsApp, el máximo prudente para la edad actual del número.</p>
-               <p>Los demás <b>no se pierden</b>: quedan en cola y saldrán mañana automáticamente. Este límite sube solo a medida que el número gana antigüedad.</p>`,
-              6 * 60 * 60 * 1000);
-          } else {
-            console.log(`[wa-pacing] tope por hora alcanzado (${stats.sentHour}/${WA_HOURLY_CAP}); la cola continúa en la próxima hora.`);
-          }
-          result.paced = true;
-          // Automations pause, but manual chat is cap-exempt: refetch manual-only
-          // instead of ending the pass with manuals stranded behind this template.
-          manualOnly = true;
-          break;
-        }
-
-        const ready = await waitForWhatsAppReady(Math.max(1_000, Math.min(25_000, budgetLeft())));
-        if (ready !== 'connected') {
-          result.stopped = true;
-          break outer;
-        }
-
-        // Claim atomically so two drains (e.g. interval + HTTP) never double-send.
-        if (!await db.claimOutboxMessage(msg.id)) continue;
-
-        // ---- Phase 1: everything BEFORE the message reaches the socket. A failure
-        // here means the message was NOT delivered, so retrying is always safe.
-        let delivered = false;
-        try {
-          const jid = formatWhatsAppNumber(msg.phone);
-          const number = jid.split('@')[0];
-
-          // A recipient who asked us to stop never hears from the queue again.
-          if (await isOptedOut(msg.phone)) {
-            await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El candidato pidió no recibir mensajes (opt-out)' });
-            result.failedFinal++;
-            continue;
-          }
-
-          // Verify the number actually exists on WhatsApp before sending at it.
-          const check = await checkNumberOnWhatsApp(number);
-          if (check && !check.exists) {
-            await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El número no tiene WhatsApp' });
-            result.failedFinal++;
-            if (msg.candidateId) {
-              db.setDocData('candidates', msg.candidateId, { whatsappExists: false }).catch(() => { /* best effort */ });
-            }
-            continue;
-          }
-          const targetJid = check?.jid || jid; // WhatsApp's own JID mapping when we have it
-
-          // Pace like a person: a length-proportional "composing" pause before the
-          // send. (The visible "escribiendo…" bubble needs an 'available' presence we
-          // deliberately don't broadcast — what matters here is the pacing pattern the
-          // servers see, not the bubble.)
-          try {
-            await sock!.sendPresenceUpdate('composing', targetJid);
-            await waSleep(typingDelayMs(String(msg.message || '').length));
-            await sock!.sendPresenceUpdate('paused', targetJid);
-          } catch { /* presence is best-effort — never blocks the send */ }
-
-          const info = await sock!.sendMessage(targetJid, { text: msg.message });
-          delivered = true;
-          rememberSentMessage(info);
-        } catch (err: any) {
-          const emsg = err?.message || String(err);
-          if (emsg === 'phone_invalido') {
-            // Bad data never improves with retries — fail it immediately and visibly.
-            await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'Teléfono inválido' });
-            result.failedFinal++;
-            continue;
-          }
-          const next = afterFailure(msg.attempts || 0, Date.now(), emsg.slice(0, 500));
-          await db.markOutbox(msg.id, next).catch(e => console.error('[wa-outbox] no se pudo marcar el fallo:', e));
-          if (next.status === 'failed') {
-            result.failedFinal++;
-            notifyAdmin('wa-outbox-failed', 'Un mensaje de WhatsApp no se pudo entregar tras varios intentos',
-              `<p>Un mensaje para <b>${String(msg.candidateName || msg.phone)}</b> agotó sus ${next.attempts} intentos de envío.</p>
-               <p>Último error: <code>${emsg.slice(0, 300).replace(/</g, '&lt;')}</code></p>
-               <p>Queda marcado como fallido en la cola; revisa la conexión de WhatsApp en Ajustes.</p>`);
-          } else {
-            result.requeued++;
-          }
-          // Circuit breaker: several sends failing in a row means WhatsApp is
-          // refusing us RIGHT NOW — continuing to push the rest of the queue at
-          // full speed is hammering. Stop the pass; backoffs decide when to retry.
-          if (++consecutiveSendFailures >= 3) {
-            console.error('[wa-outbox] 3 envíos fallidos seguidos — se detiene esta pasada para no insistir.');
-            result.stopped = true;
-            break outer;
-          }
-          // Keep the human rhythm even across failures that reached the socket.
-          await waSleep(Math.min(nextSpacingMs(result.sent), Math.max(0, budgetLeft())));
-          continue;
-        }
-
-        // ---- Phase 2: the message IS out. Bookkeeping failures here must NEVER flow
-        // into the retry path — that requeued and re-sent an already-delivered text
-        // (the recipient got it twice). Mark 'sent' with its own retries; a Firestore
-        // blip no longer duplicates. (If Firestore stays down for minutes, the stuck-
-        // message reclaim can still redeliver once — the inherent at-least-once edge.)
-        result.sent++;
-        consecutiveSendFailures = 0;
-        let marked = false;
-        for (let attempt = 0; attempt < 3 && !marked; attempt++) {
-          try {
-            await db.markOutbox(msg.id, { status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null });
-            marked = true;
-          } catch (markErr) {
-            console.error(`[wa-outbox] enviado pero no se pudo marcar como 'sent' (intento ${attempt + 1}):`, markErr);
-            await waSleep(1_000 * (attempt + 1));
-          }
-        }
-        await bumpSendStats(stats);
-
-        // Conversation history — written on ACTUAL delivery to the socket, not on
-        // enqueue, so the profile chat reflects what really went out.
-        try {
-          const candidateId = msg.candidateId || await db.findCandidateIdByPhone(msg.phone);
-          if (candidateId) {
-            await db.addWhatsappMessage({
-              candidateId, text: msg.message, direction: 'outbound',
-              isAutomated: msg.origin !== 'manual', ...(msg.stage ? { stage: msg.stage } : {}),
-            });
-          }
-        } catch (histErr) {
-          console.error('[wa-outbox] no se pudo guardar el historial del mensaje:', histErr);
-        }
-
-        // Inter-message spacing, capped to the pass budget (the trailing pause after
-        // the last message a pass can afford adds nothing).
-        const pause = Math.min(nextSpacingMs(result.sent), Math.max(0, budgetLeft()));
-        if (pause > 0) await waSleep(pause);
+      // Budget check BEFORE claiming: over-budget messages stay queued untouched and
+      // go out in a later pass, next hour, or next day.
+      rollSendStats(stats, now);
+      if (stats.sentDay >= dailyCap) {
+        result.paced = true;
+        console.log(`[wa-pacing] tope diario alcanzado (${stats.sentDay}/${dailyCap}); el resto de la cola espera a mañana.`);
+        notifyAdmin('wa-pacing-daily', 'WhatsApp: tope diario de envíos alcanzado (protección anti-bloqueo)',
+          `<p>Hoy ya salieron <b>${stats.sentDay}</b> mensajes de WhatsApp, el máximo prudente para la edad actual del número.</p>
+           <p>Los demás <b>no se pierden</b>: quedan en cola y saldrán mañana automáticamente. Este límite sube solo a medida que el número gana antigüedad.</p>`,
+          6 * 60 * 60 * 1000);
+        break;
       }
+      if (stats.sentHour >= WA_HOURLY_CAP) {
+        result.paced = true;
+        console.log(`[wa-pacing] tope por hora alcanzado (${stats.sentHour}/${WA_HOURLY_CAP}); la cola continúa en la próxima hora.`);
+        break;
+      }
+
+      // Night: automated messages wait for the morning.
+      if (!isWithinSendWindow(now, WA_SEND_WINDOW)) {
+        result.paced = true;
+        const opensAt = nextSendWindowOpenMs(now, WA_SEND_WINDOW);
+        if (waWindowClosedLoggedFor !== opensAt) {
+          waWindowClosedLoggedFor = opensAt;
+          console.log(`[wa-pacing] fuera del horario de envío (${formatWindowHour(WA_SEND_WINDOW.start)}–${formatWindowHour(WA_SEND_WINDOW.end)}, hora RD): los mensajes automáticos esperan a ${new Date(opensAt).toISOString()}.`);
+        }
+        break;
+      }
+
+      // The gap since the previous AUTOMATED message — honored across passes.
+      const waitMs = stats.autoNextAt - now;
+      if (waitMs > 0) {
+        // Too long to wait inside this pass: a later pass (60s timer / heartbeat) sends it.
+        if (waitMs > budgetLeft() - AUTO_SEND_RESERVE_MS) { result.paced = true; break; }
+        await restUnlessManualArrives(waitMs);
+        continue; // chat first, then every guard again (the hour may have rolled over)
+      }
+
+      const outcome = await sendOne(next);
+      if (outcome === 'stop') { result.stopped = true; break; }
+      if (outcome === 'skipped' || outcome === 'dropped') continue;
+      // Sent, or failed after reaching the socket: the next automated message waits its
+      // full gap either way.
+      await recordSend(stats, { counted: outcome === 'sent', automation: true });
+      if (tripsBreaker(outcome)) break;
     }
 
     // Done sending for now: drop the "online" presence so the account doesn't look
@@ -1770,12 +1880,17 @@ async function startServer() {
           const linkInfo = await getWhatsAppLinkInfo();
           const stats = await loadSendStats(now);
           const quarantineUntil = linkInfo ? linkInfo.linkedAtMs + WA_QUARANTINE_HOURS * 3_600_000 : 0;
+          const opensAt = nextSendWindowOpenMs(now, WA_SEND_WINDOW);
           pacing = {
             sentToday: stats.sentDay,
             dailyLimit: dailySendLimit(linkInfo ? (now - linkInfo.linkedAtMs) / 86_400_000 : 0, WA_DAILY_CAP_MATURE),
             hourlyLimit: WA_HOURLY_CAP,
             quarantineUntil: quarantineUntil > now ? new Date(quarantineUntil).toISOString() : null,
             linkedAt: linkInfo ? new Date(linkInfo.linkedAtMs).toISOString() : null,
+            // What the bulk-move estimate and the protection panel need to explain the pace.
+            autoPerHour: automationMessagesPerHour(WA_HOURLY_CAP),
+            sendWindow: { start: WA_SEND_WINDOW.start, end: WA_SEND_WINDOW.end, open: opensAt === now, opensAt: new Date(opensAt).toISOString() },
+            nextAutoSendAt: stats.autoNextAt > now ? new Date(stats.autoNextAt).toISOString() : null,
           };
           waPacingCache = { at: now, data: pacing };
         }
@@ -1947,6 +2062,8 @@ async function startServer() {
             status: 'queued', attempts: 0, nextAttemptAt: new Date(),
           });
         }
+        // A drain resting between automated sends delivers this right away.
+        waManualWaiting = true;
         nudgeWhatsAppOutbox('envío manual');
         return res.json({ success: true, queued: true, connected: connectionStatus === 'connected' });
       }
@@ -1987,9 +2104,17 @@ async function startServer() {
         }
         // Idempotent: a client retry after a timeout, a double-move, or re-dragging
         // the same card must not queue the same text twice for the same phone.
-        if (!await isDuplicateOutboxMessage(phone, message, 'automation')) {
+        // dedupeKey = the notification's identity (stage + vacancy + date/time): the text
+        // alone isn't one any more, templates vary per recipient and can be edited.
+        const dedupeKey = typeof req.body?.dedupeKey === 'string' ? req.body.dedupeKey.slice(0, 300) : '';
+        // topicKey = stage + vacancy: what a newer message of the same kind replaces.
+        const topicKey = typeof req.body?.topicKey === 'string' ? req.body.topicKey.slice(0, 300) : '';
+        if (!await isDuplicateOutboxMessage(phone, message, 'automation', dedupeKey)) {
+          if (topicKey && dedupeKey) await supersedeQueuedAutomations(phone, topicKey, dedupeKey);
           await db.enqueueWhatsApp({
             phone, message, origin: 'automation',
+            ...(dedupeKey ? { dedupeKey } : {}),
+            ...(topicKey ? { topicKey } : {}),
             stage: typeof req.body?.stage === 'string' ? req.body.stage.slice(0, 100) : null,
             candidateId: typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
             candidateName: typeof req.body?.candidateName === 'string' ? req.body.candidateName.slice(0, 200) : null,
@@ -2568,6 +2693,101 @@ async function startServer() {
     } catch (error: any) {
       console.error("Error evaluating test:", error);
       res.status(500).json({ error: "Failed to evaluate test", details: error.message || String(error) });
+    }
+  });
+
+  // ============================================================================
+  // AI Interview Evaluation Endpoint
+  // ============================================================================
+  // Analyzes the in-person interview: the scorecard (marked signals, red flags, 1–5
+  // metrics), the answers the interviewer described and their own rating/comments, with
+  // earlier stages as context. Recruiter-only. The evidence is read from the SAVED
+  // application — the body carries only its id — and the result is stored server-side
+  // so it survives the recruiter closing the tab mid-analysis.
+  const interviewEvalSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      score: { type: Type.NUMBER, description: "Calificación de la entrevista de 0 a 100." },
+      recommendation: { type: Type.STRING, enum: [...INTERVIEW_RECOMMENDATIONS] },
+      summary: { type: Type.STRING, description: "Resumen para el reclutador (máximo 4 oraciones)." },
+      strengths: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Fortalezas observadas en la entrevista." },
+      concerns: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Dudas, riesgos o alertas observadas." },
+      answer_insights: {
+        type: Type.ARRAY,
+        description: "Una entrada por cada respuesta descrita por el entrevistador.",
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            question: { type: Type.STRING },
+            assessment: { type: Type.STRING, description: "Qué revela la respuesta, en una o dos oraciones." },
+            signal: { type: Type.STRING, enum: [...INSIGHT_SIGNALS] },
+          },
+          required: ["question", "assessment", "signal"],
+        },
+      },
+      consistency_notes: { type: Type.STRING, description: "Consistencias o contradicciones con el CV, la etapa 2 y el test." },
+      follow_up_questions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Hasta 4 preguntas para validar las dudas." },
+    },
+    required: ["score", "recommendation", "summary", "strengths", "concerns", "answer_insights", "consistency_notes", "follow_up_questions"],
+  };
+
+  app.post("/api/evaluate-interview", requireRecruiter, globalRateLimit(30), rateLimit(15), async (req, res) => {
+    try {
+      const body = validate(evaluateInterviewSchema, req, res);
+      if (!body) return;
+      const application = await db.getDocData('applications', body.applicationId);
+      if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
+      if (!hasInterviewEvidence(application.interviewScorecard, application.interviewObservation)) {
+        return res.status(400).json({ error: 'Aún no hay datos de la entrevista para analizar: marca señales, ajusta las métricas o describe al menos una respuesta.' });
+      }
+
+      const ai = getAI();
+      if (!ai) {
+        return res.status(400).json({ error: "CLAVE INVÁLIDA: Tienes configurada la clave 'MY_GEMINI_API_KEY' en la pestaña 'Secrets'. Para solucionar esto: 1) Haz clic en 'Settings' (arriba a la derecha), 2) Entra a 'Secrets', 3) Busca 'GEMINI_API_KEY' y elimínalo haciendo clic en el icono de bote de basura. Si haces esto usarás la IA gratuita automáticamente." });
+      }
+
+      // Context is best-effort: a missing candidate/vacancy never blocks the analysis.
+      const candidate = application.candidateId
+        ? await db.getDocData('candidates', application.candidateId).catch(() => null)
+        : null;
+      let vacancyTitle = application.vacancyTitle || '';
+      if (!vacancyTitle && application.vacancyId) {
+        const vacancy = await db.getDocData('vacancies', application.vacancyId).catch(() => null);
+        vacancyTitle = vacancy?.title || '';
+      }
+      const evidence = buildInterviewEvidence({ application, candidate, vacancyTitle });
+
+      const response = await generateContentResilient(ai, {
+        model: GEMINI_MODEL,
+        contents: buildInterviewPrompt(evidence.text),
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: interviewEvalSchema,
+          temperature: 0.2,
+        }
+      });
+      const resultText = response.text;
+      if (!resultText) throw new Error("Empty response from Gemini");
+      const parsed = JSON.parse(resultText.replace(/```json\n?|```/g, '').trim());
+
+      const evaluation = { ...normalizeInterviewEvaluation(parsed), evaluatedAt: new Date(), answersUsed: evidence.answered };
+      // The analysis takes a while: if the application was deleted meanwhile, a merge
+      // write would resurrect it as an orphan holding only this field.
+      if (!await db.getDocData('applications', body.applicationId).catch(() => null)) {
+        return res.status(404).json({ error: 'La postulación ya no existe.' });
+      }
+      // Dev mode (no Admin SDK) may not be allowed to write: the client stores it then.
+      let saved = true;
+      try {
+        await db.setDocData('applications', body.applicationId, { interviewAiEvaluation: evaluation });
+      } catch (writeErr) {
+        saved = false;
+        console.error('[interview-ai] no se pudo guardar el análisis:', writeErr);
+      }
+      res.json({ saved, evaluation: { ...evaluation, evaluatedAt: evaluation.evaluatedAt.toISOString() } });
+    } catch (error: any) {
+      console.error("Error evaluating interview:", error);
+      res.status(500).json({ error: "No se pudo analizar la entrevista con IA. Intenta de nuevo en unos minutos.", details: error.message || String(error) });
     }
   });
 

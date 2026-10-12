@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
-  emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema,
+  emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
   decodeImageDataUrl, firstIssueMessage,
 } from './serverSchemas';
 
@@ -121,6 +121,12 @@ describe('endpoints de reclutador', () => {
     expect(r.success).toBe(true);
     if (r.success) expect(r.data.message).toBe('');
     expect(errorOf(stageChangeSchema, { message: 'hola' })).toBe('Phone number required');
+  });
+
+  it('evaluateInterviewSchema takes only a safe application id', () => {
+    expect(evaluateInterviewSchema.safeParse({ applicationId: 'abc_vac1' }).success).toBe(true);
+    expect(errorOf(evaluateInterviewSchema, { applicationId: 'a/b' })).toBe('applicationId inválido');
+    expect(errorOf(evaluateInterviewSchema, {})).toBe('applicationId inválido');
   });
 
   it('parseCvSchema pins fileUrl to our bucket and defaults the mimeType', () => {

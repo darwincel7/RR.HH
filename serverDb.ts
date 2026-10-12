@@ -79,6 +79,9 @@ export interface ServerDb {
   listOutboxSendable(max: number): Promise<any[]>;
   /** Atomically claims one outbox message (queued -> sending). False if already taken. */
   claimOutboxMessage(id: string): Promise<boolean>;
+  /** Atomically retires a message that is STILL queued (-> dismissed, with the reason).
+   * False if it already left the queue (claimed, sent…): then it goes out as usual. */
+  dismissOutboxIfQueued(id: string, reason: string): Promise<boolean>;
   /** Merges fields into an outbox message (status flips, attempts, errors). */
   markOutbox(id: string, fields: Record<string, any>): Promise<void>;
   /** Returns messages stuck in 'sending' (older than ms) to 'queued'. */
@@ -265,6 +268,15 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           const snap = await tx.get(ref);
           if (!snap.exists || snap.data()?.status !== 'queued') return false;
           tx.update(ref, { status: 'sending', sendingStartedAt: new Date() });
+          return true;
+        });
+      },
+      async dismissOutboxIfQueued(id, reason) {
+        const ref = adb.collection('whatsapp_outbox').doc(id);
+        return await adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists || snap.data()?.status !== 'queued') return false;
+          tx.update(ref, { status: 'dismissed', dismissedAt: new Date(), lastError: reason });
           return true;
         });
       },
@@ -462,6 +474,7 @@ async function initClient(): Promise<ServerDb> {
     async enqueueWhatsApp() { throw new Error('outbox_no_disponible_en_dev'); },
     async listOutboxSendable() { return []; },
     async claimOutboxMessage() { return false; },
+    async dismissOutboxIfQueued() { return false; },
     async markOutbox() { /* no-op */ },
     async reclaimStuckOutbox() { return 0; },
     async countOutboxPending() { return 0; },

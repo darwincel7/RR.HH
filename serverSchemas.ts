@@ -109,6 +109,12 @@ export const stageChangeSchema = z.object({
   message: lenientString(),
 });
 
+/** POST /api/evaluate-interview — only the id travels: the evidence is read from the SAVED
+ * application server-side, so the request can't feed the AI a scorecard nobody saved. */
+export const evaluateInterviewSchema = z.object({
+  applicationId: docIdField('applicationId inválido'),
+});
+
 /** POST /api/parse-cv — fileUrl restricted to our bucket: the server fetches it, and an
  * arbitrary URL here was the last remaining SSRF path (recruiter-authed, but still a
  * credential-theft risk against the metadata server). */

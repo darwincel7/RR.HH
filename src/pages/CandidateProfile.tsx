@@ -11,6 +11,12 @@ import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar, { PhotoLightbox } from '../components/CandidateAvatar';
+import InterviewScorecardModal from '../components/InterviewScorecardModal';
+import InterviewAiCard from '../components/InterviewAiCard';
+import {
+  DEFAULT_SCORECARD, blankScorecard, loadScorecard, resolveScorecardTemplate, answersForSave, hasInterviewEvidence,
+  type ScorecardTemplate, type InterviewScorecardData,
+} from '../lib/interviewScorecard';
 
 /** Reads an image file and downsizes it in the browser (≤1200px JPEG) before upload:
  * keeps the request small and lets the browser decode formats like HEIC for us. */
@@ -60,38 +66,25 @@ export default function CandidateProfile() {
   const [analyzingCV, setAnalyzingCV] = useState(false);
   
   // Scorecard State
-  const [scorecardData, setScorecardData] = useState({
-    positiveSignals: [] as string[],
-    redFlags: [] as string[],
-    metrics: {
-      'Puntualidad': 30,
-      'Presentación personal': 30,
-      'Contacto visual': 30,
-      'Claridad al hablar': 30,
-      'Energía': 30,
-      'Cortesía y escucha activa': 30
-    } as Record<string, number>
-  });
+  const [scorecardData, setScorecardData] = useState<InterviewScorecardData>(() => blankScorecard(DEFAULT_SCORECARD));
   const [savingScorecard, setSavingScorecard] = useState(false);
+  // Tied to the application being analyzed: switching applications mid-analysis must not
+  // show the spinner (or the error) on the other one.
+  const [analyzingInterviewFor, setAnalyzingInterviewFor] = useState<string | null>(null);
+  const [interviewAiError, setInterviewAiError] = useState<{ appId: string; message: string } | null>(null);
 
-  const [scorecardTemplate, setScorecardTemplate] = useState<any>(null);
+  const [scorecardTemplate, setScorecardTemplate] = useState<ScorecardTemplate>(DEFAULT_SCORECARD);
 
   // Refs so the LIVE applications listener can keep the recruiter's chosen application
   // and in-progress edits without re-initializing on every real-time update.
   const selectedAppIdRef = useRef<string | null>(null);
   const initedAppRef = useRef<string | null>(null);
-  const scorecardTemplateRef = useRef<any>(null);
+  const scorecardTemplateRef = useRef<ScorecardTemplate>(DEFAULT_SCORECARD);
   const vacTitlesRef = useRef<Record<string, string>>({});
 
-  // A fresh, empty scorecard for an application that has none yet. Used when loading /
-  // switching applications so one candidate's scorecard NEVER bleeds into another.
-  const buildBlankScorecard = () => {
-    const keys: string[] = scorecardTemplateRef.current?.metrics
-      || ['Puntualidad', 'Presentación personal', 'Contacto visual', 'Claridad al hablar', 'Energía', 'Cortesía y escucha activa'];
-    const metrics: Record<string, number> = {};
-    keys.forEach(m => { metrics[m] = 30; });
-    return { positiveSignals: [] as string[], redFlags: [] as string[], metrics };
-  };
+  // The application's saved scorecard, or a fresh empty one if it has none — used when
+  // loading / switching applications so one candidate's scorecard NEVER bleeds into another.
+  const scorecardFor = (app: any) => loadScorecard(app?.interviewScorecard, scorecardTemplateRef.current);
 
   useEffect(() => {
     if (!candidateId) return;
@@ -108,11 +101,10 @@ export default function CandidateProfile() {
       // so the live listeners below can label/initialize correctly on their first fire.
       try {
         const s = await getDoc(doc(db, 'settings', 'forms'));
-        if (s.exists() && s.data().scorecard) {
-          scorecardTemplateRef.current = s.data().scorecard;
-          setScorecardTemplate(s.data().scorecard);
-        }
-      } catch { /* scorecard es opcional */ }
+        const tpl = resolveScorecardTemplate(s.exists() ? s.data().scorecard : null);
+        scorecardTemplateRef.current = tpl;
+        setScorecardTemplate(tpl);
+      } catch { /* scorecard es opcional: quedan las preguntas/señales por defecto */ }
       try {
         const vsnap = await getDocs(collection(db, 'vacancies'));
         vsnap.docs.forEach(d => { vacTitlesRef.current[d.id] = d.data().title; });
@@ -148,8 +140,8 @@ export default function CandidateProfile() {
             initedAppRef.current = found.id;
             setInterviewObs(found.interviewObservation || { score: 0, notes: '', redFlags: '' });
             // Reset to a BLANK scorecard when this application has none — never keep the
-            // previously-viewed application's signals/flags/metrics.
-            setScorecardData(found.interviewScorecard || buildBlankScorecard());
+            // previously-viewed application's signals/flags/metrics/answers.
+            setScorecardData(scorecardFor(found));
           }
         },
         (e) => { console.error('applications snapshot error:', e); }
@@ -401,9 +393,12 @@ export default function CandidateProfile() {
     if (!application) return;
     setSavingObs(true);
     try {
-      await updateDoc(doc(db, 'applications', application.id), {
-        interviewObservation: interviewObs
-      });
+      // updatedAt lets the AI card tell an analysis made before this change.
+      const interviewObservation = { ...interviewObs, updatedAt: serverTimestamp() };
+      await updateDoc(doc(db, 'applications', application.id), { interviewObservation });
+      // The AI analysis read the previous rating/comments: keep it current (only if one
+      // exists — a comment alone doesn't launch an analysis nobody asked for).
+      await refreshInterviewAnalysis(application, application.interviewScorecard, interviewObs, false);
       alert('Observación guardada');
     } catch (error) {
       console.error("Error saving observation:", error);
@@ -412,15 +407,69 @@ export default function CandidateProfile() {
     }
   };
 
+  // The AI reads the interview from the SAVED application (server-side) and stores its
+  // analysis there; the live applications listener then shows it in the card.
+  const analyzeInterview = async (appId: string) => {
+    setAnalyzingInterviewFor(appId);
+    setInterviewAiError(null);
+    try {
+      const res = await apiFetch('/api/evaluate-interview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ applicationId: appId }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok || !data?.evaluation) {
+        throw new Error(data?.error || 'No se pudo analizar la entrevista con IA. Intenta de nuevo.');
+      }
+      // Without the Admin SDK (dev mode) the server can't store it: do it from here.
+      if (data.saved === false) {
+        await updateDoc(doc(db, 'applications', appId), { interviewAiEvaluation: data.evaluation });
+      }
+    } catch (error: any) {
+      console.error('Error analyzing interview:', error);
+      setInterviewAiError({ appId, message: error?.message || 'No se pudo analizar la entrevista con IA.' });
+    } finally {
+      setAnalyzingInterviewFor(null);
+    }
+  };
+
+  // After the interview data changes, an existing AI analysis must not keep counting
+  // (in the Ranking too) on data that no longer says that: re-run it — or, when nothing is
+  // left to analyze, drop it. `start` launches a first analysis as well. True = analyzing.
+  const refreshInterviewAnalysis = async (app: any, scorecard: any, observation: any, start: boolean): Promise<boolean> => {
+    if (hasInterviewEvidence(scorecard, observation)) {
+      if (!start && !app.interviewAiEvaluation) return false;
+      analyzeInterview(app.id);
+      return true;
+    }
+    if (app.interviewAiEvaluation) {
+      await updateDoc(doc(db, 'applications', app.id), { interviewAiEvaluation: deleteField() });
+    }
+    return false;
+  };
+
   const saveScorecard = async () => {
     if (!application) return;
+    const appId = application.id;
     setSavingScorecard(true);
     try {
-      await updateDoc(doc(db, 'applications', application.id), {
-        interviewScorecard: scorecardData
-      });
-      alert('Scorecard guardado con éxito');
+      const interviewScorecard = {
+        positiveSignals: scorecardData.positiveSignals,
+        redFlags: scorecardData.redFlags,
+        metrics: scorecardData.metrics,
+        // Only the questions the interviewer selected, with what the candidate answered.
+        answers: answersForSave(scorecardData.answers),
+        updatedAt: serverTimestamp(),
+      };
+      await updateDoc(doc(db, 'applications', appId), { interviewScorecard });
       setShowScorecardModal(false);
+      if (await refreshInterviewAnalysis(application, interviewScorecard, application.interviewObservation, true)) {
+        // Bring the analysis card into view: that's where the result appears.
+        setTimeout(() => document.getElementById('interview-ai-card')?.scrollIntoView({ behavior: 'smooth', block: 'center' }), 150);
+      } else {
+        alert('Scorecard guardado. Marca señales o describe alguna respuesta para que la IA pueda analizar la entrevista.');
+      }
     } catch (error) {
       console.error("Error saving scorecard:", error);
       alert('Error al guardar el scorecard');
@@ -705,7 +754,7 @@ export default function CandidateProfile() {
                       setInterviewObs(next.interviewObservation || { score: 0, notes: '', redFlags: '' });
                       // Blank scorecard if this application has none — don't carry the
                       // previous application's scorecard over.
-                      setScorecardData(next.interviewScorecard || buildBlankScorecard());
+                      setScorecardData(scorecardFor(next));
                     }}
                     className="w-full p-2.5 bg-amber-50 border border-amber-200 rounded-xl font-bold text-slate-700 text-sm focus:ring-2 focus:ring-amber-400 outline-none"
                   >
@@ -1086,6 +1135,20 @@ export default function CandidateProfile() {
                 </div>
               </div>
 
+              {/* AI analysis of the interview (scorecard + described answers + comments).
+                  Appears once there is an interview to talk about — not on every new applicant. */}
+              {application && (application.interviewScorecard || application.interviewAiEvaluation
+                || hasInterviewEvidence(null, application.interviewObservation)
+                || analyzingInterviewFor === application.id || interviewAiError?.appId === application.id) && (
+                <InterviewAiCard
+                  application={application}
+                  analyzing={analyzingInterviewFor === application.id}
+                  error={interviewAiError?.appId === application.id ? interviewAiError.message : null}
+                  onAnalyze={() => analyzeInterview(application.id)}
+                  onOpenScorecard={() => setShowScorecardModal(true)}
+                />
+              )}
+
               {/* Formulario Etapa 2 Section */}
               <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6">
                 <div className="flex items-center justify-between mb-3 lg:mb-4">
@@ -1291,133 +1354,23 @@ export default function CandidateProfile() {
           </div>
       </Modal>
 
-      {/* Scorecard Modal */}
-      <Modal isOpen={showScorecardModal} onClose={() => setShowScorecardModal(false)} overlayClassName="bg-slate-900/80 z-[100]">
-          <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
-            <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
-              <h3 className="font-display font-bold text-slate-800 flex items-center">
-                <FileText className="w-5 h-5 mr-2 text-blue-500" />
-                Scorecard de Entrevista Estructurada
-              </h3>
-              <button onClick={() => setShowScorecardModal(false)} className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-colors">
-                <X className="w-6 h-6" />
-              </button>
-            </div>
-            <div className="flex-1 overflow-y-auto p-6">
-              <div className="space-y-6">
-                <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
-                  <h4 className="font-bold text-blue-900 mb-2">Banco de Preguntas Recomendadas</h4>
-                  <ul className="list-disc pl-5 space-y-1 text-sm text-blue-800">
-                    {(scorecardTemplate?.recommendedQuestions || [
-                      'Cuéntame de una vez que atendiste a un cliente difícil. ¿Qué pasó y cómo lo resolviste?',
-                      '¿Qué haces cuando un cliente tiene razón, pero te habla mal?',
-                      '¿Qué significa para ti dar un excelente servicio?',
-                      'Háblame de una ocasión en la que un supervisor te corrigió. ¿Cómo reaccionaste?',
-                      '¿Cómo te manejas trabajando con normas, políticas o procesos definidos?',
-                      'Si no estás de acuerdo con una instrucción, ¿qué haces?',
-                      '¿Cuál ha sido el trabajo en el que más has durado y por qué?',
-                      '¿Por qué saliste de tus últimos dos trabajos?',
-                      '¿Qué tendría que ofrecerte una empresa para que quieras durar mucho tiempo en ella?',
-                      '¿Qué fue lo último importante que aprendiste en un trabajo?',
-                      '¿Qué haces cuando cometes un error?',
-                      '¿En qué aspecto te gustaría mejorar más dentro del trabajo?'
-                    ]).map((q: string, i: number) => (
-                      <li key={i}>{q}</li>
-                    ))}
-                  </ul>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="bg-green-50 p-4 rounded-xl border border-green-100">
-                    <h4 className="font-bold text-green-900 mb-2">Señales Positivas a Marcar</h4>
-                    <div className="space-y-2 text-sm">
-                      {(scorecardTemplate?.positiveSignals || ['Sonrisa natural', 'Tono amable', 'Empatía genuina', 'Seguridad sin arrogancia', 'Respeto', 'Facilidad para aprender', 'Interés real en el trabajo', 'Madurez emocional']).map((signal: string) => (
-                        <label key={signal} className="flex items-center space-x-2 cursor-pointer">
-                          <input 
-                            type="checkbox" 
-                            checked={scorecardData.positiveSignals.includes(signal)}
-                            onChange={(e) => {
-                              const newSignals = e.target.checked 
-                                ? [...scorecardData.positiveSignals, signal]
-                                : scorecardData.positiveSignals.filter(s => s !== signal);
-                              setScorecardData({...scorecardData, positiveSignals: newSignals});
-                            }}
-                            className="rounded text-green-600 focus:ring-green-500" 
-                          />
-                          <span className="text-green-800">{signal}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="bg-rose-50 p-4 rounded-xl border border-rose-100">
-                    <h4 className="font-bold text-rose-900 mb-2">Red Flags a Marcar</h4>
-                    <div className="space-y-2 text-sm">
-                      {(scorecardTemplate?.redFlags || ['Habla mal de todos sus jefes', 'Se contradice mucho', 'Culpa siempre a otros', 'Poca paciencia', 'Arrogancia', 'Actitud conflictiva', 'Poca estabilidad', 'Resistencia a correcciones', 'Respuestas vacías o muy ensayadas', 'Baja energía o apatía']).map((flag: string) => (
-                        <label key={flag} className="flex items-center space-x-2 cursor-pointer">
-                          <input 
-                            type="checkbox" 
-                            checked={scorecardData.redFlags.includes(flag)}
-                            onChange={(e) => {
-                              const newFlags = e.target.checked 
-                                ? [...scorecardData.redFlags, flag]
-                                : scorecardData.redFlags.filter(f => f !== flag);
-                              setScorecardData({...scorecardData, redFlags: newFlags});
-                            }}
-                            className="rounded text-rose-600 focus:ring-rose-500" 
-                          />
-                          <span className="text-rose-800">{flag}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="bg-slate-50 p-4 rounded-xl border border-slate-200">
-                  <h4 className="font-bold text-slate-900 mb-4">Métricas de Evaluación (1.0 a 5.0)</h4>
-                  <div className="space-y-4">
-                    {(scorecardTemplate?.metrics || ['Puntualidad', 'Presentación personal', 'Contacto visual', 'Claridad al hablar', 'Energía', 'Cortesía y escucha activa']).map((metric: string) => (
-                      <div key={metric}>
-                        <div className="flex justify-between text-sm font-medium text-slate-700 mb-1">
-                          <span>{metric}</span>
-                          <span>{((scorecardData.metrics[metric] || 30) / 10).toFixed(1)}</span>
-                        </div>
-                        <input 
-                          type="range" 
-                          min="10" max="50" 
-                          value={scorecardData.metrics[metric] || 30}
-                          onChange={(e) => {
-                            setScorecardData({
-                              ...scorecardData,
-                              metrics: {
-                                ...scorecardData.metrics,
-                                [metric]: parseInt(e.target.value)
-                              }
-                            });
-                          }}
-                          className="w-full" 
-                        />
-                        <div className="flex justify-between text-xs text-slate-400 mt-1">
-                          <span>1.0</span><span>2.0</span><span>3.0</span><span>4.0</span><span>5.0</span>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
-              <button 
-                onClick={saveScorecard}
-                disabled={savingScorecard}
-                className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 flex items-center"
-              >
-                {savingScorecard ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : null}
-                Guardar Evaluación
-              </button>
-            </div>
-          </div>
-      </Modal>
+      {/* Scorecard Modal: signals, metrics, and the questions — tick one to describe what
+          the candidate answered; the shared bank of suggested questions is editable here. */}
+      <InterviewScorecardModal
+        isOpen={showScorecardModal}
+        onClose={() => setShowScorecardModal(false)}
+        template={scorecardTemplate}
+        onBankChange={(bank) => {
+          const tpl = { ...scorecardTemplateRef.current, recommendedQuestions: bank };
+          scorecardTemplateRef.current = tpl;
+          setScorecardTemplate(tpl);
+        }}
+        data={scorecardData}
+        onChange={setScorecardData}
+        onSave={saveScorecard}
+        saving={savingScorecard}
+        candidateName={candidate.fullName || candidate.name}
+      />
       {/* Stage Guide Modal */}
       <Modal isOpen={showStageGuide} onClose={() => setShowStageGuide(false)} overlayClassName="bg-slate-900/80 z-[100]">
           <div className="bg-white rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
