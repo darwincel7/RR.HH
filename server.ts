@@ -32,6 +32,8 @@ import {
   dailySendLimit, isOptOutMessage, HOURLY_SEND_CAP, WA_MATURE_DAILY_CAP,
   OUTBOX_STUCK_MS, OUTBOX_DRAIN_DEADLINE_MS,
   nextAutomationGap, sanitizeAutoNextAt, automationMessagesPerHour,
+  outboxFate, outboxQueuedAtMs, isDuplicateInOutbox, PREVIOUS_QUEUE_CUTOFF_MS, OUTBOX_MAX_AGE_HOURS,
+  type OutboxEntry,
 } from './serverWhatsAppQueue';
 import { parseSendWindow, isWithinSendWindow, nextSendWindowOpenMs, formatWindowHour } from './src/lib/sendWindow';
 import { getServerDb, type ServerDb } from './serverDb';
@@ -959,6 +961,16 @@ const WA_SEND_WINDOW = parseSendWindow(process.env.WA_SEND_HOURS);
 // After an in-pass wait, the send itself still needs this long (ready-check ≤25s +
 // typing ≤10s + the send) — a wait that wouldn't leave it is left to the next pass.
 const AUTO_SEND_RESERVE_MS = 45_000;
+// A queued message that couldn't go out within this long expires instead of going out
+// late (see outboxFate). WA_MAX_QUEUE_HOURS overrides the default of 48.
+const WA_MAX_QUEUE_HOURS = Math.max(1, Number(process.env.WA_MAX_QUEUE_HOURS) || OUTBOX_MAX_AGE_HOURS);
+const WA_MAX_QUEUE_MS = WA_MAX_QUEUE_HOURS * 3_600_000;
+const PREVIOUS_QUEUE_REASON = 'Descartado: estaba en cola antes del 12 oct 2026 (5:45 p. m.) — era del pasado, no se envía.';
+const EXPIRED_REASON = `Vencido: estuvo más de ${WA_MAX_QUEUE_HOURS} h en cola sin poder salir y no se envió para no mandar información vieja. Si aún aplica, pulsa Reintentar.`;
+
+// Can this queued message still go out? ('previous' / 'expired' never do.)
+const queueFateOf = (msg: any, nowMs = Date.now()) =>
+  outboxFate(outboxQueuedAtMs(tsToMs(msg?.createdAt), tsToMs(msg?.requeuedAt)), nowMs, PREVIOUS_QUEUE_CUTOFF_MS, WA_MAX_QUEUE_MS);
 
 const tsToMs = (v: any): number => (v?.toMillis ? v.toMillis() : (v ? new Date(v).getTime() : 0));
 
@@ -1092,12 +1104,12 @@ async function checkNumberOnWhatsApp(number: string): Promise<{ exists: boolean;
 // short window: a recruiter legitimately sends "ok" twice on different occasions.
 async function isDuplicateOutboxMessage(phone: string, message: string, origin: 'manual' | 'automation', dedupeKey = ''): Promise<boolean> {
   const recent = await db.listOutboxByPhone(phone);
-  const now = Date.now();
-  return recent.some((q: any) => {
-    if (q.status !== 'queued' && q.status !== 'sending') return false;
-    if (origin === 'manual') return q.message === message && now - tsToMs(q.createdAt) < 2 * 60_000;
-    return q.message === message || (!!dedupeKey && q.dedupeKey === dedupeKey);
-  });
+  const entries: OutboxEntry[] = recent.map((q: any) => ({
+    status: q.status, message: q.message, dedupeKey: q.dedupeKey,
+    createdAtMs: tsToMs(q.createdAt),
+    queuedAtMs: outboxQueuedAtMs(tsToMs(q.createdAt), tsToMs(q.requeuedAt)),
+  }));
+  return isDuplicateInOutbox(entries, { message, origin, dedupeKey }, Date.now(), PREVIOUS_QUEUE_CUTOFF_MS, WA_MAX_QUEUE_MS);
 }
 
 // A newer automated notification of the same kind for this phone (same stage + vacancy,
@@ -1109,7 +1121,7 @@ async function supersedeQueuedAutomations(phone: string, topicKey: string, dedup
   const recent = await db.listOutboxByPhone(phone);
   for (const q of recent) {
     if (q.status !== 'queued' || q.origin === 'manual' || q.topicKey !== topicKey || q.dedupeKey === dedupeKey) continue;
-    if (await db.dismissOutboxIfQueued(q.id, 'Reemplazado por un mensaje más reciente de la misma etapa (p. ej. una cita reprogramada)')) {
+    if (await db.retireOutboxIfQueued(q.id, 'dismissed', 'Reemplazado por un mensaje más reciente de la misma etapa (p. ej. una cita reprogramada)')) {
       console.log(`[wa-outbox] mensaje ${q.id} (${q.stage || 'automatización'}) reemplazado por uno más reciente antes de salir.`);
     }
   }
@@ -1160,6 +1172,9 @@ let waManualWaiting = false;
 // The closed send window / the quarantine are logged once per period, not on every 60s pass.
 let waWindowClosedLoggedFor = 0;
 let waQuarantineLoggedFor = 0;
+// The queue that existed before PREVIOUS_QUEUE_CUTOFF_MS is discarded in bulk on this
+// process's first drain pass (the per-message check below is the safety net).
+let waPreviousQueuePurged = false;
 
 // Rests `ms` — or less, if a chat message arrives meanwhile (see waManualWaiting).
 async function restUnlessManualArrives(ms: number) {
@@ -1190,6 +1205,26 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
     const reclaimed = await db.reclaimStuckOutbox(OUTBOX_STUCK_MS);
     if (reclaimed) console.log(`[wa-outbox] ${reclaimed} mensaje(s) atascados en 'sending' devueltos a la cola`);
 
+    // The old queue is "del pasado": discard it in one go so it stops showing as pending.
+    // Best effort — even if this fails, the per-message check never lets one go out.
+    if (!waPreviousQueuePurged) {
+      try {
+        const discarded = await db.retireQueuedOutboxBefore(PREVIOUS_QUEUE_CUTOFF_MS, PREVIOUS_QUEUE_REASON);
+        waPreviousQueuePurged = true;
+        if (discarded > 0) {
+          console.log(`[wa-outbox] ${discarded} mensaje(s) que estaban en cola antes del corte se descartaron (no se envían).`);
+          const prev = await db.getDocData('whatsapp_runtime', 'queue_reset').catch(() => null);
+          await db.setDocData('whatsapp_runtime', 'queue_reset', {
+            cutoff: new Date(PREVIOUS_QUEUE_CUTOFF_MS),
+            discarded: (Number(prev?.discarded) || 0) + discarded,
+            at: new Date(),
+          });
+        }
+      } catch (e) {
+        console.error('[wa-outbox] no se pudo descartar la cola anterior (se reintenta en la próxima pasada):', e);
+      }
+    }
+
     const started = Date.now();
 
     // Quarantine: for its first hours, a freshly-paired session sends NO automated
@@ -1209,6 +1244,22 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
     const budgetLeft = () => OUTBOX_DRAIN_DEADLINE_MS - (Date.now() - started);
     let consecutiveSendFailures = 0;
     let manualSent = 0;
+    let expired = 0;
+
+    // Messages from the past never go out (outboxFate): the old queue is discarded
+    // silently; one that waited past the max age fails visibly ("Vencido") so the
+    // recruiter knows who wasn't notified. Checked before any wait or guard, so they
+    // leave the queue even at night or while disconnected. True = it was retired.
+    const retireIfPast = async (msg: any): Promise<boolean> => {
+      const fate = queueFateOf(msg);
+      if (fate === 'send') return false;
+      const status = fate === 'previous' ? 'dismissed' : 'failed';
+      if (await db.retireOutboxIfQueued(msg.id, status, fate === 'previous' ? PREVIOUS_QUEUE_REASON : EXPIRED_REASON) && fate === 'expired') {
+        result.failedFinal++;
+        expired++;
+      }
+      return true;
+    };
 
     // One message, start to finish: ready-check, atomic claim, then the send.
     const sendOne = async (msg: any): Promise<SendOutcome> => {
@@ -1333,6 +1384,7 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
       if (manuals.length > 0) {
         for (const msg of manuals) {
           if (budgetLeft() <= 0) break outer;
+          if (await retireIfPast(msg)) continue;
           const outcome = await sendOne(msg);
           if (outcome === 'stop') { result.stopped = true; break outer; }
           if (outcome === 'skipped' || outcome === 'dropped') continue;
@@ -1351,6 +1403,7 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
       // 2) Automated messages: ONE at a time, and only when every guard allows it.
       const next = (await db.listOutboxSendable(10)).find((m: any) => m.origin !== 'manual');
       if (!next) break; // nothing left to send
+      if (await retireIfPast(next)) continue;
 
       const now = Date.now();
       if (inQuarantine) {
@@ -1412,6 +1465,13 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
       // full gap either way.
       await recordSend(stats, { counted: outcome === 'sent', automation: true });
       if (tripsBreaker(outcome)) break;
+    }
+
+    if (expired > 0) {
+      console.log(`[wa-outbox] ${expired} mensaje(s) vencieron en cola (más de ${WA_MAX_QUEUE_HOURS} h) y no se enviaron.`);
+      notifyAdmin('wa-outbox-expired', `${expired} mensaje(s) de WhatsApp vencieron sin enviarse`,
+        `<p><b>${expired}</b> mensaje(s) llevaban más de <b>${WA_MAX_QUEUE_HOURS} horas</b> en cola sin poder salir (WhatsApp desconectado o límite diario), así que <b>no se enviaron</b>: ya eran información vieja.</p>
+         <p>Están en <b>Ajustes de WhatsApp → Cola de mensajes → Fallidos</b>. Si alguno todavía aplica, pulsa <b>Reintentar</b>.</p>`);
     }
 
     // Done sending for now: drop the "online" presence so the account doesn't look
@@ -1891,6 +1951,8 @@ async function startServer() {
             autoPerHour: automationMessagesPerHour(WA_HOURLY_CAP),
             sendWindow: { start: WA_SEND_WINDOW.start, end: WA_SEND_WINDOW.end, open: opensAt === now, opensAt: new Date(opensAt).toISOString() },
             nextAutoSendAt: stats.autoNextAt > now ? new Date(stats.autoNextAt).toISOString() : null,
+            // A message that can't go out within this many hours expires (not sent).
+            maxQueueHours: WA_MAX_QUEUE_HOURS,
           };
           waPacingCache = { at: now, data: pacing };
         }
@@ -1930,9 +1992,16 @@ async function startServer() {
       });
       const byCreatedAsc = (a: any, b: any) => tsToMs(a.createdAt) - tsToMs(b.createdAt);
       const byCreatedDesc = (a: any, b: any) => tsToMs(b.createdAt) - tsToMs(a.createdAt);
+      // How many from the old queue were discarded (shown once in the queue card).
+      const reset = await db.getDocData('whatsapp_runtime', 'queue_reset').catch(() => null);
       res.json({
         pending: pendingRaw.sort(byCreatedAsc).map(pub),
         failed: failedRaw.sort(byCreatedDesc).map(pub),
+        maxQueueHours: WA_MAX_QUEUE_HOURS,
+        previousQueue: {
+          cutoff: new Date(PREVIOUS_QUEUE_CUTOFF_MS).toISOString(),
+          discarded: Number(reset?.discarded) || 0,
+        },
       });
     } catch (err) {
       console.error('[wa-outbox] no se pudo listar la cola:', err);
@@ -1957,7 +2026,8 @@ async function startServer() {
         return res.status(409).json({ error: 'Solo los mensajes fallidos se pueden reintentar o descartar.' });
       }
       if (action === 'retry') {
-        await db.markOutbox(id, { status: 'queued', attempts: 0, nextAttemptAt: new Date(), lastError: null });
+        // requeuedAt restarts its clock: a human decided it still applies (see outboxFate).
+        await db.markOutbox(id, { status: 'queued', attempts: 0, nextAttemptAt: new Date(), lastError: null, requeuedAt: new Date() });
         nudgeWhatsAppOutbox('reintento manual desde la cola');
       } else {
         await db.markOutbox(id, { status: 'dismissed', dismissedAt: new Date() });

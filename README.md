@@ -57,6 +57,7 @@ npm run dev                  # levanta Express + Vite en http://localhost:3000
 | `GEMINI_MODEL` | *(Opcional)* Modelo de IA. El valor por defecto es una versión **preview** y Google las retira sin aviso: si la IA deja de responder, pon aquí el modelo vigente y reinicia — sin tocar código |
 | `CV_WORKER_TOKEN` | *(Opcional)* Secreto para que un ping programado externo vacíe la cola de CV (ver más abajo) |
 | `WA_SEND_HOURS` | *(Opcional)* Horario (hora de RD) en que salen los WhatsApp **automáticos**, p. ej. `8-20` (por defecto: 8:00 a. m. – 7:59 p. m.); `off` lo desactiva. El chat manual no se limita |
+| `WA_MAX_QUEUE_HOURS` | *(Opcional)* Horas que un WhatsApp puede esperar en cola; pasado ese tiempo **vence y no se envía** (por defecto 48) |
 
 > La configuración de Firebase vive en `firebase-applet-config.json`. La `apiKey` de Firebase
 > **no es un secreto** (es identificadora, no de autorización); la seguridad real la imponen
@@ -217,6 +218,13 @@ Refuerzos para los envíos masivos (oct 2026, tras nuevos bloqueos):
   el número) o **solo mover**. "Reintentar envíos fallidos" ya no reenvía el correo.
 - La fecha límite del formulario de etapa 2 (`{{fecha}}`) ya no sale vacía ("antes del :"):
   si nadie la fijó, se usan 3 días.
+- **Los mensajes del pasado no se envían** ([`outboxFate`](serverWhatsAppQueue.ts)): todo lo
+  que estaba en cola antes del **12 oct 2026, 5:45 p. m. (RD)** —mucho se acumuló mientras
+  el número estuvo bloqueado— se descarta en bloque en la primera pasada del drenador y,
+  por si acaso, se vuelve a comprobar antes de cada envío. Desde entonces, un mensaje que no
+  logra salir en `WA_MAX_QUEUE_HOURS` (48 h) **vence**: no se envía y queda en *Fallidos*
+  para saber a quién no se avisó (*Reintentar* lo vuelve a poner en cola y reinicia su
+  reloj). Un mensaje viejo nunca bloquea al nuevo en la deduplicación.
 
 Todo esto es **visible en Ajustes de WhatsApp**: panel de protección (enviados hoy vs
 límite, cuarentena, fecha de vinculación, ritmo, horario de envío y próximo automático) y la **cola de mensajes** (en espera y fallidos
