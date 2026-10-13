@@ -6,12 +6,30 @@ import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import CVWorker from '../CVWorker';
 import AITestButton from '../AITestButton';
 import TopBar from './TopBar';
+import WhatsAppActivityPanel from '../WhatsAppActivityPanel';
+import { WhatsAppActivityProvider } from '../../contexts/WhatsAppActivityContext';
+
+// The WhatsApp panel on the right starts open on wide screens and folded into a thin
+// rail on narrower ones; whatever the recruiter picks afterwards is remembered.
+const WA_PANEL_KEY = 'waActivityPanelOpen';
+function initialPanelOpen(): boolean {
+  try {
+    const saved = localStorage.getItem(WA_PANEL_KEY);
+    if (saved === '1' || saved === '0') return saved === '1';
+  } catch { /* storage disabled */ }
+  return typeof window !== 'undefined' && window.innerWidth >= 1400;
+}
 
 export default function DashboardLayout() {
   const { user, userData, loading, logout, isRecruiter } = useAuth();
   const location = useLocation();
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [waPanelOpen, setWaPanelOpen] = useState(initialPanelOpen);
+  const toggleWaPanel = () => setWaPanelOpen(open => {
+    try { localStorage.setItem(WA_PANEL_KEY, open ? '0' : '1'); } catch { /* storage disabled */ }
+    return !open;
+  });
 
   // Logging out is an explicit STAFF action → send them back to the staff login,
   // never to the public careers portal. A short-lived flag makes the post-logout
@@ -109,6 +127,7 @@ export default function DashboardLayout() {
   ];
 
   return (
+    <WhatsAppActivityProvider>
     <div className="min-h-screen flex bg-slate-50">
       {/* Mobile Header */}
       <div className="lg:hidden fixed top-0 left-0 right-0 h-16 bg-white/80 backdrop-blur-md border-b border-slate-200 z-[60] flex items-center justify-between px-4">
@@ -232,6 +251,7 @@ export default function DashboardLayout() {
       <div className={`
         flex-1 transition-all duration-300 ease-in-out flex flex-col
         ${isCollapsed ? 'lg:ml-28' : 'lg:ml-80'}
+        ${waPanelOpen ? 'lg:mr-[316px]' : 'lg:mr-[72px]'}
         min-h-screen
       `}>
         <CVWorker />
@@ -243,6 +263,10 @@ export default function DashboardLayout() {
           </div>
         </div>
       </div>
+
+      {/* WhatsApp: who got what and when — always on the right. */}
+      <WhatsAppActivityPanel open={waPanelOpen} onToggle={toggleWaPanel} />
     </div>
+    </WhatsAppActivityProvider>
   );
 }

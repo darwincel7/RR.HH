@@ -36,6 +36,7 @@ import {
   type OutboxEntry,
 } from './serverWhatsAppQueue';
 import { parseSendWindow, isWithinSendWindow, nextSendWindowOpenMs, formatWindowHour } from './src/lib/sendWindow';
+import { estimateQueueEtas, describeFailure, vacancyFromTopicKey } from './serverWhatsAppActivity';
 import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
@@ -201,6 +202,37 @@ const rememberSentMessage = (info: any) => {
     if (oldest !== undefined) sentMessageStore.delete(oldest);
   }
 };
+
+// Delivery receipts for what the queue sent (side panel: "Entregado" / "Leído").
+// WhatsApp message id → outbox id, plus the highest status already recorded, so each
+// receipt costs at most one write and never a lookup. After a restart the map is empty
+// and receipts for older messages fall back to one indexed lookup.
+const outboxReceipts = new Map<string, { outboxId: string; status: number }>();
+const rememberOutboxReceipt = (waMessageId: string, outboxId: string) => {
+  outboxReceipts.set(waMessageId, { outboxId, status: 2 });
+  if (outboxReceipts.size > 2000) {
+    const oldest = outboxReceipts.keys().next().value;
+    if (oldest !== undefined) outboxReceipts.delete(oldest);
+  }
+};
+
+// Baileys status codes: 3 = delivered to the phone, 4 = read (5 = played, for audio).
+async function recordOutboxReceipt(waMessageId: string, status: number) {
+  if (!db?.supportsOutbox || status < 3) return;
+  let entry = outboxReceipts.get(waMessageId);
+  if (entry && entry.status >= Math.min(status, 4)) return;
+  if (!entry) {
+    // Unknown id: a message from before a restart — or one typed on the phone itself,
+    // which isn't in the outbox at all (the lookup then simply finds nothing).
+    const outboxId = await db.findOutboxIdByWaMessageId(waMessageId).catch(() => null);
+    if (!outboxId) return;
+    entry = { outboxId, status: 2 };
+    outboxReceipts.set(waMessageId, entry);
+  }
+  entry.status = Math.min(status, 4);
+  await db.markOutbox(entry.outboxId, status >= 4 ? { readAt: new Date() } : { deliveredAt: new Date() })
+    .catch(e => console.error('[wa-outbox] no se pudo guardar el acuse de recibo:', e));
+}
 
 // Custom Firestore auth state to ensure persistence across container restarts
 const useFirestoreAuthState = async (collectionName: string) => {
@@ -514,6 +546,19 @@ async function doConnectToWhatsApp() {
   sock.ev.on('creds.update', () => {
     if (myGen !== connectionGeneration) return;
     return saveCreds();
+  });
+
+  // Receipts for messages WE sent (✓✓ delivered / read). Direct chats only.
+  sock.ev.on('messages.update', async (updates) => {
+    if (myGen !== connectionGeneration) return;
+    for (const u of updates) {
+      const status = (u.update as any)?.status;
+      const id = u.key?.id;
+      const jid = u.key?.remoteJid || '';
+      if (!u.key?.fromMe || !id || typeof status !== 'number') continue;
+      if (!jid.endsWith('@s.whatsapp.net') && !jid.endsWith('@lid')) continue;
+      await recordOutboxReceipt(id, status).catch(() => { /* best effort */ });
+    }
   });
 
   sock.ev.on('messages.upsert', async (m) => {
@@ -982,6 +1027,9 @@ const hourKeyOf = (ms: number) => drKey(ms, 13);
 
 let waLinkInfoCache: { number: string; linkedAtMs: number } | null = null;
 let waPacingCache: { at: number; data: any } | null = null;
+// Bumped whenever the send counters change (see recordSend) — part of the side panel's
+// cache key, together with the outbox's own write counter.
+let waStatsVersion = 0;
 
 // Remembers when the CURRENT number was first paired. Same number re-pairing keeps
 // its original date (reputation follows the number); a different number restarts the
@@ -1065,6 +1113,7 @@ async function recordSend(stats: SendStats, { counted, automation }: { counted: 
     stats.autoBurstTarget = next.state.burstTarget;
   }
   waPacingCache = null; // the protection panel shows the new numbers right away
+  waStatsVersion++;     // …and so does the side panel
   await db.setDocData('whatsapp_runtime', 'send_stats', {
     day: stats.day, sentDay: stats.sentDay,
     hour: stats.hour, sentHour: stats.sentHour,
@@ -1120,11 +1169,35 @@ async function isDuplicateOutboxMessage(phone: string, message: string, origin: 
 async function supersedeQueuedAutomations(phone: string, topicKey: string, dedupeKey: string) {
   const recent = await db.listOutboxByPhone(phone);
   for (const q of recent) {
+    // An older FAILED one of the same kind is replaced too: retrying it would now send
+    // stale information (the side panel and the candidate card stop offering it).
+    if (q.status === 'failed' && q.origin !== 'manual' && q.topicKey === topicKey) {
+      await db.markOutbox(q.id, {
+        status: 'dismissed', dismissedAt: new Date(), failedAt: null,
+        lastError: 'Reemplazado por un mensaje más reciente de la misma etapa',
+      }).catch(() => { /* best effort */ });
+      continue;
+    }
     if (q.status !== 'queued' || q.origin === 'manual' || q.topicKey !== topicKey || q.dedupeKey === dedupeKey) continue;
     if (await db.retireOutboxIfQueued(q.id, 'dismissed', 'Reemplazado por un mensaje más reciente de la misma etapa (p. ej. una cita reprogramada)')) {
       console.log(`[wa-outbox] mensaje ${q.id} (${q.stage || 'automatización'}) reemplazado por uno más reciente antes de salir.`);
     }
   }
+}
+
+// Who a queued message is for, so the side panel and the candidate card can show it.
+// Automations arrive with the name but no id; manual chat with the id but no name.
+async function resolveRecipient(phone: string, candidateId: string | null, candidateName: string | null) {
+  let id = candidateId;
+  let name = candidateName;
+  try {
+    if (!id) id = await db.findCandidateIdByPhone(phone);
+    if (id && !name) {
+      const c = await db.getDocData('candidates', id);
+      name = c?.fullName || c?.name || null;
+    }
+  } catch { /* best effort — the message is queued either way */ }
+  return { candidateId: id || null, candidateName: name ? String(name).slice(0, 200) : null };
 }
 
 // Has this phone asked us to stop? (see registerOptOut)
@@ -1271,13 +1344,14 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
 
       // ---- Phase 1: everything BEFORE the message reaches the socket. A failure
       // here means the message was NOT delivered, so retrying is always safe.
+      let waMessageId: string | null = null;
       try {
         const jid = formatWhatsAppNumber(msg.phone);
         const number = jid.split('@')[0];
 
         // A recipient who asked us to stop never hears from the queue again.
         if (await isOptedOut(msg.phone)) {
-          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El candidato pidió no recibir mensajes (opt-out)' });
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El candidato pidió no recibir mensajes (opt-out)', failedAt: new Date() });
           result.failedFinal++;
           return 'dropped';
         }
@@ -1285,7 +1359,7 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
         // Verify the number actually exists on WhatsApp before sending at it.
         const check = await checkNumberOnWhatsApp(number);
         if (check && !check.exists) {
-          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El número no tiene WhatsApp' });
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'El número no tiene WhatsApp', failedAt: new Date() });
           result.failedFinal++;
           if (msg.candidateId) {
             db.setDocData('candidates', msg.candidateId, { whatsappExists: false }).catch(() => { /* best effort */ });
@@ -1306,16 +1380,19 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
 
         const info = await sock!.sendMessage(targetJid, { text: msg.message });
         rememberSentMessage(info);
+        waMessageId = info?.key?.id || null;
+        if (waMessageId) rememberOutboxReceipt(waMessageId, msg.id);
       } catch (err: any) {
         const emsg = err?.message || String(err);
         if (emsg === 'phone_invalido') {
           // Bad data never improves with retries — fail it immediately and visibly.
-          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'Teléfono inválido' });
+          await db.markOutbox(msg.id, { status: 'failed', attempts: (msg.attempts || 0) + 1, lastError: 'Teléfono inválido', failedAt: new Date() });
           result.failedFinal++;
           return 'dropped';
         }
         const next = afterFailure(msg.attempts || 0, Date.now(), emsg.slice(0, 500));
-        await db.markOutbox(msg.id, next).catch(e => console.error('[wa-outbox] no se pudo marcar el fallo:', e));
+        await db.markOutbox(msg.id, { ...next, ...(next.status === 'failed' ? { failedAt: new Date() } : {}) })
+          .catch(e => console.error('[wa-outbox] no se pudo marcar el fallo:', e));
         if (next.status === 'failed') {
           result.failedFinal++;
           notifyAdmin('wa-outbox-failed', 'Un mensaje de WhatsApp no se pudo entregar tras varios intentos',
@@ -1337,7 +1414,10 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
       let marked = false;
       for (let attempt = 0; attempt < 3 && !marked; attempt++) {
         try {
-          await db.markOutbox(msg.id, { status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null });
+          await db.markOutbox(msg.id, {
+            status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null,
+            ...(waMessageId ? { waMessageId } : {}),
+          });
           marked = true;
         } catch (markErr) {
           console.error(`[wa-outbox] enviado pero no se pudo marcar como 'sent' (intento ${attempt + 1}):`, markErr);
@@ -1500,6 +1580,43 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
     waDrainRunning = false;
   }
   return result;
+}
+
+// Side panel snapshot. Every open screen polls the panel, so the Firestore part is kept
+// in memory and only re-read when something changed — an outbox write (db.outboxVersion)
+// or the send counters (waStatsVersion) — or after a few minutes as a safety net.
+// Reads cost daily quota; an idle panel must cost none.
+let waActivityCache: { key: string; at: number; data: any } | null = null;
+let waFailedBackfilled = false;
+const WA_ACTIVITY_MAX_AGE_MS = 5 * 60_000;
+
+async function loadWhatsAppActivitySnapshot() {
+  if (!waFailedBackfilled) {
+    waFailedBackfilled = true;
+    try {
+      const n = await db.backfillOutboxFailedAt();
+      if (n) console.log(`[wa-outbox] ${n} mensaje(s) fallidos antiguos recibieron fecha de fallo (panel lateral).`);
+    } catch (e) {
+      waFailedBackfilled = false;
+      console.error('[wa-outbox] no se pudo fechar los fallidos antiguos:', e);
+    }
+  }
+  // Key taken BEFORE reading: a write that lands mid-read moves the version on, so the
+  // next request re-reads instead of keeping a snapshot that missed it.
+  const key = `${db.outboxVersion()}:${waStatsVersion}`;
+  if (waActivityCache && waActivityCache.key === key && Date.now() - waActivityCache.at < WA_ACTIVITY_MAX_AGE_MS) {
+    return waActivityCache.data;
+  }
+  const [pendingRaw, failedRaw, sentRaw, stats, linkInfo] = await Promise.all([
+    db.listOutboxByStatuses(['queued', 'sending'], 100),
+    db.listOutboxRecentlyFailed(40),
+    db.listOutboxRecentlySent(40),
+    loadSendStats(Date.now()),
+    getWhatsAppLinkInfo(),
+  ]);
+  const data = { pendingRaw, failedRaw, sentRaw, stats, linkInfo };
+  waActivityCache = { key, at: Date.now(), data };
+  return data;
 }
 
 // Fire-and-forget kick, mirroring nudgeCvWorker: enqueue points call this so messages
@@ -2009,6 +2126,90 @@ async function startServer() {
     }
   });
 
+  // Side panel ("Mensajes de WhatsApp", always on the right): to WHOM, WHAT and WHEN —
+  // what went out (and whether it was delivered/read), what's waiting (with a rough
+  // time), and what failed (in plain words, and whether retrying can help).
+  app.get("/api/whatsapp/activity", requireRecruiter, async (req, res) => {
+    try {
+      if (!db?.supportsOutbox) return res.json({ enabled: false, pending: [], failed: [], sent: [] });
+      const snap = await loadWhatsAppActivitySnapshot();
+      const now = Date.now();
+      const iso = (v: any) => { const ms = tsToMs(v); return ms ? new Date(ms).toISOString() : null; };
+      const pub = (m: any) => ({
+        id: m.id,
+        candidateId: m.candidateId || null,
+        candidateName: m.candidateName || null,
+        phone: m.phone || null,
+        origin: m.origin === 'manual' ? 'manual' : 'automation',
+        stage: m.stage || null,
+        vacancy: vacancyFromTopicKey(m.topicKey),
+        preview: String(m.message || '').slice(0, 220),
+        status: m.status,
+        createdAt: iso(m.createdAt),
+        sentAt: iso(m.sentAt),
+        deliveredAt: iso(m.deliveredAt),
+        readAt: iso(m.readAt),
+        failedAt: iso(m.failedAt),
+        attempts: m.attempts || 0,
+      });
+
+      const stats = { ...snap.stats };
+      rollSendStats(stats, now);
+      const linkInfo = snap.linkInfo;
+      const dailyLimit = dailySendLimit(linkInfo ? (now - linkInfo.linkedAtMs) / 86_400_000 : 0, WA_DAILY_CAP_MATURE);
+      const connected = connectionStatus === 'connected' && !waReconnectSuspended;
+
+      // Waiting: in the drain's own order (oldest first). Messages from the past are
+      // left out — the drain retires them instead of sending them.
+      const pendingDocs = (snap.pendingRaw as any[])
+        .filter(m => m.status === 'sending' || queueFateOf(m, now) === 'send')
+        .sort((a, b) => tsToMs(a.createdAt) - tsToMs(b.createdAt));
+      const etas = estimateQueueEtas(pendingDocs.map(m => ({
+        id: m.id,
+        origin: m.origin === 'manual' ? 'manual' as const : 'automation' as const,
+        status: m.status === 'sending' ? 'sending' as const : 'queued' as const,
+        nextAttemptAtMs: tsToMs(m.nextAttemptAt),
+      })), {
+        nowMs: now,
+        connected,
+        window: WA_SEND_WINDOW,
+        quarantineUntilMs: linkInfo ? linkInfo.linkedAtMs + WA_QUARANTINE_HOURS * 3_600_000 : 0,
+        autoNextAtMs: stats.autoNextAt,
+        sentToday: stats.sentDay,
+        sentThisHour: stats.sentHour,
+        hourlyCap: WA_HOURLY_CAP,
+        linkedAtMs: linkInfo?.linkedAtMs || 0,
+        matureDailyCap: WA_DAILY_CAP_MATURE,
+      });
+      const pending = pendingDocs.map(m => {
+        const eta = etas[m.id];
+        return { ...pub(m), etaAt: eta?.etaMs ? new Date(eta.etaMs).toISOString() : null, waitReason: eta?.reason || 'turn' };
+      });
+
+      const failed = (snap.failedRaw as any[])
+        .filter(m => m.status === 'failed')
+        .map(m => ({ ...pub(m), ...describeFailure(m.lastError) }));
+      const sent = (snap.sentRaw as any[])
+        .filter(m => m.status === 'sent')
+        .map(pub);
+
+      res.json({
+        enabled: true,
+        generatedAt: new Date(now).toISOString(),
+        connection: connectionStatus,
+        suspended: waReconnectSuspended,
+        sentToday: stats.sentDay,
+        dailyLimit,
+        pending,
+        failed,
+        sent,
+      });
+    } catch (err) {
+      console.error('[wa-outbox] no se pudo armar el panel de actividad:', err);
+      res.status(500).json({ error: 'No se pudo cargar la actividad de WhatsApp.' });
+    }
+  });
+
   // Act on ONE failed message: put it back in line ('retry') or archive it
   // ('dismiss'). Only failed messages accept actions — a queued/sent one is either
   // already on its way or already delivered.
@@ -2027,10 +2228,10 @@ async function startServer() {
       }
       if (action === 'retry') {
         // requeuedAt restarts its clock: a human decided it still applies (see outboxFate).
-        await db.markOutbox(id, { status: 'queued', attempts: 0, nextAttemptAt: new Date(), lastError: null, requeuedAt: new Date() });
+        await db.markOutbox(id, { status: 'queued', attempts: 0, nextAttemptAt: new Date(), lastError: null, requeuedAt: new Date(), failedAt: null });
         nudgeWhatsAppOutbox('reintento manual desde la cola');
       } else {
-        await db.markOutbox(id, { status: 'dismissed', dismissedAt: new Date() });
+        await db.markOutbox(id, { status: 'dismissed', dismissedAt: new Date(), failedAt: null });
       }
       res.json({ success: true });
     } catch (err) {
@@ -2126,9 +2327,13 @@ async function startServer() {
         // Idempotent: the same text already waiting for this phone (double click,
         // client retry after a timeout) must not become a duplicate delivery.
         if (!await isDuplicateOutboxMessage(phone, message, 'manual')) {
+          const recipient = await resolveRecipient(
+            phone,
+            typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
+            null,
+          );
           await db.enqueueWhatsApp({
-            phone, message, origin: 'manual',
-            candidateId: typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
+            phone, message, origin: 'manual', ...recipient,
             status: 'queued', attempts: 0, nextAttemptAt: new Date(),
           });
         }
@@ -2181,13 +2386,17 @@ async function startServer() {
         const topicKey = typeof req.body?.topicKey === 'string' ? req.body.topicKey.slice(0, 300) : '';
         if (!await isDuplicateOutboxMessage(phone, message, 'automation', dedupeKey)) {
           if (topicKey && dedupeKey) await supersedeQueuedAutomations(phone, topicKey, dedupeKey);
+          const recipient = await resolveRecipient(
+            phone,
+            typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
+            typeof req.body?.candidateName === 'string' && req.body.candidateName.trim() ? req.body.candidateName.slice(0, 200) : null,
+          );
           await db.enqueueWhatsApp({
             phone, message, origin: 'automation',
             ...(dedupeKey ? { dedupeKey } : {}),
             ...(topicKey ? { topicKey } : {}),
             stage: typeof req.body?.stage === 'string' ? req.body.stage.slice(0, 100) : null,
-            candidateId: typeof req.body?.candidateId === 'string' ? req.body.candidateId.slice(0, 200) : null,
-            candidateName: typeof req.body?.candidateName === 'string' ? req.body.candidateName.slice(0, 200) : null,
+            ...recipient,
             status: 'queued', attempts: 0, nextAttemptAt: new Date(),
           });
         }

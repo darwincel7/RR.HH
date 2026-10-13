@@ -102,6 +102,19 @@ export interface ServerDb {
    * fetching the generic queue and filtering afterwards let ≥30 queued automations
    * occupy the whole batch window and starve the recruiter's own chat for hours. */
   listQueuedOutboxManual(max: number): Promise<any[]>;
+  /** The most recently SENT messages, newest first (side panel "Enviados"). */
+  listOutboxRecentlySent(max: number): Promise<any[]>;
+  /** The most recently FAILED messages still marked failed, newest first. Ordered by
+   * failedAt; failures recorded before that field existed are stamped once by
+   * backfillOutboxFailedAt(). */
+  listOutboxRecentlyFailed(max: number): Promise<any[]>;
+  /** One-time: gives legacy failed messages a failedAt so they sort. Returns how many. */
+  backfillOutboxFailedAt(): Promise<number>;
+  /** The outbox message a WhatsApp message id belongs to (delivery/read receipts). */
+  findOutboxIdByWaMessageId(waMessageId: string): Promise<string | null>;
+  /** Bumped by every outbox write made through this process. Lets the side panel's
+   * snapshot be served from memory while nothing changed (Firestore reads cost quota). */
+  outboxVersion(): number;
 }
 
 // Kept in sync with firestore.rules / AuthContext.
@@ -141,6 +154,9 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
     // Connectivity probe: confirms the credential actually works before we commit
     // to admin mode (applicationDefault() does not fail until first use).
     await adb.collection('settings').limit(1).get();
+
+    // See outboxVersion() in the interface.
+    let outboxVersion = 0;
 
     return {
       mode: 'admin',
@@ -230,6 +246,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         return snap.docs.map((d: any) => d.id);
       },
       supportsOutbox: true,
+      outboxVersion: () => outboxVersion,
       async acquireWhatsAppLease(holderId, ttlMs, force = false) {
         const ref = adb.collection('whatsapp_runtime').doc('socket_owner');
         return await adb.runTransaction(async (tx: any) => {
@@ -252,6 +269,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async enqueueWhatsApp(data) {
         const ref = await adb.collection('whatsapp_outbox').add({ ...data, createdAt: FieldValue.serverTimestamp() });
+        outboxVersion++;
         return ref.id;
       },
       async listOutboxSendable(max) {
@@ -273,7 +291,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           if (!snap.exists || snap.data()?.status !== 'queued') return false;
           tx.update(ref, { status: 'sending', sendingStartedAt: new Date() });
           return true;
-        });
+        }).then((claimed: boolean) => { if (claimed) outboxVersion++; return claimed; });
       },
       async retireOutboxIfQueued(id, status, reason) {
         const ref = adb.collection('whatsapp_outbox').doc(id);
@@ -282,9 +300,9 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           if (!snap.exists || snap.data()?.status !== 'queued') return false;
           tx.update(ref, status === 'dismissed'
             ? { status, dismissedAt: new Date(), lastError: reason }
-            : { status, nextAttemptAt: null, lastError: reason });
+            : { status, nextAttemptAt: null, lastError: reason, failedAt: new Date() });
           return true;
-        });
+        }).then((retired: boolean) => { if (retired) outboxVersion++; return retired; });
       },
       async retireQueuedOutboxBefore(cutoffMs, reason) {
         // Pages of 'queued' docs (single-field query, no composite index): the old ones in
@@ -302,6 +320,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           const batch = adb.batch();
           for (const d of old) batch.update(d.ref, { status: 'dismissed', dismissedAt: new Date(), lastError: reason });
           await batch.commit();
+          outboxVersion++;
           total += old.length;
           if (snap.size < PAGE) break;
         }
@@ -309,6 +328,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async markOutbox(id, fields) {
         await adb.collection('whatsapp_outbox').doc(id).set(fields, { merge: true });
+        outboxVersion++;
       },
       async reclaimStuckOutbox(olderThanMs) {
         const snap = await adb.collection('whatsapp_outbox').where('status', '==', 'sending').limit(50).get();
@@ -319,6 +339,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           const ms = started?.toMillis ? started.toMillis() : (started ? new Date(started).getTime() : 0);
           if (!ms || ms < cutoff) { await d.ref.update({ status: 'queued' }); n++; }
         }
+        if (n) outboxVersion++;
         return n;
       },
       async countOutboxPending() {
@@ -352,6 +373,41 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           .filter((m: any) => ms(m.nextAttemptAt) <= now)
           .sort((a: any, b: any) => ms(a.createdAt) - ms(b.createdAt))
           .slice(0, max);
+      },
+      async listOutboxRecentlySent(max) {
+        // Single-field ordering (auto-indexed). Only sent messages carry sentAt, so no
+        // status filter (and no composite index) is needed.
+        const snap = await adb.collection('whatsapp_outbox').orderBy('sentAt', 'desc').limit(max).get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      },
+      async listOutboxRecentlyFailed(max) {
+        // Single-field ordering (auto-indexed). Retried/dismissed messages get failedAt
+        // cleared to null, which sorts after every real date — the status filter in
+        // memory drops any that still slip in.
+        const snap = await adb.collection('whatsapp_outbox').orderBy('failedAt', 'desc').limit(max * 2).get();
+        return snap.docs
+          .map((d: any) => ({ id: d.id, ...d.data() }))
+          .filter((m: any) => m.status === 'failed')
+          .slice(0, max);
+      },
+      async backfillOutboxFailedAt() {
+        const snap = await adb.collection('whatsapp_outbox').where('status', '==', 'failed').limit(500).get();
+        const missing = snap.docs.filter((d: any) => !d.data()?.failedAt);
+        for (let i = 0; i < missing.length; i += 400) {
+          const batch = adb.batch();
+          for (const d of missing.slice(i, i + 400)) {
+            const m = d.data() || {};
+            // Best guess of WHEN it failed: its last attempt, else when it was queued.
+            batch.update(d.ref, { failedAt: m.sendingStartedAt || m.requeuedAt || m.createdAt || new Date() });
+          }
+          await batch.commit();
+        }
+        if (missing.length) outboxVersion++;
+        return missing.length;
+      },
+      async findOutboxIdByWaMessageId(waMessageId) {
+        const snap = await adb.collection('whatsapp_outbox').where('waMessageId', '==', waMessageId).limit(1).get();
+        return snap.empty ? null : snap.docs[0].id;
       },
       async listActiveVacancies() {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
@@ -510,6 +566,11 @@ async function initClient(): Promise<ServerDb> {
     async listOutboxByPhone() { return []; },
     async listOutboxByStatuses() { return []; },
     async listQueuedOutboxManual() { return []; },
+    async listOutboxRecentlySent() { return []; },
+    async listOutboxRecentlyFailed() { return []; },
+    async backfillOutboxFailedAt() { return 0; },
+    async findOutboxIdByWaMessageId() { return null; },
+    outboxVersion: () => 0,
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));

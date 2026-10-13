@@ -13,6 +13,8 @@ import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar, { PhotoLightbox } from '../components/CandidateAvatar';
 import InterviewScorecardModal from '../components/InterviewScorecardModal';
 import InterviewAiCard from '../components/InterviewAiCard';
+import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
+import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
 import {
   DEFAULT_SCORECARD, blankScorecard, loadScorecard, resolveScorecardTemplate, answersForSave, hasInterviewEvidence,
   type ScorecardTemplate, type InterviewScorecardData,
@@ -310,6 +312,7 @@ export default function CandidateProfile() {
       if (res.ok) {
         const data = await res.json().catch(() => ({}));
         if (data.queued) {
+          notifyWhatsAppActivityChanged(); // the side panel shows it right away
           // The server ALWAYS queues now (one paced exit door for every send) and
           // writes the history entry itself upon actual delivery — no client-side
           // log here (it would duplicate the record). `connected` distinguishes
@@ -796,6 +799,13 @@ export default function CandidateProfile() {
                 <ArrowRightLeft className="w-4 h-4 mr-2" /> Mover / copiar a otra vacante
               </button>
               <p className="mt-2 text-[11px] text-slate-400 text-center">Vacante: <strong className="text-slate-600">{application.vacancyTitle}</strong></p>
+              {/* This stage's WhatsApp: "Reintentar" if it couldn't go out, or "en cola". */}
+              <CandidateWhatsAppState
+                candidateId={candidateId}
+                phone={candidate?.phone}
+                stage={application.stage}
+                vacancy={application.vacancyTitle}
+              />
               {Array.isArray(application.vacancyHistory) && application.vacancyHistory.length > 0 && (
                 <ul className="mt-2 space-y-1 text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2">
                   {application.vacancyHistory.map((h: any, i: number) => (

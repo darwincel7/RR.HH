@@ -3,6 +3,7 @@ import { db } from './firebase';
 import { sendEmail, getEmailTemplate } from './email';
 import { apiFetch } from './api';
 import { normalizePhone } from './phone';
+import { notifyWhatsAppActivityChanged } from './whatsappActivity';
 import { renderMessage, messageSeed, seededRandom } from './messageVariation';
 import { DEFAULT_WA_TEMPLATES, STAGE2_DEADLINE_DAYS } from './whatsappTemplates';
 import type { PacingInfo } from './whatsappPacing';
@@ -212,6 +213,7 @@ export async function sendWhatsAppAutomation(
     // (it also writes the history entry on actual delivery — no client write here,
     // that would duplicate the record).
     if (data.success && data.queued) {
+      notifyWhatsAppActivityChanged(); // the side panel shows it right away
       return { status: 'queued', emailed };
     }
 

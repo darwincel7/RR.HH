@@ -19,6 +19,7 @@ import { smartMatch } from '../lib/smartSearch';
 import { loadAllNotesByCandidate, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar from '../components/CandidateAvatar';
+import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -781,6 +782,16 @@ export default function KanbanBoard() {
                                     Perfil
                                   </div>
                                 </div>
+
+                                {/* This stage's WhatsApp: red notice + "Reintentar" if it couldn't
+                                    go out, or a quiet "en cola" line while it waits. */}
+                                <CandidateWhatsAppState
+                                  compact
+                                  candidateId={item.candidateId}
+                                  phone={candidates[item.candidateId]?.phone || item.phone}
+                                  stage={item.stage}
+                                  vacancy={vacancy?.title}
+                                />
 
                                 {/* Open the candidate's CV directly from the card. */}
                                 {(() => {
