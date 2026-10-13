@@ -27,6 +27,26 @@ export default function Stage2Form() {
   const [answers, setAnswers] = useState<Record<string, string>>({});
   const [currentStep, setCurrentStep] = useState(0);
 
+  // Draft kept in this browser (like the technical test): a reload, a dropped
+  // connection or a failed send never costs the candidate what they already wrote.
+  const draftKey = `aura_stage2_${applicationId}`;
+  const draftRestored = React.useRef(false);
+  useEffect(() => {
+    if (!applicationId || draftRestored.current || questions.length === 0) return;
+    draftRestored.current = true;
+    try {
+      const saved = JSON.parse(localStorage.getItem(draftKey) || 'null');
+      if (saved?.answers && typeof saved.answers === 'object') setAnswers(saved.answers);
+      if (Number.isInteger(saved?.step) && saved.step >= 0 && saved.step < questions.length) setCurrentStep(saved.step);
+    } catch { /* storage unavailable or corrupt draft: start empty */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applicationId, questions.length]);
+  useEffect(() => {
+    if (!applicationId || !draftRestored.current || success) return;
+    try { localStorage.setItem(draftKey, JSON.stringify({ answers, step: currentStep })); } catch { /* storage unavailable */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [answers, currentStep, applicationId, success]);
+
   // Built-in fallback question set (used when settings has no custom stage-2 questions).
   const FALLBACK_QUESTIONS: Question[] = [
     { id: 'q1', text: '👤 Nombre y Apellido', type: 'text' },
@@ -102,6 +122,7 @@ export default function Stage2Form() {
     }
 
     setSubmitting(true);
+    setErrorMsg('');
     try {
       // Format answers to use question text as keys for better readability in DB and AI
       const formattedAnswers: Record<string, string> = {};
@@ -129,10 +150,11 @@ export default function Stage2Form() {
         throw new Error(`score-stage2 respondió ${res.status}`);
       }
 
+      try { localStorage.removeItem(draftKey); } catch { /* storage unavailable */ }
       setSuccess(true);
     } catch (error) {
       console.error("Error submitting stage 2:", error);
-      setErrorMsg('Error al enviar tus respuestas. Por favor, intenta de nuevo.');
+      setErrorMsg('No se pudieron enviar tus respuestas. Revisa tu conexión a internet y vuelve a pulsar "Enviar": lo que escribiste sigue guardado.');
     } finally {
       setSubmitting(false);
     }
@@ -245,7 +267,7 @@ export default function Stage2Form() {
       <SubmitOverlay
         show={submitting}
         title="Enviando tus respuestas…"
-        subtitle="Estamos procesando y evaluando tu formulario. Esto puede tardar unos segundos — no cierres esta página."
+        subtitle="Estamos guardando tu formulario. Esto tarda solo unos segundos — no cierres esta página."
       />
       <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-8">
         {/* Company Header */}

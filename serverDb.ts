@@ -61,6 +61,8 @@ export interface ServerDb {
   uploadPublicFile(path: string, buffer: Buffer, contentType: string): Promise<string>;
   /** Active (published) vacancies, for the public careers portal. */
   listActiveVacancies(): Promise<any[]>;
+  /** Docs whose `field` equals `value` (single-field index), as [{id, ...data}]. */
+  listDocsByField(collection: string, field: string, value: unknown, max: number): Promise<any[]>;
   /** Whole collection as [{id, ...data}], optionally only some fields (server-side projection). */
   listDocs(collection: string, fields?: string[]): Promise<any[]>;
 
@@ -413,6 +415,10 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
         return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
       },
+      async listDocsByField(c, field, value, max) {
+        const snap = await adb.collection(c).where(field, '==', value).limit(max).get();
+        return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      },
       async listDocs(c, fields) {
         let q: any = adb.collection(c);
         if (fields && fields.length) q = q.select(...fields);
@@ -573,6 +579,10 @@ async function initClient(): Promise<ServerDb> {
     outboxVersion: () => 0,
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));
+      return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    },
+    async listDocsByField(c, field, value, max) {
+      const snap = await getDocs(query(collection(cdb, c), where(field, '==', value), limit(max)));
       return snap.docs.map(d => ({ id: d.id, ...d.data() }));
     },
     async listDocs(c) {

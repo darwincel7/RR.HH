@@ -513,7 +513,8 @@ export default function CandidateProfile() {
       });
 
       if (!response.ok) {
-        throw new Error('Error en la evaluación de IA');
+        const d = await response.json().catch(() => ({} as any));
+        throw new Error(d?.error || 'Error en la evaluación de IA');
       }
 
       const text = await response.text();
@@ -549,7 +550,7 @@ export default function CandidateProfile() {
       alert('Test reevaluado con éxito');
     } catch (error) {
       console.error("Error reevaluating test:", error);
-      alert('Error al reevaluar el test con IA');
+      alert(`No se pudo reevaluar el test con IA.\n\n${(error as any)?.message || ''}`);
     } finally {
       setReEvaluatingTest(false);
     }
@@ -566,7 +567,8 @@ export default function CandidateProfile() {
       });
 
       if (!res.ok) {
-        throw new Error('Error en la evaluación de IA');
+        const d = await res.json().catch(() => ({} as any));
+        throw new Error(d?.error || 'Error en la evaluación de IA');
       }
 
       const text = await res.text();
@@ -585,7 +587,7 @@ export default function CandidateProfile() {
       alert('Etapa 2 reevaluada con éxito');
     } catch (error) {
       console.error("Error reevaluating stage 2:", error);
-      alert('Error al reevaluar la etapa 2 con IA');
+      alert(`No se pudo reevaluar la etapa 2 con IA.\n\n${(error as any)?.message || ''}`);
     } finally {
       setReEvaluatingStage2(false);
     }
@@ -1025,7 +1027,11 @@ export default function CandidateProfile() {
                       <div className="flex flex-col gap-2 mb-4">
                         <div className="flex items-center justify-between bg-violet-50 p-3 lg:p-4 rounded-xl lg:rounded-2xl border border-violet-100">
                           <span className="text-xs lg:text-sm font-bold text-violet-900">Puntuación IA</span>
-                          <span className="text-xl lg:text-2xl font-black text-violet-600">{application.testResults.score}/100</span>
+                          {typeof application.testResults.score === 'number' ? (
+                            <span className="text-xl lg:text-2xl font-black text-violet-600">{application.testResults.score}/100</span>
+                          ) : (
+                            <span className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1 rounded-lg" title="Las respuestas están guardadas; la IA las evaluará sola en cuanto esté disponible.">Evaluación IA pendiente</span>
+                          )}
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           {application.testResults.customer_service_score !== undefined && (
@@ -1188,6 +1194,15 @@ export default function CandidateProfile() {
                 
                 {application?.stage2Answers ? (
                   <div className="flex flex-col lg:flex-row gap-6">
+                    {/* Answers saved, AI evaluation still pending (e.g. the AI had no budget). */}
+                    {!application.stage2Scoring && (
+                      <div className="lg:w-1/3">
+                        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 text-xs text-amber-800">
+                          <p className="font-bold">Evaluación IA pendiente</p>
+                          <p className="mt-1">Las respuestas están guardadas. La IA las evaluará sola en cuanto esté disponible; también puedes pulsar "Reevaluar IA".</p>
+                        </div>
+                      </div>
+                    )}
                     {/* Scoring Summary */}
                     {application.stage2Scoring && (
                       <div className="lg:w-1/3 flex flex-col space-y-4">

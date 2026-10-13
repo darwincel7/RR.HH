@@ -3,6 +3,7 @@ import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
 import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock } from 'lucide-react';
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
+import AiStatusBanner from '../AiStatusBanner';
 import CVWorker from '../CVWorker';
 import AITestButton from '../AITestButton';
 import TopBar from './TopBar';
@@ -257,6 +258,7 @@ export default function DashboardLayout() {
         <CVWorker />
         <div className="p-4 md:p-8 pt-20 lg:pt-8 flex-1 flex flex-col">
           <WhatsAppStatusBanner />
+          <AiStatusBanner />
           <TopBar />
           <div className="max-w-7xl mx-auto animate-fade-in w-full flex-1">
             <Outlet />
