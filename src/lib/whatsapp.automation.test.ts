@@ -96,3 +96,25 @@ describe('getStageTemplate', () => {
     expect(await getStageTemplate(STAGE2)).toContain('{{primer_nombre}}');
   });
 });
+
+describe('per-stage notification switch', () => {
+  it('a stage switched OFF notifies nobody: no WhatsApp, no email', async () => {
+    docs['settings/stage_notifications'] = { off: { [STAGE2]: true } };
+    const r = await sendWhatsAppAutomation('8095551000', STAGE2, vars);
+    expect(r).toMatchObject({ status: 'skipped', reason: 'etapa_sin_aviso' });
+    expect(apiFetch).not.toHaveBeenCalled();
+    expect(sendEmail).not.toHaveBeenCalled();
+  });
+
+  it('other stages, and a stage switched back ON, notify as before', async () => {
+    docs['settings/stage_notifications'] = { off: { Descartado: true, [STAGE2]: false } };
+    expect((await sendWhatsAppAutomation('8095551000', STAGE2, vars)).status).toBe('queued');
+    expect(apiFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('when the server says the stage is OFF (screen opened before the switch), it is a skip, not a failure', async () => {
+    apiAnswer = { success: true, queued: false, messageSent: false, skipped: 'etapa_sin_aviso' };
+    const r = await sendWhatsAppAutomation('8095551000', STAGE2, vars, { channels: { email: false } });
+    expect(r).toMatchObject({ status: 'skipped', reason: 'etapa_sin_aviso' });
+  });
+});

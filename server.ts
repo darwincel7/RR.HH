@@ -2763,6 +2763,16 @@ async function startServer() {
       if (!body) return;
       const { phone, message } = body;
       if (!message) return res.json({ success: true, messageSent: false, reason: "No message provided" });
+      // The stage's notification switch (Kanban / Configuración) is OFF: nothing goes out.
+      // Checked here too, not only in the browser — a screen opened before the switch was
+      // flipped must not be able to notify anyway.
+      const stageName = typeof req.body?.stage === 'string' ? req.body.stage : '';
+      if (stageName) {
+        const switches = await db.getDocData('settings', 'stage_notifications').catch(() => null);
+        if (switches?.off?.[stageName] === true) {
+          return res.json({ success: true, queued: false, messageSent: false, skipped: 'etapa_sin_aviso' });
+        }
+      }
       try {
         formatWhatsAppNumber(phone); // surface bad numbers to the recruiter NOW
       } catch {

@@ -149,6 +149,8 @@ export default function Interviews() {
         // delivers it by itself with anti-ban pacing. Only 'failed' is a problem.
         alert(r.status === 'sent' || r.status === 'queued'
           ? `Candidato añadido. Invitación de WhatsApp en camino para el ${session.date} a las ${session.time}.`
+          : r.status === 'skipped' && r.reason === 'etapa_sin_aviso'
+            ? `Candidato añadido. No se envió la invitación: los avisos de la etapa "${stageTemplate}" están apagados (se encienden con un clic en el tablero o en Configuración).`
           : r.status === 'skipped'
             ? 'Candidato añadido. No se envió WhatsApp (el candidato pidió no recibir mensajes o falta información).'
             : 'Candidato añadido, pero NO se pudo enviar la invitación por WhatsApp. Revisa la conexión de WhatsApp en Configuración.');

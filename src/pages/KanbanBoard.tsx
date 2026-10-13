@@ -20,6 +20,8 @@ import { loadAllNotesByCandidate, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
+import StageNotifyToggle from '../components/StageNotifyToggle';
+import { useStageNotifications } from '../lib/useStageNotifications';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -32,6 +34,8 @@ export default function KanbanBoard() {
   // Notes are searchable from the board too (loaded once; optional).
   const [notesByCandidate, setNotesByCandidate] = useState<Map<string, CandidateNote[]>>(new Map());
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
+  // Per-stage "notify on move" switches (one click on each column header).
+  const stageNotify = useStageNotifications();
   useEffect(() => {
     loadAllNotesByCandidate().then(setNotesByCandidate).catch(e => console.warn('Notas no disponibles para la búsqueda:', e));
   }, []);
@@ -195,8 +199,12 @@ export default function KanbanBoard() {
     const appsToMove = applications.filter(a => selectedApps.has(a.id) && a.stage !== targetStage);
     if (appsToMove.length === 0) { setBulkActionLoading(false); return; }
 
+    // This stage's notification is switched OFF: just move, nobody is notified (so no
+    // schedule is needed and there's nothing to ask).
+    const muted = stageNotify.isMuted(targetStage);
+
     // PRE-FLIGHT: convoking to an interview requires a future schedule set above.
-    if (isInterviewStage(targetStage)) {
+    if (isInterviewStage(targetStage) && !muted) {
       const st = scheduleStatus();
       if (!st.valid) {
         showToast('warning', st.isPast
@@ -210,8 +218,8 @@ export default function KanbanBoard() {
     // PRE-FLIGHT: a stage that messages candidates asks HOW to notify this batch — with
     // the WhatsApp state, the delivery estimate at the protective pace and the template's
     // variation in view — before moving anyone (never a half-notified batch).
-    let notify: BulkNotifyChoice = 'whatsapp';
-    if (stageMayAutoSend(targetStage) || isInterviewStage(targetStage)) {
+    let notify: BulkNotifyChoice = muted ? 'none' : 'whatsapp';
+    if (!muted && (stageMayAutoSend(targetStage) || isInterviewStage(targetStage))) {
       const withEmail = appsToMove.filter(a => !!candidates[a.candidateId]?.email).length;
       const choice = await askBulkNotify(targetStage, appsToMove.length, withEmail);
       if (!choice) { setBulkActionLoading(false); return; }
@@ -298,10 +306,10 @@ export default function KanbanBoard() {
         sentCount > 0 ? `${sentCount} WhatsApp enviados` : '',
         queuedCount > 0 ? `${queuedCount} WhatsApp en cola (salen poco a poco)` : '',
         emailedCount > 0 ? `${emailedCount} avisados por correo` : '',
-        notify === 'none' ? 'sin avisos' : '',
+        notify === 'none' ? (muted ? 'sin avisos (apagados en esta etapa)' : 'sin avisos') : '',
       ].filter(Boolean).join(' · ');
       showToast('success', `${movedCount} candidato(s) movidos a "${targetStage}"${parts ? ` · ${parts}` : ''}`, 4500);
-      if (stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage)) {
+      if (!muted && stageNeedsScheduling(targetStage) && !isInterviewStage(targetStage)) {
         showToast('warning', '📅 Para enviarles la invitación con fecha y hora, agéndala en la página Entrevistas.', 6500);
       }
     }
@@ -407,9 +415,13 @@ export default function KanbanBoard() {
     const movedApp = applications.find(a => a.id === draggableId);
     if (!movedApp) return;
 
+    // Notification switched OFF for this stage: the move notifies nobody.
+    const muted = stageNotify.isMuted(newStage);
+
     // BLOCK convoking to an interview when the schedule above is missing or already past.
     // Returning before the optimistic update makes the card snap back to its origin.
-    if (!sameColumn && isInterviewStage(newStage)) {
+    // (Not when the stage doesn't notify: there's no invitation to build.)
+    if (!sameColumn && isInterviewStage(newStage) && !muted) {
       const st = scheduleStatus();
       if (!st.valid) {
         showToast('warning', st.isPast
@@ -439,7 +451,7 @@ export default function KanbanBoard() {
 
     // Instant green check — the Firestore write and WhatsApp automation continue in the
     // background, so the recruiter can immediately drag the next card.
-    if (!sameColumn) showToast('success', `${movedApp.candidateName} → ${newStage}`, 2600);
+    if (!sameColumn) showToast('success', `${movedApp.candidateName} → ${newStage}${muted && stageNotify.hasMessage(newStage) ? ' · sin aviso (apagado en esta etapa)' : ''}`, 2600);
 
     // Update in Firestore
     try {
@@ -492,7 +504,7 @@ export default function KanbanBoard() {
       }
 
       // "Oferta" still schedules from the Entrevistas page (a different meeting).
-      if (stageNeedsScheduling(newStage) && !isInterviewStage(newStage)) {
+      if (!muted && stageNeedsScheduling(newStage) && !isInterviewStage(newStage)) {
         showToast('warning', `📅 ${movedApp.candidateName} está en "${newStage}": agenda la cita en la página Entrevistas para enviarle la invitación.`, 6500);
       }
     } catch (error) {
@@ -684,6 +696,18 @@ export default function KanbanBoard() {
                 <p className="mb-2.5 px-1 text-[9px] lg:text-[10px] text-slate-400 leading-snug" title={STAGE_INFO[column.id]}>
                   {STAGE_INFO[column.id]}
                 </p>
+
+                {/* One click: does moving someone here notify them (WhatsApp + email)? */}
+                {stageNotify.hasMessage(column.id) && (
+                  <div className="mb-2.5 px-1">
+                    <StageNotifyToggle
+                      stage={column.id}
+                      muted={stageNotify.isMuted(column.id)}
+                      saving={stageNotify.saving === column.id}
+                      onToggle={stageNotify.toggle}
+                    />
+                  </div>
+                )}
 
                 <Droppable droppableId={column.id}>
                   {(provided, snapshot) => (

@@ -4,6 +4,7 @@ import { sendEmail, getEmailTemplate } from './email';
 import { apiFetch } from './api';
 import { normalizePhone } from './phone';
 import { notifyWhatsAppActivityChanged } from './whatsappActivity';
+import { NO_AUTOMATION_STAGES, isStageMutedNow } from './stageNotifications';
 import { renderMessage, messageSeed, seededRandom } from './messageVariation';
 import { DEFAULT_WA_TEMPLATES, STAGE2_DEADLINE_DAYS } from './whatsappTemplates';
 import type { PacingInfo } from './whatsappPacing';
@@ -120,8 +121,11 @@ export async function sendWhatsAppAutomation(
     // custom template is configured in settings:
     //  - "Tests presenciales" / "Pruebas técnicas": the exam is given in person.
     //  - "Contratado": hiring is confirmed personally by the recruiter.
-    const NO_AUTOMATION_STAGES = ['Tests presenciales', 'Pruebas técnicas', 'Contratado'];
     if (NO_AUTOMATION_STAGES.includes(stage)) return { status: 'skipped', reason: 'stage_sin_automatizacion' };
+
+    // The recruiter switched this stage's notification OFF (one click on its column or
+    // template): moving here notifies nobody — no WhatsApp and no email.
+    if (await isStageMutedNow(stage)) return { status: 'skipped', reason: 'etapa_sin_aviso' };
 
     // These messages advertise a date/time/place. Sending them without that data
     // (e.g. on a plain Kanban stage change) produced broken "Fecha: / Hora: ()"
@@ -207,6 +211,10 @@ export async function sendWhatsAppAutomation(
     // (a failure would invite retries against someone who said stop).
     if (data.success && data.skipped === 'opt_out') {
       return { status: 'skipped', reason: 'candidato_pidio_no_contactar', emailed };
+    }
+    // The server enforces the stage switch too (a screen opened before it was flipped).
+    if (data.success && data.skipped === 'etapa_sin_aviso') {
+      return { status: 'skipped', reason: 'etapa_sin_aviso', emailed };
     }
 
     // Durable outbox path: the server persisted the message and delivers it itself

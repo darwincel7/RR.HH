@@ -3,6 +3,7 @@ import { collection, query, where, getDocs, getDoc, doc, writeBatch, setDoc, ser
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, auth } from '../lib/firebase';
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
+import { isStageMutedNow } from '../lib/stageNotifications';
 import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles, ScanFace } from 'lucide-react';
@@ -348,8 +349,10 @@ export default function CandidatesList() {
       // PRE-FLIGHT: a stage that messages candidates asks HOW to notify this batch — with
       // the WhatsApp state, the delivery estimate at the protective pace and the
       // template's variation in view — before moving anyone (never half-notified).
-      let notify: BulkNotifyChoice = 'whatsapp';
-      if (stageMayAutoSend(newStage)) {
+      // Notification switched OFF for this stage (Kanban/Configuración): just move.
+      const muted = await isStageMutedNow(newStage);
+      let notify: BulkNotifyChoice = muted ? 'none' : 'whatsapp';
+      if (!muted && stageMayAutoSend(newStage)) {
         const choice = await askBulkNotify(newStage, appsToMove.length, appsToMove.filter(a => !!a.email).length);
         if (!choice) { setBulkActionLoading(false); return; }
         notify = choice;
@@ -405,7 +408,7 @@ export default function CandidatesList() {
       if (failedSends.length > 0) {
         // Show exactly WHO didn't get the message, with one-click retry.
         setSendReport({ stage: newStage, sent: sentCount, failed: failedSends });
-      } else if (stageNeedsScheduling(newStage)) {
+      } else if (!muted && stageNeedsScheduling(newStage)) {
         alert(`Candidatos movidos a "${newStage}". 📅 Para enviarles la invitación por WhatsApp con fecha y hora, agéndala en la página "Entrevistas".`);
       }
     } catch (error) {

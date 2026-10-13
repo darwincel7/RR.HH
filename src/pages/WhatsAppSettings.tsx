@@ -5,6 +5,9 @@ import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import { Loader2, CheckCircle, XCircle, RefreshCw, Save, MessageSquare, Building2, Image as ImageIcon, Upload, ShieldCheck, UserCheck, UserX, Clock, Inbox, RotateCcw, Trash2, Shuffle, Eye, EyeOff, Moon, Timer } from 'lucide-react';
 import { DEFAULT_WA_TEMPLATES } from '../lib/whatsappTemplates';
+import StageNotifyToggle from '../components/StageNotifyToggle';
+import { useStageNotifications } from '../lib/useStageNotifications';
+import { NO_AUTOMATION_STAGES } from '../lib/stageNotifications';
 import { countVariations, variationProblem, renderMessage, seededRandom } from '../lib/messageVariation';
 import { formatWindowHour } from '../lib/sendWindow';
 
@@ -30,6 +33,8 @@ export default function WhatsAppSettings() {
   // Defaults (with {a|b} variations) come from the same module the sender uses, so the
   // editor and what actually goes out can never drift apart again.
   const [templates, setTemplates] = useState<Record<string, string>>({ ...DEFAULT_WA_TEMPLATES });
+  // Same per-stage "notify on move" switches as the Kanban columns.
+  const stageNotify = useStageNotifications();
   // Last saved version, to tell the recruiter when edits are still unsaved.
   const savedTemplatesRef = useRef<string>(JSON.stringify(DEFAULT_WA_TEMPLATES));
   // Per-stage preview: absent = hidden; a number = the seed of the example shown.
@@ -906,7 +911,19 @@ export default function WhatsAppSettings() {
             return (
               <div key={stage}>
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <label className="block text-sm font-bold text-slate-700">{stage}</label>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="block text-sm font-bold text-slate-700">{stage}</label>
+                    {/* Stages with a column on the board can be silenced with one click.
+                        (The interview reminder is sent by hand from Entrevistas.) */}
+                    {stage !== 'Recordatorio de entrevista' && !NO_AUTOMATION_STAGES.includes(stage) && (
+                      <StageNotifyToggle
+                        stage={stage}
+                        muted={stageNotify.isMuted(stage)}
+                        saving={stageNotify.saving === stage}
+                        onToggle={stageNotify.toggle}
+                      />
+                    )}
+                  </div>
                   <div className="flex flex-wrap items-center gap-2">
                     {variants > 1 ? (
                       <span className="text-[11px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2 py-0.5 rounded-full">
