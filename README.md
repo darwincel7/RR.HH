@@ -96,6 +96,8 @@ error es silencioso y caro:
 | [`src/lib/messageVariation.test.ts`](src/lib/messageVariation.test.ts) | Variaciones `{a\|b}` de las plantillas: un envío masivo no manda el mismo texto a todos, pero un reintento produce exactamente el mismo (no duplica) |
 | [`src/lib/sendWindow.test.ts`](src/lib/sendWindow.test.ts) / [`src/lib/whatsappPacing.test.ts`](src/lib/whatsappPacing.test.ts) | Horario de envío en hora de RD y la estimación de cuánto tardan en salir los mensajes de un movimiento masivo |
 | [`src/lib/whatsapp.automation.test.ts`](src/lib/whatsapp.automation.test.ts) | Lo que de verdad envía un cambio de etapa: redacción distinta por candidato pero idéntica en un reintento, claves de la notificación, canal "solo correo" y que un reintento nunca repita el correo |
+| [`src/lib/interviewAttendance.test.ts`](src/lib/interviewAttendance.test.ts) | Quién cuenta como convocado a entrevista (el sello sobrevive al descarte y al avance), que avanzar de etapa no vuelva a contar ni borre la marca, y que los porcentajes nunca den NaN |
+| [`src/lib/mergeCandidates.test.ts`](src/lib/mergeCandidates.test.ts) | Unificar dos perfiles: nada se sobreescribe, nada se pierde (el test del duplicado se archiva), un "Descartado" no gana a una etapa activa y dos postulaciones a la misma vacante acaban en una |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -146,6 +148,54 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   respuesta por respuesta, consistencia y preguntas para validar). En el **Ranking** la
   entrevista cuenta una vez: promedio de la nota del entrevistador y la de la IA
   ([`candidateScore.ts`](src/lib/candidateScore.ts)).
+- **¿Asistió a la entrevista?** (tarjeta del Kanban y perfil, solo en quien fue convocado):
+  dos botones — ✅ *Asistió* / ❌ *No se presentó* — que guardan quién marcó y cuándo.
+  Pulsar otra vez la opción marcada la quita (un "no vino" por error falsearía justo el
+  porcentaje que se intenta bajar). El **Dashboard** muestra convocados, % que asistió,
+  % que no se presentó, % sin registrar y el desglose por vacante, con filtro de 30/90
+  días o todo el histórico.
+  La clave está en el denominador: al mover a alguien a una etapa de entrevista la
+  postulación queda con `interviewInvitedAt`, y ese sello **no se borra** aunque la
+  persona avance a Finalista o se descarte. Si "los invitados" se contaran por la etapa
+  actual, cada descarte haría bajar el porcentaje de ausencias sin que nadie hubiera
+  mejorado nada. Avanzar de "Convocado a entrevista" a "Entrevista presencial" no es una
+  convocatoria nueva; una reconvocatoria de verdad archiva la marca anterior en
+  `interviewAttendanceLog` y deja la nueva cita sin marcar. La página *Entrevistas* sigue
+  marcando asistencia en su sesión, pero escribe también en la postulación, así que las
+  dos pantallas no pueden decir cosas distintas. Lógica y métricas en
+  [`src/lib/interviewAttendance.ts`](src/lib/interviewAttendance.ts).
+  Además del porcentaje sobre el total de convocados, el panel muestra el porcentaje
+  **sobre lo ya registrado**: es el número comparable entre períodos mientras falten
+  marcas. Los colores de la barra son `emerald-500` / `rose-700` a propósito — el
+  verde/rojo habitual queda a ΔE 5.8 en deuteranopía, indistinguible para quien no ve el
+  rojo — y ningún dato se comunica solo con color.
+- **Unificar perfiles duplicados** (perfil → *Unificar perfiles*): junta en el perfil
+  abierto otro perfil del mismo postulante — sus postulaciones, tests, formularios,
+  entrevistas, notas, historial de WhatsApp y citas de entrevista.
+  Por qué hay duplicados: `/api/apply` usa el UID de la sesión anónima como id del
+  candidato, así que quien aplica otro día o desde otro navegador **nace como un perfil
+  nuevo**; si además escribió el número distinto, el deduplicado por teléfono/correo no
+  lo ve. Así es como la misma persona acaba con un test en un perfil y otro test en el otro.
+  Reglas: manda el perfil principal (del duplicado solo se toma lo que le falta); una
+  postulación a una vacante donde el principal no está se **mueve** conservando su id (los
+  links `/eval` y `/test` ya enviados siguen funcionando); dos postulaciones a la **misma**
+  vacante se combinan en una, que se queda con la etapa más avanzada —un "Descartado"
+  nunca gana a una etapa activa— y con la evidencia que faltaba. Lo que el principal ya
+  tenía se conserva, y lo del duplicado se archiva en `mergedEvidence` y se muestra en el
+  perfil ("De un perfil unificado"): nada desaparece en silencio.
+  El perfil duplicado **no se borra**: queda con `mergedInto`, deja de recibir
+  postulaciones y mensajes (las búsquedas por teléfono/correo del servidor siguen ese
+  rastro hasta el perfil vivo) y sus links viejos redirigen al perfil principal. El otro
+  teléfono/correo se guarda como `alternatePhones`/`alternateEmails`, entra en el buscador
+  y vuelve a enlazar un WhatsApp entrante con la persona.
+  La pantalla propone los perfiles parecidos (mismo teléfono, correo o nombre completo),
+  deja buscar cualquier otro y muestra **exactamente** qué va a pasar antes de confirmar;
+  la vista previa la calcula el mismo módulo que ejecuta el servidor
+  ([`src/lib/mergeCandidates.ts`](src/lib/mergeCandidates.ts)), así que no puede prometer
+  otra cosa. Va por el servidor (`POST /api/candidates/merge`, solo reclutadores) porque
+  el historial de WhatsApp es inmutable para el cliente: solo el Admin SDK puede
+  reasignarlo. En el perfil aparece solo un aviso cuando hay otro perfil con el mismo
+  teléfono.
 - **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
   CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
   ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del

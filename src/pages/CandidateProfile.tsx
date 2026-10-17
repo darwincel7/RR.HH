@@ -1,11 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { doc, getDoc, updateDoc, collection, query, where, getDocs, addDoc, serverTimestamp, onSnapshot, deleteField } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, Merge } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
@@ -15,6 +15,8 @@ import InterviewScorecardModal from '../components/InterviewScorecardModal';
 import InterviewAiCard from '../components/InterviewAiCard';
 import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
+import MergeCandidatesModal from '../components/MergeCandidatesModal';
+import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
 import {
@@ -48,6 +50,7 @@ function fileToJpegDataUrl(file: File, max = 1200): Promise<string> {
 
 export default function CandidateProfile() {
   const { candidateId } = useParams();
+  const navigate = useNavigate();
   const [candidate, setCandidate] = useState<any>(null);
   const [application, setApplication] = useState<any>(null);
   const [allApplications, setAllApplications] = useState<any[]>([]);
@@ -63,6 +66,9 @@ export default function CandidateProfile() {
   const [showCVModal, setShowCVModal] = useState(false);
   const [showEditCandidate, setShowEditCandidate] = useState(false);
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
+  const [showMerge, setShowMerge] = useState(false);
+  // Otros perfiles con ESTE mismo teléfono: una consulta indexada, no toda la colección.
+  const [samePhoneCount, setSamePhoneCount] = useState(0);
   const [showPhoto, setShowPhoto] = useState(false);
   const [photoBusy, setPhotoBusy] = useState<'' | 'extract' | 'upload' | 'remove'>('');
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -184,6 +190,29 @@ export default function CandidateProfile() {
       unsubs.forEach(u => u());
     };
   }, [candidateId]);
+
+  // Este perfil fue unificado en otro: todo su contenido vive allá, así que un link
+  // viejo (o el historial del navegador) lleva al perfil vivo en vez de a una ficha vacía.
+  useEffect(() => {
+    if (candidate?.mergedInto && candidate.mergedInto !== candidateId) {
+      navigate(`/candidates/${candidate.mergedInto}`, { replace: true });
+    }
+  }, [candidate?.mergedInto, candidateId, navigate]);
+
+  // ¿Hay otro perfil con este mismo teléfono? Nadie va a buscar duplicados por su
+  // cuenta: si existen, el aviso aparece solo. Una consulta por campo indexado.
+  useEffect(() => {
+    const phoneNormalized = candidate?.phoneNormalized;
+    if (!phoneNormalized || !candidateId) { setSamePhoneCount(0); return; }
+    let alive = true;
+    getDocs(query(collection(db, 'candidates'), where('phoneNormalized', '==', phoneNormalized)))
+      .then(snap => {
+        if (!alive) return;
+        setSamePhoneCount(snap.docs.filter(d => d.id !== candidateId && !d.data()?.mergedInto).length);
+      })
+      .catch(() => { /* el aviso es opcional */ });
+    return () => { alive = false; };
+  }, [candidate?.phoneNormalized, candidateId]);
 
   // ---- Profile photo ----------------------------------------------------------
   const extractPhotoFromCV = async (silent = false) => {
@@ -708,12 +737,43 @@ export default function CandidateProfile() {
               <div className="flex items-center text-slate-600 bg-slate-50 p-2.5 lg:p-3 rounded-xl">
                 <Phone className="w-4 h-4 mr-3 text-violet-500 flex-shrink-0" /> {candidate.phone}
               </div>
+              {/* Lo que dejó una unificación: el otro número/correo con el que se
+                  registró. Se muestra porque es con el que quizá nos escriba. */}
+              {(candidate.alternatePhones?.length > 0 || candidate.alternateEmails?.length > 0) && (
+                <div className="text-[11px] text-slate-500 bg-slate-50 p-2.5 rounded-xl">
+                  <span className="font-bold text-slate-400 uppercase tracking-widest text-[9px]">También usó</span>
+                  <p className="mt-1 break-words">
+                    {[...(candidate.alternatePhones || []), ...(candidate.alternateEmails || [])].join(' · ')}
+                  </p>
+                </div>
+              )}
               {(candidate.city || ai.location || ai.city) && (
                 <div className="flex items-center text-slate-600 bg-slate-50 p-2.5 lg:p-3 rounded-xl">
                   <MapPin className="w-4 h-4 mr-3 text-violet-500 flex-shrink-0" /> <span className="truncate">{candidate.city || ai.location || ai.city}</span>
                 </div>
               )}
+              {/* Otro perfil con este mismo teléfono: casi siempre la misma persona que
+                  volvió a aplicar desde otra sesión (así nacen los duplicados). */}
+              {samePhoneCount > 0 && (
+                <button
+                  onClick={() => setShowMerge(true)}
+                  className="w-full text-left flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-xl hover:bg-amber-100 transition-colors"
+                >
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span className="text-[11px] font-bold text-amber-900">
+                    Hay {samePhoneCount} perfil(es) más con este mismo teléfono.
+                    <span className="block font-medium text-amber-800">Revisa si es la misma persona y unifícalos.</span>
+                  </span>
+                </button>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-1 gap-2 mt-2">
+                <button
+                  onClick={() => setShowMerge(true)}
+                  title="Juntar en este perfil otro perfil del mismo postulante (sus postulaciones, tests, notas y WhatsApp)"
+                  className="flex items-center justify-center p-2.5 bg-slate-100 text-slate-700 rounded-xl font-bold hover:bg-slate-200 transition-colors text-xs lg:text-sm"
+                >
+                  <Merge className="w-4 h-4 lg:w-5 lg:h-5 mr-2" /> Unificar perfiles
+                </button>
                 {candidate.cvUrl && (
                   <button 
                     onClick={() => setShowCVModal(true)}
@@ -813,6 +873,16 @@ export default function CandidateProfile() {
                 stage={application.stage}
                 vacancy={application.vacancyTitle}
               />
+              {Array.isArray(candidate.mergedFrom) && candidate.mergedFrom.length > 0 && (
+                <ul className="mt-2 space-y-1 text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2">
+                  {candidate.mergedFrom.map((m: any, i: number) => (
+                    <li key={i}>
+                      🔗 Perfil unificado: <strong>{m.fullName || m.candidateId}</strong>
+                      {m.at?.toDate ? ` · ${m.at.toDate().toLocaleDateString('es-DO')}` : ''}{m.by ? ` · ${m.by}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              )}
               {Array.isArray(application.vacancyHistory) && application.vacancyHistory.length > 0 && (
                 <ul className="mt-2 space-y-1 text-[10px] text-slate-500 bg-slate-50 rounded-lg p-2">
                   {application.vacancyHistory.map((h: any, i: number) => (
@@ -1182,6 +1252,10 @@ export default function CandidateProfile() {
                   onOpenScorecard={() => setShowScorecardModal(true)}
                 />
               )}
+
+              {/* Lo que traía el perfil unificado y aquí ya estaba respondido: se conserva
+                  visible en vez de perderse. */}
+              <MergedEvidenceCard entries={application?.mergedEvidence} />
 
               {/* Formulario Etapa 2 Section */}
               <div className="glass-card rounded-2xl lg:rounded-3xl p-5 lg:p-6">
@@ -1578,6 +1652,17 @@ export default function CandidateProfile() {
         isOpen={showMoveVacancy}
         onClose={() => setShowMoveVacancy(false)}
         apps={application ? [{ ...application, candidateName: application.candidateName || candidate.fullName || candidate.name }] : []}
+      />
+
+      {/* Unificar dos perfiles del mismo postulante. Los listeners en vivo traen solos
+          las postulaciones que llegan de la unificación. */}
+      <MergeCandidatesModal
+        isOpen={showMerge}
+        onClose={() => setShowMerge(false)}
+        primaryId={candidateId!}
+        primary={candidate}
+        primaryApps={allApplications}
+        onMerged={() => setSamePhoneCount(0)}
       />
     </div>
   );

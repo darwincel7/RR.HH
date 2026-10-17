@@ -554,7 +554,10 @@ export default function KanbanBoard() {
     return smartMatch([
       { label: 'Nombre', value: app.candidateName },
       { label: 'Teléfono', value: candidate.phone, kind: 'phone' },
+      // El número con el que se registró el perfil duplicado antes de unificarlo.
+      { label: 'Otro teléfono', value: candidate.alternatePhones, kind: 'phone' },
       { label: 'Correo', value: candidate.email },
+      { label: 'Otro correo', value: candidate.alternateEmails },
       { label: 'Ubicación', value: [candidate.city, ai.city, ai.location] },
       { label: 'Notas', value: (notesByCandidate.get(app.candidateId) || []).map(n => n.text) },
       { label: 'Notas de entrevista', value: [app.interviewObservation?.notes, app.interviewObservation?.redFlags] },

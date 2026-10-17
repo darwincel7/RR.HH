@@ -44,10 +44,12 @@ import { getServerDb, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
+  mergeCandidatesSchema,
   decodeImageDataUrl, firstIssueMessage, EMAIL_RE, isOurStorageUrl,
 } from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
+import { planCandidateMerge } from './src/lib/mergeCandidates';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
   INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
@@ -3093,6 +3095,191 @@ async function startServer() {
       }
     }
     res.json({ results });
+  });
+
+
+  // ---- Unificar dos perfiles del mismo postulante --------------------------
+  // Pasa por el servidor y no por el navegador por una razón concreta: el historial de
+  // WhatsApp es INMUTABLE para el cliente (firestore.rules: update/delete `if false`),
+  // así que solo el Admin SDK puede reasignar esos mensajes al perfil que sobrevive.
+  // De paso, el plan se calcula sobre los documentos guardados: el cuerpo de la
+  // petición solo trae los dos ids, nunca qué escribir.
+  app.post("/api/candidates/merge", requireRecruiter, globalRateLimit(30), rateLimit(10), async (req: any, res) => {
+    try {
+      const body = validate(mergeCandidatesSchema, req, res);
+      if (!body) return;
+      const { primaryId, duplicateId } = body;
+      if (primaryId === duplicateId) return res.status(400).json({ error: 'Son el mismo perfil.' });
+
+      const [primary, duplicate] = await Promise.all([
+        db.getDocData('candidates', primaryId),
+        db.getDocData('candidates', duplicateId),
+      ]);
+      if (!primary) return res.status(404).json({ error: 'El perfil principal no existe.' });
+      if (!duplicate) return res.status(404).json({ error: 'El perfil duplicado no existe.' });
+      // Ya unificado EN OTRO perfil: unificarlo de nuevo movería datos de un tercero.
+      // Ya unificado en ESTE: se deja pasar a propósito, para poder reintentar lo que
+      // quedara pendiente de un intento a medias (mover el chat, las notas…).
+      if (duplicate.mergedInto && duplicate.mergedInto !== primaryId) {
+        return res.status(400).json({ error: 'Ese perfil ya fue unificado en otro perfil distinto.' });
+      }
+      if (primary.mergedInto) {
+        return res.status(400).json({ error: 'El perfil principal ya fue unificado en otro. Abre el perfil que lo absorbió y unifica desde ahí.' });
+      }
+
+      const MAX = 1000;
+      const [primaryApps, duplicateApps, notes, messages, participants, vacancies] = await Promise.all([
+        db.listDocsByField('applications', 'candidateId', primaryId, MAX),
+        db.listDocsByField('applications', 'candidateId', duplicateId, MAX),
+        db.listDocsByField('candidate_notes', 'candidateId', duplicateId, MAX).catch(() => []),
+        db.listDocsByField('whatsapp_messages', 'candidateId', duplicateId, MAX).catch(() => []),
+        db.listDocsByField('interview_participants', 'candidateId', duplicateId, MAX).catch(() => []),
+        db.listDocs('vacancies', ['title']).catch(() => []),
+      ]);
+
+      const vacancyTitles: Record<string, string> = {};
+      vacancies.forEach((v: any) => { vacancyTitles[v.id] = v.title || 'Vacante'; });
+
+      const plan = planCandidateMerge({ primary, primaryApps, duplicate, duplicateApps, vacancyTitles });
+      const by = req.user?.email || 'Equipo';
+      const at = new Date();
+      const primaryName = primary.fullName || primary.name || '';
+      const duplicateName = duplicate.fullName || duplicate.name || '';
+      const origin = { candidateId: duplicateId, fullName: duplicateName, at, by };
+
+      // Una postulación archivada que ya no existe: el participante de la sesión de
+      // entrevista tiene que apuntar a la que sobrevive, o la agenda queda huérfana.
+      const reassignedApp = new Map<string, string>();
+
+      // 1) Misma vacante: la postulación del principal absorbe a la del duplicado.
+      for (const combine of plan.combines) {
+        const target = primaryApps.find((a: any) => a.id === combine.intoAppId)
+          || duplicateApps.find((a: any) => a.id === combine.intoAppId);
+        const fields: Record<string, any> = { ...combine.fields };
+
+        if (Object.keys(combine.archivedData).length > 0) {
+          // La evidencia que el principal ya tenía se queda; la del duplicado se archiva
+          // tal cual para poder consultarla (es el caso "un test en cada perfil").
+          // Si pesa demasiado, se guarda la referencia en vez del contenido: un documento
+          // de Firestore no puede pasar de 1MB.
+          const json = JSON.stringify(combine.archivedData);
+          const tooBig = json.length > 200_000;
+          fields.mergedEvidence = [
+            ...(Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : []),
+            {
+              ...origin,
+              fromApplicationId: combine.fromAppId,
+              groups: combine.archived,
+              ...(tooBig ? { omitted: true } : { data: combine.archivedData }),
+            },
+          ];
+        }
+        if (combine.intoAppId !== undefined) {
+          await db.setDocData('applications', combine.intoAppId, fields);
+          reassignedApp.set(combine.fromAppId, combine.intoAppId);
+          await db.deleteDocData('applications', combine.fromAppId);
+        }
+      }
+
+      // 2) Vacante que el principal no tenía: la postulación cambia de dueño y conserva
+      //    su id, así los links /eval y /test ya enviados siguen funcionando.
+      for (const move of plan.moves) {
+        await db.setDocData('applications', move.appId, {
+          candidateId: primaryId,
+          ...(primaryName ? { candidateName: primaryName } : {}),
+          mergedFromCandidateId: duplicateId,
+          mergedAt: at,
+          mergedBy: by,
+        });
+      }
+
+      // 3) Todo lo que cuelga de la persona sigue a la persona. Si algo de esto falla
+      //    (en modo dev sin Admin SDK, las reglas no permiten tocar el historial de
+      //    WhatsApp), la unificación NO se aborta: lo importante —las postulaciones— ya
+      //    está hecho. Se devuelve el aviso para que la pantalla lo diga en vez de dar
+      //    todo por bueno.
+      const warnings: string[] = [];
+      const moveAll = async (label: string, collectionName: string, docs: any[], fields: (d: any) => Record<string, any>) => {
+        let failed = 0;
+        for (const d of docs) {
+          try {
+            await db.setDocData(collectionName, d.id, fields(d));
+          } catch (e) {
+            failed++;
+            if (failed === 1) console.error(`[merge] no se pudo mover ${label}:`, e);
+          }
+        }
+        if (failed > 0) warnings.push(`${failed} ${label} no se pudieron mover al perfil principal.`);
+        return docs.length - failed;
+      };
+
+      const notesMoved = await moveAll('nota(s)', 'candidate_notes', notes, () => ({ candidateId: primaryId }));
+      const messagesMoved = await moveAll('mensaje(s) de WhatsApp', 'whatsapp_messages', messages, () => ({ candidateId: primaryId }));
+      const participantsMoved = await moveAll('cita(s) de entrevista', 'interview_participants', participants, (part) => {
+        const applicationId = reassignedApp.get(part.applicationId);
+        return {
+          candidateId: primaryId,
+          ...(primaryName ? { candidateName: primaryName } : {}),
+          ...(applicationId ? { applicationId } : {}),
+        };
+      });
+
+      // 4) El duplicado NO se borra: queda marcado. Así ningún link viejo muere, el
+      //    rastro es auditable y las búsquedas por teléfono/correo del servidor siguen
+      //    `mergedInto` hasta el perfil vivo (serverDb).
+      await db.setDocData('candidates', duplicateId, {
+        mergedInto: primaryId,
+        mergedAt: at,
+        mergedBy: by,
+        aiStatus: 'merged', // que el worker de CV no lo vuelva a procesar
+      });
+
+      // 5) El principal se completa: solo lo que tenía vacío, más el teléfono/correo
+      //    distintos (casi siempre la razón del duplicado) para que el buscador los vea.
+      const mergeInto = (existing: unknown, incoming: string[]) =>
+        Array.from(new Set([...(Array.isArray(existing) ? existing : []), ...incoming].filter(Boolean)));
+      // Si el análisis del CV llegó del duplicado, el estado tiene que acompañarlo: con
+      // `aiStatus: 'error'` heredado, el perfil mostraría "Error al procesar el CV"
+      // teniendo el análisis completo delante.
+      const aiStatusFix = plan.candidateFields.aiExtraction && primary.aiStatus !== 'completed'
+        ? { aiStatus: 'completed' }
+        : {};
+      await db.setDocData('candidates', primaryId, {
+        ...plan.candidateFields,
+        ...aiStatusFix,
+        ...(plan.alternatePhones.length ? { alternatePhones: mergeInto(primary.alternatePhones, plan.alternatePhones) } : {}),
+        ...(plan.alternateEmails.length ? { alternateEmails: mergeInto(primary.alternateEmails, plan.alternateEmails) } : {}),
+        mergedFrom: [
+          ...(Array.isArray(primary.mergedFrom) ? primary.mergedFrom.filter((m: any) => m?.candidateId !== duplicateId) : []),
+          origin,
+        ],
+      });
+
+      console.log(`[merge] ${duplicateId} → ${primaryId} por ${by}: ${plan.moves.length} movida(s), ${plan.combines.length} combinada(s)`);
+      res.json({
+        success: true,
+        primaryId,
+        duplicateId,
+        filled: plan.filled,
+        alternatePhones: plan.alternatePhones,
+        alternateEmails: plan.alternateEmails,
+        moved: plan.moves.map(m => ({ vacancyTitle: m.vacancyTitle, stage: m.stage })),
+        combined: plan.combines.map(c => ({
+          vacancyTitle: c.vacancyTitle,
+          taken: c.taken,
+          archived: c.archived,
+          stage: c.stage,
+          stageChanged: c.stageChanged,
+        })),
+        notes: notesMoved,
+        messages: messagesMoved,
+        participants: participantsMoved,
+        warnings,
+      });
+    } catch (error: any) {
+      console.error('Error merging candidates:', error);
+      res.status(500).json({ error: 'No se pudo unificar los perfiles. Vuelve a intentarlo; lo que ya se unificó no se repite.' });
+    }
   });
 
   app.post("/api/parse-cv", requireRecruiter, async (req, res) => {

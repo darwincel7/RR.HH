@@ -26,7 +26,11 @@ function searchFieldsFor(c: any): SearchField[] {
   return [
     { label: 'Nombre', value: c.candidateName },
     { label: 'Teléfono', value: c.phone, kind: 'phone' },
+    // El teléfono/correo que dejó una unificación: es con el que la persona se registró
+    // la otra vez, así que es justo por el que alguien la va a buscar.
+    { label: 'Otro teléfono', value: c.alternatePhones, kind: 'phone' },
     { label: 'Correo', value: c.email },
+    { label: 'Otro correo', value: c.alternateEmails },
     { label: 'Ubicación', value: [c.city, ai.city, ai.location] },
     { label: 'Notas', value: (c.notes || []).map((n: CandidateNote) => n.text) },
     { label: 'Notas de entrevista', value: [c.interviewObservation?.notes, c.interviewObservation?.redFlags] },
@@ -99,6 +103,8 @@ export default function CandidatesList() {
         vacancyTitle: vacMap.get(app.vacancyId) || 'Desconocida',
         email: cData.email || '',
         phone: cData.phone || '',
+        alternatePhones: cData.alternatePhones || [],
+        alternateEmails: cData.alternateEmails || [],
         city: cData.city || '',
         aiExtraction: cData.aiExtraction || null,
         aiStatus: cData.aiStatus || null,
