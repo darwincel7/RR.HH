@@ -129,6 +129,32 @@ function resolveRoles(email: string | null, roleIds: string[]): { isRecruiter: b
   return { isRecruiter, isAdmin };
 }
 
+/**
+ * Sigue el rastro de una unificación de perfiles: si el candidato encontrado fue
+ * unificado en otro (`mergedInto`), devuelve el id del perfil VIVO.
+ *
+ * Sin esto, un perfil ya unificado seguiría capturando lo que llega por su teléfono o
+ * correo: la respuesta de WhatsApp se guardaría en un perfil que nadie abre, y el
+ * deduplicado de /api/apply miraría un perfil sin postulaciones. Hasta 5 saltos, por si
+ * alguien unificó A→B y luego B→C; un ciclo corta en seco en vez de colgar el servidor.
+ */
+async function followMergedInto(
+  read: (id: string) => Promise<any | null>,
+  id: string | null,
+): Promise<string | null> {
+  let current = id;
+  const seen = new Set<string>();
+  for (let hop = 0; current && hop < 5; hop++) {
+    if (seen.has(current)) return current;
+    seen.add(current);
+    const data = await read(current).catch(() => null);
+    const next = data?.mergedInto;
+    if (typeof next !== 'string' || !next || next === current) return current;
+    current = next;
+  }
+  return current;
+}
+
 // ---------------------------------------------------------------------------
 // Admin backend
 // ---------------------------------------------------------------------------
@@ -177,13 +203,20 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         await batch.commit();
       },
       async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
-        if (phoneNormalized) {
-          const s = await adb.collection('candidates').where('phoneNormalized', '==', phoneNormalized).limit(1).get();
-          if (!s.empty) return s.docs[0].id;
-        }
-        if (email) {
-          const s = await adb.collection('candidates').where('email', '==', email).limit(1).get();
-          if (!s.empty) return s.docs[0].id;
+        const readCandidate = async (id: string) => (await adb.collection('candidates').doc(id).get()).data() ?? null;
+        // El teléfono/correo con el que nació un perfil duplicado queda guardado al
+        // unificarlo. Buscarlo también ahí es lo que evita el TERCER duplicado: la misma
+        // persona volviendo a escribir el número con el que ya la conocíamos.
+        const attempts: Array<[string, string, unknown]> = [
+          ['phoneNormalized', '==', phoneNormalized],
+          ['email', '==', email],
+          ['alternatePhones', 'array-contains', phoneNormalized],
+          ['alternateEmails', 'array-contains', email],
+        ];
+        for (const [field, op, value] of attempts) {
+          if (!value) continue;
+          const s = await adb.collection('candidates').where(field, op as any, value).limit(1).get();
+          if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
         }
         return null;
       },
@@ -196,14 +229,21 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async findCandidateIdByPhone(phone) {
         const norm = normalizePhone(phone);
+        const readCandidate = async (id: string) => (await adb.collection('candidates').doc(id).get()).data() ?? null;
         // Primary match: the canonical field written at intake / CV parse.
         let snap = await adb.collection('candidates').where('phoneNormalized', '==', norm).limit(1).get();
-        if (!snap.empty) return snap.docs[0].id;
+        if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
         // Fallback for legacy candidates without phoneNormalized: try common raw forms.
         const variants = Array.from(new Set([norm, String(phone || ''), norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
         for (const v of variants) {
           snap = await adb.collection('candidates').where('phone', '==', v).limit(1).get();
-          if (!snap.empty) return snap.docs[0].id;
+          if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
+        }
+        // Un número que quedó guardado como alternativo al unificar dos perfiles sigue
+        // siendo esa persona: es justo el número por el que el duplicado nació.
+        for (const v of variants) {
+          snap = await adb.collection('candidates').where('alternatePhones', 'array-contains', v).limit(1).get();
+          if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
         }
         return null;
       },
@@ -491,13 +531,21 @@ async function initClient(): Promise<ServerDb> {
       await batch.commit();
     },
     async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
-      if (phoneNormalized) {
-        const s = await getDocs(query(collection(cdb, 'candidates'), where('phoneNormalized', '==', phoneNormalized), limit(1)));
-        if (!s.empty) return s.docs[0].id;
-      }
-      if (email) {
-        const s = await getDocs(query(collection(cdb, 'candidates'), where('email', '==', email), limit(1)));
-        if (!s.empty) return s.docs[0].id;
+      const readCandidate = async (id: string) => {
+        const snap = await getDoc(doc(cdb, 'candidates', id));
+        return snap.exists() ? snap.data() : null;
+      };
+      // Ver el modo admin: también por los alternativos que dejó una unificación.
+      const attempts: Array<[string, any, unknown]> = [
+        ['phoneNormalized', '==', phoneNormalized],
+        ['email', '==', email],
+        ['alternatePhones', 'array-contains', phoneNormalized],
+        ['alternateEmails', 'array-contains', email],
+      ];
+      for (const [field, op, value] of attempts) {
+        if (!value) continue;
+        const s = await getDocs(query(collection(cdb, 'candidates'), where(field, op, value), limit(1)));
+        if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
       }
       return null;
     },
@@ -510,12 +558,21 @@ async function initClient(): Promise<ServerDb> {
     },
     async findCandidateIdByPhone(phone) {
       const norm = normalizePhone(phone);
+      const readCandidate = async (id: string) => {
+        const snap = await getDoc(doc(cdb, 'candidates', id));
+        return snap.exists() ? snap.data() : null;
+      };
       let snap = await getDocs(query(collection(cdb, 'candidates'), where('phoneNormalized', '==', norm), limit(1)));
-      if (!snap.empty) return snap.docs[0].id;
+      if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
       const variants = Array.from(new Set([norm, String(phone || ''), norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
       for (const v of variants) {
         snap = await getDocs(query(collection(cdb, 'candidates'), where('phone', '==', v), limit(1)));
-        if (!snap.empty) return snap.docs[0].id;
+        if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
+      }
+      // Ver el modo admin: un teléfono alternativo (de una unificación) es esa persona.
+      for (const v of variants) {
+        snap = await getDocs(query(collection(cdb, 'candidates'), where('alternatePhones', 'array-contains', v), limit(1)));
+        if (!snap.empty) return followMergedInto(readCandidate, snap.docs[0].id);
       }
       return null;
     },

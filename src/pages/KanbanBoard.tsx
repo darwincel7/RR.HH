@@ -22,6 +22,9 @@ import CandidateAvatar from '../components/CandidateAvatar';
 import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import StageNotifyToggle from '../components/StageNotifyToggle';
 import { useStageNotifications } from '../lib/useStageNotifications';
+import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
+import { interviewInviteStamp, isInterviewStage } from '../lib/interviewAttendance';
+import { useParticipantStatuses } from '../lib/participantStatus';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -36,6 +39,9 @@ export default function KanbanBoard() {
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
   // Per-stage "notify on move" switches (one click on each column header).
   const stageNotify = useStageNotifications();
+  // Lo marcado en la agenda de Entrevistas: así el botón ✅/❌ de la tarjeta no dice
+  // "sin registrar" de alguien que el Dashboard ya cuenta como asistido.
+  const participants = useParticipantStatuses({ all: true });
   useEffect(() => {
     loadAllNotesByCandidate().then(setNotesByCandidate).catch(e => console.warn('Notas no disponibles para la búsqueda:', e));
   }, []);
@@ -74,9 +80,9 @@ export default function KanbanBoard() {
   const [schedTime, setSchedTime] = useState('');
   const [schedLocation, setSchedLocation] = useState('');
   const [savingSchedule, setSavingSchedule] = useState(false);
-  // These stages send a dated interview invitation built from the schedule above.
-  const INTERVIEW_STAGES = ['Convocado a entrevista', 'Entrevista presencial'];
-  const isInterviewStage = (s: string) => INTERVIEW_STAGES.includes(s);
+  // These stages send a dated interview invitation built from the schedule above, and
+  // are the ones that stamp the invitation on the application (interviewAttendance.ts —
+  // one definition, shared with the attendance button and the Dashboard metrics).
 
   const scheduleDateTime = (): Date | null => {
     if (!schedDate || !schedTime) return null;
@@ -240,7 +246,10 @@ export default function KanbanBoard() {
         const appRef = doc(db, 'applications', movedApp.id);
         await updateDoc(appRef, {
           stage: targetStage,
-          lastStageUpdate: serverTimestamp()
+          lastStageUpdate: serverTimestamp(),
+          // Convocar a entrevista deja su sello: es el denominador de las métricas de
+          // asistencia y debe sobrevivir a que la persona avance o se descarte.
+          ...interviewInviteStamp(movedApp, movedApp.stage, targetStage),
         });
         movedCount++;
 
@@ -468,7 +477,9 @@ export default function KanbanBoard() {
       await updateDoc(appRef, {
         stage: newStage,
         kanbanOrder: newOrder,
-        lastStageUpdate: serverTimestamp()
+        lastStageUpdate: serverTimestamp(),
+        // Ver handleBulkMove: la convocatoria se sella aquí, no en la etapa actual.
+        ...interviewInviteStamp(movedApp, movedApp.stage, newStage),
       });
 
       // Trigger Automation
@@ -547,7 +558,10 @@ export default function KanbanBoard() {
     return smartMatch([
       { label: 'Nombre', value: app.candidateName },
       { label: 'Teléfono', value: candidate.phone, kind: 'phone' },
+      // El número con el que se registró el perfil duplicado antes de unificarlo.
+      { label: 'Otro teléfono', value: candidate.alternatePhones, kind: 'phone' },
       { label: 'Correo', value: candidate.email },
+      { label: 'Otro correo', value: candidate.alternateEmails },
       { label: 'Ubicación', value: [candidate.city, ai.city, ai.location] },
       { label: 'Notas', value: (notesByCandidate.get(app.candidateId) || []).map(n => n.text) },
       { label: 'Notas de entrevista', value: [app.interviewObservation?.notes, app.interviewObservation?.redFlags] },
@@ -815,6 +829,19 @@ export default function KanbanBoard() {
                                   phone={candidates[item.candidateId]?.phone || item.phone}
                                   stage={item.stage}
                                   vacancy={vacancy?.title}
+                                />
+
+                                {/* ¿Vino a la entrevista? Solo aparece en quien fue convocado.
+                                    El clic no abre el perfil ni arrastra la tarjeta. */}
+                                <InterviewAttendanceButton
+                                  app={item}
+                                  participantStatus={participants.get(item.id)?.status}
+                                  compact
+                                  onMarked={(status) => setApplications(prev => prev.map(a => (
+                                    a.id === item.id
+                                      ? { ...a, interviewAttendance: status ? { ...(a.interviewAttendance || {}), status } : null }
+                                      : a
+                                  )))}
                                 />
 
                                 {/* Open the candidate's CV directly from the card. */}

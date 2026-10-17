@@ -115,6 +115,14 @@ export const evaluateInterviewSchema = z.object({
   applicationId: docIdField('applicationId inválido'),
 });
 
+/** POST /api/candidates/merge — unifica dos perfiles del mismo postulante. Solo viajan
+ * los dos ids: QUÉ se mueve y qué se completa lo decide el servidor leyendo los
+ * documentos guardados (mergeCandidates.ts), nunca el cuerpo de la petición. */
+export const mergeCandidatesSchema = z.object({
+  primaryId: docIdField('Perfil principal inválido'),
+  duplicateId: docIdField('Perfil duplicado inválido'),
+});
+
 /** POST /api/parse-cv — fileUrl restricted to our bucket: the server fetches it, and an
  * arbitrary URL here was the last remaining SSRF path (recruiter-authed, but still a
  * credential-theft risk against the metadata server). */

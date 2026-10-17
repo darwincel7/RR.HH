@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
-  decodeImageDataUrl, firstIssueMessage,
+  mergeCandidatesSchema, decodeImageDataUrl, firstIssueMessage,
 } from './serverSchemas';
 
 /** The exact message a body would produce, or null if it validates. */
@@ -136,6 +136,26 @@ describe('endpoints de reclutador', () => {
     if (r.success) expect(r.data.mimeType).toBe('application/pdf');
     // No file at all is still schema-valid: the handler answers "No PDF provided".
     expect(parseCvSchema.safeParse({}).success).toBe(true);
+  });
+});
+
+describe('mergeCandidatesSchema (/api/candidates/merge)', () => {
+  it('acepta los dos ids y nada más: qué se mueve lo decide el servidor', () => {
+    const r = mergeCandidatesSchema.safeParse({ primaryId: 'abc', duplicateId: 'def', candidateFields: { fullName: 'Hackeado' } });
+    expect(r.success).toBe(true);
+    // El cuerpo no puede traer qué escribir: el plan se calcula sobre los documentos
+    // guardados, así que un campo de más se ignora.
+    if (r.success) expect((r.data as any).candidateFields).toBeUndefined();
+  });
+
+  it('rechaza un id con "/" (saldría de la colección candidates)', () => {
+    expect(errorOf(mergeCandidatesSchema, { primaryId: 'a/b', duplicateId: 'c' })).toBe('Perfil principal inválido');
+    expect(errorOf(mergeCandidatesSchema, { primaryId: 'a', duplicateId: '../users/x' })).toBe('Perfil duplicado inválido');
+  });
+
+  it('exige los dos', () => {
+    expect(errorOf(mergeCandidatesSchema, { primaryId: 'a' })).toBe('Perfil duplicado inválido');
+    expect(errorOf(mergeCandidatesSchema, {})).toBe('Perfil principal inválido');
   });
 });
 

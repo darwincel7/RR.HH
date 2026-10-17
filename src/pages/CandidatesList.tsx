@@ -18,6 +18,7 @@ import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } 
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { computeOverallScore } from '../lib/candidateScore';
+import { interviewInviteStamp } from '../lib/interviewAttendance';
 
 // Everything the smart search looks at for one row (application + candidate + notes).
 function searchFieldsFor(c: any): SearchField[] {
@@ -25,7 +26,11 @@ function searchFieldsFor(c: any): SearchField[] {
   return [
     { label: 'Nombre', value: c.candidateName },
     { label: 'Teléfono', value: c.phone, kind: 'phone' },
+    // El teléfono/correo que dejó una unificación: es con el que la persona se registró
+    // la otra vez, así que es justo por el que alguien la va a buscar.
+    { label: 'Otro teléfono', value: c.alternatePhones, kind: 'phone' },
     { label: 'Correo', value: c.email },
+    { label: 'Otro correo', value: c.alternateEmails },
     { label: 'Ubicación', value: [c.city, ai.city, ai.location] },
     { label: 'Notas', value: (c.notes || []).map((n: CandidateNote) => n.text) },
     { label: 'Notas de entrevista', value: [c.interviewObservation?.notes, c.interviewObservation?.redFlags] },
@@ -98,6 +103,8 @@ export default function CandidatesList() {
         vacancyTitle: vacMap.get(app.vacancyId) || 'Desconocida',
         email: cData.email || '',
         phone: cData.phone || '',
+        alternatePhones: cData.alternatePhones || [],
+        alternateEmails: cData.alternateEmails || [],
         city: cData.city || '',
         aiExtraction: cData.aiExtraction || null,
         aiStatus: cData.aiStatus || null,
@@ -361,7 +368,13 @@ export default function CandidatesList() {
       const batch = writeBatch(db);
       for (const app of appsToMove) {
         const appRef = doc(db, 'applications', app.id);
-        batch.update(appRef, { stage: newStage, lastStageUpdate: serverTimestamp() });
+        batch.update(appRef, {
+          stage: newStage,
+          lastStageUpdate: serverTimestamp(),
+          // Convocar a entrevista deja su sello: es el denominador de las métricas de
+          // asistencia y sobrevive a que la persona avance o se descarte.
+          ...interviewInviteStamp(app, app.stage, newStage),
+        });
       }
       await batch.commit();
 
