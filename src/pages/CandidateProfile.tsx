@@ -272,7 +272,14 @@ export default function CandidateProfile() {
   };
 
   const analyzeCVWithAI = async () => {
-    if (!candidate || !candidate.cvUrl) return;
+    // El CV de la postulación que se está gestionando (si envió uno propio). Analizar el
+    // del perfil y escribir su nota en esta postulación le pondría la puntuación de un
+    // currículum que nunca presentó aquí.
+    const target = application?.cvUrl
+      ? { url: application.cvUrl, fileType: application.cvFileType }
+      : { url: candidate?.cvUrl, fileType: candidate?.cvFileType };
+    const isProfileCv = !!target.url && target.url === candidate?.cvUrl;
+    if (!candidate || !target.url) return;
     setAnalyzingCV(true);
     try {
       // Call backend directly with the URL to bypass CORS issues
@@ -280,8 +287,8 @@ export default function CandidateProfile() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          fileUrl: candidate.cvUrl,
-          mimeType: candidate.cvFileType || 'application/pdf'
+          fileUrl: target.url,
+          mimeType: target.fileType || 'application/pdf'
         })
       });
 
@@ -301,23 +308,30 @@ export default function CandidateProfile() {
         throw new Error('El servidor se está reiniciando (recibió HTML). Por favor, intenta de nuevo en unos segundos.');
       }
 
-      // Update Candidate
-      await updateDoc(doc(db, 'candidates', candidateId!), {
-        aiExtraction: parsedData,
-        aiStatus: 'completed'
-      });
+      // El análisis del PERFIL solo si lo que se leyó es el CV del perfil: si era el de
+      // una postulación anterior, su lectura no puede reemplazar el análisis vigente.
+      if (isProfileCv) {
+        await updateDoc(doc(db, 'candidates', candidateId!), {
+          aiExtraction: parsedData,
+          aiStatus: 'completed'
+        });
+        setCandidate({ ...candidate, aiExtraction: parsedData, aiStatus: 'completed' });
+      }
 
       // Update Application
       if (application) {
-        await updateDoc(doc(db, 'applications', application.id), {
+        // Precalificado es un AVANCE: a quien ya pasó de ahí (finalista, oferta) no se
+        // le devuelve a una etapa anterior por reanalizar su CV.
+        const current = PIPELINE_STAGES.indexOf(application.stage);
+        const advance = current >= 0 && current < PIPELINE_STAGES.indexOf('Precalificado');
+        const update: any = {
           scoreSummary: parsedData.initial_score_1_to_5,
           recommendation: parsedData.recommendation,
-          stage: 'Precalificado'
-        });
-        setApplication({ ...application, scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation, stage: 'Precalificado' });
+          ...(advance ? { stage: 'Precalificado' } : {}),
+        };
+        await updateDoc(doc(db, 'applications', application.id), update);
+        setApplication({ ...application, ...update });
       }
-
-      setCandidate({ ...candidate, aiExtraction: parsedData, aiStatus: 'completed' });
       // Same as the backend worker: the analysis saw a photo of the person → cut it out.
       if (parsedData?.has_profile_photo && !candidate.photoUrl) extractPhotoFromCV(true);
       setAnalyzingCV(false);
@@ -678,6 +692,14 @@ export default function CandidateProfile() {
   if (!candidate) return <div className="p-8 text-center text-slate-500 font-display text-xl">Candidato no encontrado</div>;
 
   const ai = candidate.aiExtraction || {};
+  // El CV que acompañó a la postulación que se está gestionando. Si la persona volvió a
+  // aplicar con un CV nuevo, el perfil pasa a tener ese; esto hace que "Ver CV" siga
+  // mostrando el currículum con el que se envió la postulación elegida arriba.
+  // El par url+tipo sale SIEMPRE de la misma fuente: mezclarlos elegiría el visor de un
+  // CV para el archivo de otro (un .doc abierto como imagen no se ve).
+  const cvShown = application?.cvUrl
+    ? { url: application.cvUrl, fileType: application.cvFileType, ownedByApplication: application.cvUrl !== candidate.cvUrl }
+    : { url: candidate.cvUrl, fileType: candidate.cvFileType, ownedByApplication: false };
 
   return (
     <div className="max-w-6xl mx-auto pb-12 animate-fade-in px-4 lg:px-0">
@@ -777,9 +799,10 @@ export default function CandidateProfile() {
                 >
                   <Merge className="w-4 h-4 lg:w-5 lg:h-5 mr-2" /> Unificar perfiles
                 </button>
-                {candidate.cvUrl && (
+                {cvShown.url && (
                   <button 
                     onClick={() => setShowCVModal(true)}
+                    title={cvShown.ownedByApplication ? 'El currículum que envió con esta postulación' : undefined}
                     className="flex items-center justify-center p-2.5 bg-violet-100 text-violet-700 rounded-xl font-bold hover:bg-violet-200 transition-colors text-xs lg:text-sm"
                   >
                     <Eye className="w-4 h-4 lg:w-5 lg:h-5 mr-2" /> Ver CV
@@ -1441,16 +1464,21 @@ export default function CandidateProfile() {
       </div>
 
       {/* CV Modal */}
-      <Modal isOpen={!!(showCVModal && candidate.cvUrl)} onClose={() => setShowCVModal(false)} overlayClassName="bg-slate-900/80 z-[100]">
+      <Modal isOpen={!!(showCVModal && cvShown.url)} onClose={() => setShowCVModal(false)} overlayClassName="bg-slate-900/80 z-[100]">
           <div className="bg-white rounded-2xl w-full max-w-5xl h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-slide-up">
             <div className="flex justify-between items-center p-4 border-b border-slate-100 bg-slate-50">
               <h3 className="font-display font-bold text-slate-800 flex items-center">
                 <FileText className="w-5 h-5 mr-2 text-violet-500" />
                 Currículum Original
+                {cvShown.ownedByApplication && (
+                  <span className="ml-2 text-[10px] font-medium text-slate-400 normal-case">
+                    · el de esta postulación ({application?.vacancyTitle})
+                  </span>
+                )}
               </h3>
               <div className="flex items-center space-x-2">
                 <button 
-                  onClick={() => window.open(candidate.cvUrl, '_blank')}
+                  onClick={() => window.open(cvShown.url, '_blank')}
                   className="flex items-center px-3 py-1.5 text-sm font-bold text-violet-600 bg-violet-50 hover:bg-violet-100 rounded-lg transition-colors"
                 >
                   <ExternalLink className="w-4 h-4 mr-1.5" />
@@ -1462,11 +1490,11 @@ export default function CandidateProfile() {
               </div>
             </div>
             <div className="flex-1 bg-slate-100 overflow-auto flex items-center justify-center p-4 relative">
-              {candidate.cvFileType?.startsWith('image/') ? (
-                <img src={candidate.cvUrl} alt="CV" className="max-w-full max-h-full object-contain rounded-lg shadow-md" />
+              {cvShown.fileType?.startsWith('image/') ? (
+                <img src={cvShown.url} alt="CV" className="max-w-full max-h-full object-contain rounded-lg shadow-md" />
               ) : (
                 <iframe 
-                  src={`https://docs.google.com/gview?url=${encodeURIComponent(candidate.cvUrl)}&embedded=true`} 
+                  src={`https://docs.google.com/gview?url=${encodeURIComponent(cvShown.url)}&embedded=true`} 
                   className="w-full h-full rounded-lg shadow-md bg-white" 
                   title="CV Document" 
                 />

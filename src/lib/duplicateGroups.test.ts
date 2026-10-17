@@ -1,7 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
-
-// La agrupación es pura; se corta el bootstrap de Firebase que arrastra el buscador.
-vi.mock('./firebase', () => ({ db: {}, auth: { currentUser: null } }));
+import { describe, it, expect } from 'vitest';
 
 import { groupDuplicates, countRedundantProfiles, profileRichness } from './duplicateGroups';
 

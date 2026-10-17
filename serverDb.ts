@@ -138,7 +138,7 @@ function resolveRoles(email: string | null, roleIds: string[]): { isRecruiter: b
  * deduplicado de /api/apply miraría un perfil sin postulaciones. Hasta 5 saltos, por si
  * alguien unificó A→B y luego B→C; un ciclo corta en seco en vez de colgar el servidor.
  */
-async function followMergedInto(
+export async function followMergedInto(
   read: (id: string) => Promise<any | null>,
   id: string | null,
 ): Promise<string | null> {
