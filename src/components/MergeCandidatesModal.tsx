@@ -17,8 +17,11 @@ interface Props {
   /** El perfil que SOBREVIVE (el que está abierto). */
   primaryId: string;
   primary: any;
-  /** Postulaciones del principal, ya cargadas por el perfil. */
-  primaryApps: any[];
+  /** Postulaciones del principal. Si no se pasan, el modal las lee (lo hace la pantalla
+   *  de duplicados, que no tiene un perfil abierto). */
+  primaryApps?: any[];
+  /** Duplicado ya elegido (se abre con la vista previa hecha, sin buscar). */
+  preselectedDuplicateId?: string;
   /** Se llama al terminar, con el resumen del servidor. */
   onMerged?: (summary: any) => void;
 }
@@ -32,8 +35,12 @@ interface Props {
  * aparece el botón de confirmar. La vista previa la calcula el mismo módulo que usa el
  * servidor para ejecutarla (`mergeCandidates.ts`), así que no puede prometer otra cosa.
  */
-export default function MergeCandidatesModal({ isOpen, onClose, primaryId, primary, primaryApps, onMerged }: Props) {
+export default function MergeCandidatesModal({
+  isOpen, onClose, primaryId, primary, primaryApps, preselectedDuplicateId, onMerged,
+}: Props) {
   const [allCandidates, setAllCandidates] = useState<any[]>([]);
+  // Las del principal: las que llegan por props, o leídas aquí si no vinieron.
+  const [ownApps, setOwnApps] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [term, setTerm] = useState('');
   const [selectedId, setSelectedId] = useState('');
@@ -67,6 +74,25 @@ export default function MergeCandidatesModal({ isOpen, onClose, primaryId, prima
       }
     })();
   }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    if (primaryApps) { setOwnApps(primaryApps); return; }
+    let alive = true;
+    getDocs(query(collection(db, 'applications'), where('candidateId', '==', primaryId)))
+      .then(snap => { if (alive) setOwnApps(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))); })
+      .catch(e => {
+        console.error('No se pudieron cargar las postulaciones del perfil principal:', e);
+        if (alive) setError('No se pudieron leer las postulaciones del perfil principal.');
+      });
+    return () => { alive = false; };
+  }, [isOpen, primaryId, primaryApps]);
+
+  // Al abrir con un duplicado ya elegido (desde la pantalla de duplicados) se salta la
+  // búsqueda y se va directo a la vista previa.
+  useEffect(() => {
+    if (isOpen && preselectedDuplicateId) setSelectedId(preselectedDuplicateId);
+  }, [isOpen, preselectedDuplicateId]);
 
   // Al cerrar se olvida todo: reabrir con una selección vieja es la forma de unificar al
   // candidato equivocado.
@@ -127,8 +153,8 @@ export default function MergeCandidatesModal({ isOpen, onClose, primaryId, prima
 
   const plan = useMemo(() => {
     if (!selected) return null;
-    return planCandidateMerge({ primary, primaryApps, duplicate: selected, duplicateApps: selectedApps, vacancyTitles });
-  }, [selected, primary, primaryApps, selectedApps, vacancyTitles]);
+    return planCandidateMerge({ primary, primaryApps: ownApps, duplicate: selected, duplicateApps: selectedApps, vacancyTitles });
+  }, [selected, primary, ownApps, selectedApps, vacancyTitles]);
 
   const runMerge = async () => {
     if (!selectedId) return;
