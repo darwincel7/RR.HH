@@ -32,10 +32,15 @@ interface Props {
 export default function InterviewAttendanceButton({ app, participantStatus, compact, onMarked }: Props) {
   const [saving, setSaving] = useState<AttendanceStatus | null>(null);
   const [error, setError] = useState('');
+  // Lo que se acaba de guardar. `participantStatus` viene de una lectura única de la
+  // agenda: al quitar una marca que venía de ahí, la pantalla seguía pasando el valor
+  // viejo y el botón se quedaba marcado como si el clic no hubiera servido.
+  // `undefined` = nada guardado todavía en esta pantalla; `null` = se quitó la marca.
+  const [justSaved, setJustSaved] = useState<AttendanceStatus | null | undefined>(undefined);
 
   if (!app?.id || !canMarkAttendance(app, participantStatus)) return null;
 
-  const current = attendanceOf(app, participantStatus);
+  const current = justSaved !== undefined ? justSaved : attendanceOf(app, participantStatus);
 
   const mark = async (status: AttendanceStatus) => {
     // La misma opción otra vez = corregir: se borra la marca.
@@ -57,6 +62,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
         console.warn('No se pudo sincronizar la sesión de entrevista:', e);
       }
 
+      setJustSaved(next);
       onMarked?.(next);
     } catch (e) {
       console.error('No se pudo guardar la asistencia:', e);
@@ -66,7 +72,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
     }
   };
 
-  const marked = app?.interviewAttendance;
+  const marked = justSaved === null ? null : app?.interviewAttendance;
   const markedWhen = marked?.markedAt?.toDate ? marked.markedAt.toDate().toLocaleString('es-DO', {
     day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
   }) : '';

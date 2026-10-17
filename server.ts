@@ -3239,6 +3239,10 @@ async function startServer() {
       const duplicateName = duplicate.fullName || duplicate.name || '';
       const origin = { candidateId: duplicateId, fullName: duplicateName, at, by };
 
+      // Avisos de lo que quedó a medias: la unificación no se aborta por ellos, pero
+      // tampoco se dan por buenos (se devuelven y la pantalla los muestra).
+      const warnings: string[] = [];
+
       // Una postulación archivada que ya no existe: el participante de la sesión de
       // entrevista tiene que apuntar a la que sobrevive, o la agenda queda huérfana.
       // Se siembra con lo que absorbieron unificaciones ANTERIORES: así un reintento tras
@@ -3269,7 +3273,27 @@ async function startServer() {
         const source = duplicateApps.find((a: any) => a.id === combine.fromAppId) || {};
         const snapshot = { ...source };
         delete (snapshot as any).mergedEvidence; // lo suyo ya viaja en su propia entrada
+
+        // Si no cabe dentro de la postulación que sobrevive, NO se pierde: se guarda
+        // completa en su propia colección. Antes se guardaba solo "era muy grande" y
+        // acto seguido se borraba el original — esa evidencia quedaba irrecuperable, y
+        // la pantalla remitía a una postulación que ya no existía.
         const tooBig = JSON.stringify(snapshot).length > 200_000;
+        let archivedApart = false;
+        if (tooBig) {
+          try {
+            await db.setDocData('merged_applications', combine.fromAppId, {
+              ...snapshot,
+              mergedIntoApplicationId: combine.intoAppId,
+              mergedFromCandidateId: duplicateId,
+              mergedAt: at,
+              mergedBy: by,
+            });
+            archivedApart = true;
+          } catch (e) {
+            console.error('[merge] no se pudo archivar aparte la postulación absorbida:', e);
+          }
+        }
         const archive = [
           ...(archiveByApp.get(combine.intoAppId)
             || (Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : [])),
@@ -3277,7 +3301,9 @@ async function startServer() {
             ...origin,
             fromApplicationId: combine.fromAppId,
             groups: combine.archived,
-            ...(tooBig ? { omitted: true } : { data: snapshot }),
+            ...(tooBig
+              ? { omitted: true, ...(archivedApart ? { archivedIn: `merged_applications/${combine.fromAppId}` } : {}) }
+              : { data: snapshot }),
           },
           // Lo que la postulación absorbida ya traía archivado de otra unificación.
           ...(Array.isArray(source.mergedEvidence) ? source.mergedEvidence : []),
@@ -3287,7 +3313,14 @@ async function startServer() {
         if (combine.intoAppId !== undefined) {
           await db.setDocData('applications', combine.intoAppId, fields);
           reassignedApp.set(combine.fromAppId, combine.intoAppId);
-          await db.deleteDocData('applications', combine.fromAppId);
+          // Solo se borra el original cuando su contenido quedó guardado en algún sitio:
+          // dentro de la postulación que sobrevive, o aparte. Si el archivo aparte falló,
+          // se queda donde está — un duplicado visible molesta; perder un test, no.
+          if (!tooBig || archivedApart) {
+            await db.deleteDocData('applications', combine.fromAppId);
+          } else {
+            warnings.push(`La postulación absorbida de ${combine.vacancyTitle} no se pudo archivar, así que NO se borró: revísala a mano.`);
+          }
         }
       }
 
@@ -3308,7 +3341,6 @@ async function startServer() {
       //    WhatsApp), la unificación NO se aborta: lo importante —las postulaciones— ya
       //    está hecho. Se devuelve el aviso para que la pantalla lo diga en vez de dar
       //    todo por bueno.
-      const warnings: string[] = [];
       const moveAll = async (label: string, collectionName: string, docs: any[], fields: (d: any) => Record<string, any>) => {
         let failed = 0;
         for (const d of docs) {

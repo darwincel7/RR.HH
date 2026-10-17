@@ -53,6 +53,22 @@ describe('agrupar duplicados en toda la base', () => {
     expect(groups[0].reasons).toEqual(['name']);
   });
 
+  it('agrupa por un teléfono o correo ALTERNATIVO de una unificación anterior', () => {
+    // El tercer duplicado: usa como número principal el que quedó guardado como
+    // alternativo en el perfil vivo. Sin esto, el panel diría que no hay duplicados.
+    const groups = groupDuplicates([
+      c('vivo', { phone: '809-000-0000', alternatePhones: ['829-555-1234'], alternateEmails: ['ana@mail.com'] }),
+      c('tercero', { phone: '1-829-555-1234' }),
+      c('cuarto', { email: 'ANA@mail.com' }),
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].members.map(m => m.id).sort()).toEqual(['cuarto', 'tercero', 'vivo']);
+  });
+
+  it('un perfil con el mismo dato en phone y phoneNormalized no se agrupa consigo mismo', () => {
+    expect(groupDuplicates([c('solo', { phone: '809-555-1234', phoneNormalized: '18095551234' })])).toEqual([]);
+  });
+
   it('deja fuera los perfiles ya unificados y los que no están duplicados', () => {
     const groups = groupDuplicates([
       c('a', { phone: '8095551234' }),
