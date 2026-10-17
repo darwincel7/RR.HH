@@ -18,6 +18,7 @@ import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } 
 import MoveVacancyModal from '../components/MoveVacancyModal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { computeOverallScore } from '../lib/candidateScore';
+import { interviewInviteStamp } from '../lib/interviewAttendance';
 
 // Everything the smart search looks at for one row (application + candidate + notes).
 function searchFieldsFor(c: any): SearchField[] {
@@ -361,7 +362,13 @@ export default function CandidatesList() {
       const batch = writeBatch(db);
       for (const app of appsToMove) {
         const appRef = doc(db, 'applications', app.id);
-        batch.update(appRef, { stage: newStage, lastStageUpdate: serverTimestamp() });
+        batch.update(appRef, {
+          stage: newStage,
+          lastStageUpdate: serverTimestamp(),
+          // Convocar a entrevista deja su sello: es el denominador de las métricas de
+          // asistencia y sobrevive a que la persona avance o se descarte.
+          ...interviewInviteStamp(app, app.stage, newStage),
+        });
       }
       await batch.commit();
 

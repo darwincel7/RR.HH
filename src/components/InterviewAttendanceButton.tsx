@@ -1,0 +1,112 @@
+import React, { useState } from 'react';
+import { doc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
+import { db, auth } from '../lib/firebase';
+import { Loader2, UserCheck } from 'lucide-react';
+import {
+  ATTENDANCE_OPTIONS, attendanceFields, attendanceOf, canMarkAttendance,
+  type AttendanceStatus,
+} from '../lib/interviewAttendance';
+
+interface Props {
+  /** La postulación (necesita al menos `id` y `stage`). */
+  app: any;
+  /** Estado marcado en la página Entrevistas, si esta pantalla lo conoce. */
+  participantStatus?: unknown;
+  /** Versión para la tarjeta del Kanban: dos botones pequeños, sin encabezado. */
+  compact?: boolean;
+  /** Se llama con el estado nuevo (o null si se borró) para que la pantalla lo refleje al instante. */
+  onMarked?: (status: AttendanceStatus | null) => void;
+}
+
+/**
+ * "¿Asistió a la entrevista?" — los dos botones que alimentan todas las métricas.
+ *
+ * Escribe en la POSTULACIÓN (ver `interviewAttendance.ts`) y, si esa postulación está
+ * en alguna sesión de la página *Entrevistas*, le copia el estado para que las dos
+ * pantallas nunca digan cosas distintas.
+ *
+ * Volver a pulsar la opción ya marcada la quita: marcar "no vino" por error y dejarlo
+ * así falsearía el porcentaje que el reclutador intenta mejorar.
+ */
+export default function InterviewAttendanceButton({ app, participantStatus, compact, onMarked }: Props) {
+  const [saving, setSaving] = useState<AttendanceStatus | null>(null);
+  const [error, setError] = useState('');
+
+  if (!app?.id || !canMarkAttendance(app)) return null;
+
+  const current = attendanceOf(app, participantStatus);
+
+  const mark = async (status: AttendanceStatus) => {
+    // La misma opción otra vez = corregir: se borra la marca.
+    const next = current === status ? null : status;
+    setSaving(status);
+    setError('');
+    try {
+      const by = auth.currentUser?.displayName || auth.currentUser?.email || 'Equipo';
+      await updateDoc(doc(db, 'applications', app.id), attendanceFields(next, by, app.stage || '', app));
+
+      // La sesión de entrevista, si existe, queda igual. Es secundario: la marca ya
+      // está guardada, así que un fallo aquí no se le reporta como error al reclutador.
+      try {
+        const parts = await getDocs(query(collection(db, 'interview_participants'), where('applicationId', '==', app.id)));
+        await Promise.all(parts.docs.map(d => updateDoc(d.ref, { status: next || 'pending' })));
+      } catch (e) {
+        console.warn('No se pudo sincronizar la sesión de entrevista:', e);
+      }
+
+      onMarked?.(next);
+    } catch (e) {
+      console.error('No se pudo guardar la asistencia:', e);
+      setError('No se pudo guardar. Revisa tu conexión.');
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const marked = app?.interviewAttendance;
+  const markedWhen = marked?.markedAt?.toDate ? marked.markedAt.toDate().toLocaleString('es-DO', {
+    day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
+  }) : '';
+  const markedBy = marked?.markedBy ? `Marcado por ${marked.markedBy}${markedWhen ? ` · ${markedWhen}` : ''}` : '';
+
+  return (
+    <div className={compact ? 'mt-2' : ''} onMouseDown={e => e.stopPropagation()}>
+      {!compact && (
+        <h3 className="text-[10px] lg:text-sm font-display font-bold text-slate-400 uppercase tracking-widest mb-2 flex items-center">
+          <UserCheck className="w-4 h-4 mr-2 text-emerald-500" /> Asistencia a la entrevista
+        </h3>
+      )}
+      <div className={`flex gap-1.5 ${compact ? '' : 'gap-2'}`}>
+        {ATTENDANCE_OPTIONS.map(opt => {
+          const on = current === opt.status;
+          return (
+            <button
+              key={opt.status}
+              type="button"
+              onMouseDown={e => e.stopPropagation()}
+              onClick={(e) => { e.stopPropagation(); mark(opt.status); }}
+              disabled={!!saving}
+              title={on ? `${opt.label}. Pulsa otra vez para quitar la marca.${markedBy ? `\n${markedBy}` : ''}` : opt.label}
+              className={`flex-1 flex items-center justify-center gap-1 border rounded-lg font-bold transition-colors disabled:opacity-60 ${
+                compact ? 'text-[10px] py-1.5' : 'text-xs lg:text-sm py-2'
+              } ${on ? opt.on : opt.off}`}
+            >
+              {saving === opt.status
+                ? <Loader2 className={`animate-spin ${compact ? 'w-3 h-3' : 'w-4 h-4'}`} />
+                : <span>{opt.emoji}</span>}
+              {compact ? opt.short : opt.label}
+            </button>
+          );
+        })}
+      </div>
+      {!compact && (
+        <p className="mt-1.5 text-[11px] text-slate-400">
+          {current
+            ? `${markedBy || 'Registrado'} · Pulsa la misma opción para quitar la marca.`
+            : 'Sin registrar. Marcar aquí alimenta el porcentaje de asistencia del Dashboard.'}
+        </p>
+      )}
+      {error && <p className="mt-1 text-[10px] font-bold text-rose-600">{error}</p>}
+    </div>
+  );
+}

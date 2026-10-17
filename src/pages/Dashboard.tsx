@@ -6,6 +6,7 @@ import { PIPELINE_STAGES } from '../constants/stages';
 import { Briefcase, Users, UserCheck, Clock, ArrowRight, TrendingUp, Activity, Sparkles } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
+import InterviewAttendanceDashboard from '../components/InterviewAttendanceDashboard';
 
 // Vibrant Premium Palette
 // Recharts is the heaviest dependency on this route. Loading it lazily lets the cards,
@@ -201,6 +202,13 @@ export default function Dashboard() {
             <p className="text-xs font-bold text-emerald-600/70 uppercase tracking-widest mt-1">Contratados</p>
           </div>
         </div>
+      </motion.div>
+
+      {/* Convocados a entrevista: quiénes asistieron y quiénes no. Carga sus propios
+          datos (las postulaciones con sello de convocatoria), así que no depende de
+          los contadores de arriba. */}
+      <motion.div variants={itemVariants}>
+        <InterviewAttendanceDashboard />
       </motion.div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

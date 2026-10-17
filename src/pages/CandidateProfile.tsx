@@ -14,6 +14,8 @@ import CandidateAvatar, { PhotoLightbox } from '../components/CandidateAvatar';
 import InterviewScorecardModal from '../components/InterviewScorecardModal';
 import InterviewAiCard from '../components/InterviewAiCard';
 import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
+import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
+import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
 import {
   DEFAULT_SCORECARD, blankScorecard, loadScorecard, resolveScorecardTemplate, answersForSave, hasInterviewEvidence,
@@ -357,9 +359,12 @@ export default function CandidateProfile() {
     setApplication({ ...application, stage: newStage });
 
     try {
-      await updateDoc(doc(db, 'applications', application.id), { 
+      await updateDoc(doc(db, 'applications', application.id), {
         stage: newStage,
-        lastStageUpdate: serverTimestamp()
+        lastStageUpdate: serverTimestamp(),
+        // Convocar a entrevista deja su sello en la postulación: es el denominador de
+        // las métricas de asistencia (interviewAttendance.ts).
+        ...interviewInviteStamp(application, previousStage, newStage),
       });
 
       // Trigger Automation
@@ -960,6 +965,19 @@ export default function CandidateProfile() {
                     <User className="w-4 h-4 mr-2 text-fuchsia-500" /> Entrevista {allApplications.length > 1 && <span className="ml-1 normal-case tracking-normal font-medium text-slate-400">· {application?.vacancyTitle}</span>}
                   </h3>
                   <div className="space-y-4">
+                    {/* ¿Vino? Lo primero que se sabe de una entrevista, y lo que alimenta
+                        el porcentaje de asistencia del Dashboard. Solo si fue convocado. */}
+                    {application && canMarkAttendance(application) && (
+                      <div className="pb-4 border-b border-slate-100">
+                        <InterviewAttendanceButton
+                          app={application}
+                          onMarked={(status) => setApplication((prev: any) => (prev ? {
+                            ...prev,
+                            interviewAttendance: status ? { ...(prev.interviewAttendance || {}), status } : null,
+                          } : prev))}
+                        />
+                      </div>
+                    )}
                     <div>
                       <label className="block text-[10px] font-bold text-slate-500 mb-2">Puntuación (1-5)</label>
                       <div className="flex space-x-1.5 lg:space-x-2">

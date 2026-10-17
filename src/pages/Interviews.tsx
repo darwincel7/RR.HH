@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { collection, query, where, onSnapshot, addDoc, updateDoc, doc, getDocs, serverTimestamp, getDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import { Calendar, Clock, User, MapPin, Plus, Loader2, CheckCircle, XCircle, Send, Users, Video } from 'lucide-react';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { useCandidatePhotos } from '../lib/useCandidatePhotos';
+import { attendanceFields, fromParticipantStatus, interviewInviteStamp } from '../lib/interviewAttendance';
 
 export default function Interviews() {
   const [sessions, setSessions] = useState<any[]>([]);
@@ -129,6 +130,15 @@ export default function Interviews() {
         addedAt: serverTimestamp()
       });
 
+      // Añadir a una sesión ES convocar (abajo sale la invitación con fecha): la
+      // postulación se queda con su sello de convocatoria para las métricas.
+      const app = availableCandidates.find(c => c.id === appId);
+      const stamp = interviewInviteStamp(app || {}, app?.stage || 'Convocado a entrevista', 'Convocado a entrevista');
+      if (Object.keys(stamp).length > 0) {
+        await updateDoc(doc(db, 'applications', appId), stamp).catch(e =>
+          console.warn('No se pudo sellar la convocatoria en la postulación:', e));
+      }
+
       // Remove from available list
       setAvailableCandidates(prev => prev.filter(c => c.id !== appId));
 
@@ -165,11 +175,22 @@ export default function Interviews() {
     }
   };
 
-  const updateParticipantStatus = async (participantId: string, newStatus: string) => {
+  // Marcar aquí escribe TAMBIÉN en la postulación: es de donde salen las métricas de
+  // asistencia (y lo que ve el botón ✅/❌ del Kanban y del perfil). Si solo viviera en
+  // la sesión, la asistencia se perdería en cuanto el candidato avanzara de etapa.
+  const updateParticipantStatus = async (participant: any, newStatus: string) => {
     try {
-      await updateDoc(doc(db, 'interview_participants', participantId), { status: newStatus });
+      await updateDoc(doc(db, 'interview_participants', participant.id), { status: newStatus });
+      if (!participant.applicationId) return;
+      const appRef = doc(db, 'applications', participant.applicationId);
+      const appSnap = await getDoc(appRef);
+      if (!appSnap.exists()) return;
+      const app = appSnap.data() as any;
+      const by = auth.currentUser?.displayName || auth.currentUser?.email || 'Equipo';
+      await updateDoc(appRef, attendanceFields(fromParticipantStatus(newStatus), by, app.stage || '', app));
     } catch (error) {
       console.error("Error updating status:", error);
+      alert('No se pudo guardar la asistencia. Revisa tu conexión e inténtalo de nuevo.');
     }
   };
 
@@ -288,7 +309,7 @@ export default function Interviews() {
                               <p className="text-sm font-bold text-slate-800">{part.candidateName || 'Sin nombre'}</p>
                               <select
                                 value={part.status}
-                                onChange={(e) => updateParticipantStatus(part.id, e.target.value)}
+                                onChange={(e) => updateParticipantStatus(part, e.target.value)}
                                 className={`text-xs font-bold bg-transparent outline-none cursor-pointer mt-0.5 ${
                                   part.status === 'attended' ? 'text-emerald-600' : 
                                   part.status === 'no_show' ? 'text-rose-600' : 'text-amber-600'
