@@ -81,13 +81,22 @@ export default function InterviewAttendanceDashboard() {
     (async () => {
       try {
         const appsCol = collection(db, 'applications');
-        // Dos fuentes, unidas por id: el sello de convocatoria (lo fiable, sobrevive al
-        // descarte y al avance) y la etapa actual (cubre lo convocado antes del sello).
-        const [stamped, byStage, vacSnap, partSnap] = await Promise.all([
-          getDocs(query(appsCol, where('interviewInvitedAt', '!=', null))).catch(e => {
-            console.warn('No se pudo leer por fecha de convocatoria:', e);
+        // El sello de convocatoria es la fuente fiable, pero no puede ser la única: si
+        // esa consulta falla (o ni se puede construir), el panel sigue funcionando con
+        // la etapa actual en vez de quedarse en blanco. Por eso el try va también
+        // alrededor de query().
+        const stampedQuery = async () => {
+          try {
+            return await getDocs(query(appsCol, where('interviewInvitedAt', '!=', null)));
+          } catch (e) {
+            console.warn('No se pudo leer por fecha de convocatoria (se usa la etapa actual):', e);
             return null;
-          }),
+          }
+        };
+        // Dos fuentes, unidas por id: el sello de convocatoria (sobrevive al descarte y
+        // al avance) y la etapa actual (cubre lo convocado antes del sello).
+        const [stamped, byStage, vacSnap, partSnap] = await Promise.all([
+          stampedQuery(),
           getDocs(query(appsCol, where('stage', 'in', [...INTERVIEW_INVITE_STAGES, ...POST_INTERVIEW_STAGES]))),
           getDocs(collection(db, 'vacancies')),
           // La asistencia marcada en la página Entrevistas cuenta igual.
@@ -126,7 +135,12 @@ export default function InterviewAttendanceDashboard() {
   const inPeriod = useMemo(() => invitedWithinDays(apps, days), [apps, days]);
   const funnel = useMemo(() => computeInterviewFunnel(inPeriod, participantStatus), [inPeriod, participantStatus]);
   const byVacancy = useMemo(
-    () => groupInterviewFunnel(inPeriod, a => a.vacancyId || '', k => vacancyTitles[k] || 'Sin vacante', participantStatus),
+    () => groupInterviewFunnel(
+      inPeriod,
+      a => a.vacancyId || '',
+      k => vacancyTitles[k] || (k === 'bulk_upload' ? 'Subida masiva de CVs' : 'Sin vacante'),
+      participantStatus,
+    ),
     [inPeriod, vacancyTitles, participantStatus],
   );
   // Convocatorias sin fecha: su asistencia cuenta, pero no se puede atribuir a un período.
