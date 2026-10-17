@@ -154,6 +154,15 @@ service cloud.firestore {
       allow write: if isRecruiter(); // Only recruiters/admins can modify
     }
 
+    // Postulaciones absorbidas por una unificación cuyo contenido no cabía dentro de la
+    // postulación que sobrevivió (un documento de Firestore no pasa de 1MB). Las escribe
+    // SOLO el servidor (Admin SDK, que no pasa por estas reglas); el equipo puede leerlas
+    // para consultar ese test o formulario.
+    match /merged_applications/{applicationId} {
+      allow read: if isRecruiter();
+      allow write: if false;
+    }
+
     match /interview_sessions/{sessionId} {
       allow read, write: if isRecruiter();
     }

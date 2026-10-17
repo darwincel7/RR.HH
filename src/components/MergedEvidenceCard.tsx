@@ -87,8 +87,10 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
 
               {entry?.omitted ? (
                 <p className="mt-2 text-[11px] text-amber-800">
-                  Su contenido era demasiado grande para guardarlo aquí; quedó en la postulación original
-                  ({entry.fromApplicationId}).
+                  Su contenido era demasiado grande para guardarlo aquí.{' '}
+                  {entry.archivedIn
+                    ? <>Se guardó completo aparte, en <code className="font-mono">{entry.archivedIn}</code>.</>
+                    : <>No se pudo archivar: la postulación original ({entry.fromApplicationId}) se dejó sin borrar.</>}
                 </p>
               ) : (
                 <>

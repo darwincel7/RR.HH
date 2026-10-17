@@ -3,6 +3,7 @@ import {
   deleteField, arrayUnion, Timestamp,
 } from 'firebase/firestore';
 import { db, auth } from './firebase';
+import { interviewInviteStamp } from './interviewAttendance';
 
 /**
  * Moving (or copying) a candidate's application from one vacancy to another.
@@ -117,12 +118,18 @@ export async function executeVacancyMove<T extends MovableApp>(
         by,
       };
       const newStage = opts.stage === KEEP_STAGE ? (app.stage || 'Nuevo') : opts.stage;
+      // Mover o copiar PUEDE dejar la postulación directamente en una etapa de
+      // entrevista, y entonces es una convocatoria como cualquier otra: sin su sello,
+      // si luego se descarta desaparece del denominador de las métricas de asistencia
+      // (interviewAttendance.ts) — justo la distorsión que ese sello existe para evitar.
+      const inviteStamp = interviewInviteStamp(app, app.stage || '', newStage);
 
       if (opts.mode === 'move') {
         batch.update(doc(db, 'applications', app.id), {
           vacancyId: opts.targetVacancyId,
           stage: newStage,
           lastStageUpdate: serverTimestamp(),
+          ...inviteStamp,
           // Its hand-placed position belonged to the old board; fall back to date order.
           kanbanOrder: deleteField(),
           vacancyHistory: arrayUnion(historyEntry),
@@ -140,6 +147,9 @@ export async function executeVacancyMove<T extends MovableApp>(
           stage: newStage,
           submittedAt: serverTimestamp(),
           lastStageUpdate: serverTimestamp(),
+          // La copia nace en esa etapa: si es de entrevista, nace convocada. Se sella
+          // sobre un documento nuevo (sin marca previa que archivar).
+          ...interviewInviteStamp({}, '', newStage),
           copiedFrom: { applicationId: app.id, vacancyId: app.vacancyId, vacancyTitle: historyEntry.fromVacancyTitle },
           vacancyHistory: [historyEntry],
         });

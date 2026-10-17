@@ -846,14 +846,23 @@ export default function KanbanBoard() {
 
                                 {/* Open the candidate's CV directly from the card. */}
                                 {(() => {
-                                  const cvUrl = candidates[item.candidateId]?.cvUrl || item.cvUrl;
+                                  // El de ESTA postulación primero: quien volvió a
+                                  // aplicar con un CV nuevo no puede dejar sin CV
+                                  // visible a la postulación que envió con el anterior.
+                                  // url y tipo salen juntos de la misma fuente: mezclarlos
+                                  // abriría un .doc con el visor de otro formato.
+                                  const cand = candidates[item.candidateId];
+                                  const cv = item.cvUrl
+                                    ? { url: item.cvUrl, fileType: item.cvFileType }
+                                    : { url: cand?.cvUrl, fileType: cand?.cvFileType };
+                                  const cvUrl = cv.url;
                                   return (
                                     <button
                                       type="button"
                                       onMouseDown={(e) => e.stopPropagation()}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato', fileType: candidates[item.candidateId]?.cvFileType || item.cvFileType });
+                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato', fileType: cv.fileType });
                                       }}
                                       disabled={!cvUrl}
                                       title={cvUrl ? 'Ver el currículum en una ventana' : 'CV aún no disponible'}

@@ -100,6 +100,7 @@ error es silencioso y caro:
 | [`src/lib/mergeCandidates.test.ts`](src/lib/mergeCandidates.test.ts) | Unificar dos perfiles: nada se sobreescribe, nada se pierde (el test del duplicado se archiva), un "Descartado" no gana a una etapa activa y dos postulaciones a la misma vacante acaban en una |
 | [`src/lib/participantStatus.test.ts`](src/lib/participantStatus.test.ts) | Con varias citas de la misma postulación manda la última: marcar la de hoy no puede borrar el "asistió" real de la de enero |
 | [`src/lib/duplicateGroups.test.ts`](src/lib/duplicateGroups.test.ts) | Detectar duplicados en toda la base: agrupa de forma transitiva (A~B por teléfono y B~C por correo son un grupo) y un nombre suelto como "Ana" nunca agrupa a personas distintas |
+| [`src/lib/applicantIdentity.test.ts`](src/lib/applicantIdentity.test.ts) | Cuándo una postulación nueva pertenece a un perfil que ya existe: hacen falta teléfono, correo **y** nombre (dos hermanas con el celular y el correo de la casa quedan separadas, y el nombre de pila solo nunca basta) |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -178,10 +179,12 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
 - **Unificar perfiles duplicados** (perfil → *Unificar perfiles*): junta en el perfil
   abierto otro perfil del mismo postulante — sus postulaciones, tests, formularios,
   entrevistas, notas, historial de WhatsApp y citas de entrevista.
-  Por qué hay duplicados: `/api/apply` usa el UID de la sesión anónima como id del
-  candidato, así que quien aplica otro día o desde otro navegador **nace como un perfil
-  nuevo**; si además escribió el número distinto, el deduplicado por teléfono/correo no
-  lo ve. Así es como la misma persona acaba con un test en un perfil y otro test en el otro.
+  Por qué había duplicados: `/api/apply` crea el candidato con el UID de la sesión
+  anónima, así que quien aplicaba otro día o desde otro navegador **nacía como un perfil
+  nuevo**; si además escribió el número distinto, el deduplicado por teléfono/correo no lo
+  veía. Así es como la misma persona acabó con un test en un perfil y otro en el otro.
+  Ahora el intake lo reconoce (ver *Una persona, un perfil* más abajo), y esta pantalla
+  resuelve los que ya estaban y los que el reconocimiento no puede afirmar.
   Reglas: manda el perfil principal (del duplicado solo se toma lo que le falta); una
   postulación a una vacante donde el principal no está se **mueve** conservando su id (los
   links `/eval` y `/test` ya enviados siguen funcionando); dos postulaciones a la **misma**
@@ -217,6 +220,27 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   el historial de WhatsApp es inmutable para el cliente: solo el Admin SDK puede
   reasignarlo. En el perfil aparece solo un aviso cuando hay otro perfil con el mismo
   teléfono.
+- **Una persona, un perfil (al postular)**: el navegador no es la identidad de nadie. Si
+  el perfil que ya existe coincide en **teléfono, correo Y nombre**, la postulación nueva
+  se cuelga de ESE perfil en vez de nacer un duplicado
+  ([`src/lib/applicantIdentity.ts`](src/lib/applicantIdentity.ts)). No es una regla nueva:
+  con la misma sesión ya pasaba — el perfil se actualizaba con los datos y el CV nuevos.
+  El listón es alto a propósito: compartir un celular es normal en una familia, y hacen
+  falta **dos palabras** en los dos nombres (con el nombre de pila solo, "Ana" estaría
+  contenido en "Ana Gómez" y bastaría conocer el teléfono, el correo y el nombre de pila
+  de alguien para caer dentro de su perfil). Si algo no cuadra se crea un perfil aparte y
+  queda en *Revisar duplicados*: un duplicado se arregla en dos clics; confundir a dos
+  personas, no. Solo se reconoce cuando esa sesión no tiene perfil propio todavía; juntar
+  dos perfiles que ya existen es una unificación de verdad, y la decide una persona.
+  Escribir en un perfil que ya existía **completa, no destruye** (igual que la
+  unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
+  el teléfono/correo que deja de ser el principal se guarda como alternativo — de él
+  depende que un WhatsApp entrante siga enlazándose con esa persona. El CV sí se renueva:
+  es el que acaba de presentar, y sin eso su postulación nueva no tendría nota de CV.
+  Cada postulación conserva **su** CV: el Kanban y el perfil abren el currículum con el
+  que se envió esa postulación, y la nota del CV no se reescribe en una postulación
+  presentada con otro — ni al reanalizar a mano, ni desde el worker, que además devuelve
+  el CV a la cola si cambió mientras la IA leía el anterior.
 - **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
   CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
   ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del

@@ -40,7 +40,7 @@ import {
 } from './serverWhatsAppQueue';
 import { parseSendWindow, isWithinSendWindow, nextSendWindowOpenMs, formatWindowHour } from './src/lib/sendWindow';
 import { estimateQueueEtas, describeFailure, vacancyFromTopicKey } from './serverWhatsAppActivity';
-import { getServerDb, type ServerDb } from './serverDb';
+import { getServerDb, followMergedInto, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
@@ -50,6 +50,7 @@ import {
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
+import { isSameApplicant, nameTokens } from './src/lib/applicantIdentity';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
   INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
@@ -842,6 +843,17 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
   try {
     const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
 
+    // Leer un CV tarda decenas de segundos: la persona pudo volver a aplicar en ese
+    // rato con OTRO currículum. Guardar esta lectura dejaría el análisis de un CV junto
+    // al link de otro y, lo peor, marcaría 'completed' sobre la cola — el CV nuevo no se
+    // leería nunca y su postulación quedaría sin puntuación. Se vuelve a la cola.
+    const fresh = await db.getDocData('candidates', cand.id).catch(() => null);
+    if (fresh && cand.cvUrl && fresh.cvUrl && fresh.cvUrl !== cand.cvUrl) {
+      console.log(`[server CV worker] ${cand.id}: el CV cambió mientras se leía; vuelve a la cola`);
+      await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
+      return false;
+    }
+
     const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
     if (isBulk) {
       if (namePending && parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
@@ -854,11 +866,17 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     }
     await db.setDocData('candidates', cand.id, candidateUpdate);
 
-    const appIds = await db.getApplicationIdsByCandidate(cand.id);
-    for (const appId of appIds) {
+    // La nota del CV va a las postulaciones de esta persona, pero NO a las que se
+    // enviaron con OTRO currículum: quien vuelve a aplicar con un CV nuevo no puede
+    // cambiar retroactivamente la puntuación de una postulación que ya fue evaluada con
+    // el CV que presentó entonces. Sin cvUrl guardado (postulaciones viejas) se puntúa
+    // como siempre.
+    const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
+    for (const app of apps) {
+      if (app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl) continue;
       const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
       if (namePending && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
-      await db.setDocData('applications', appId, appUpdate);
+      await db.setDocData('applications', app.id, appUpdate);
     }
     console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
     // The CV analysis said there is a photo of the person → cut it out for the avatar.
@@ -884,9 +902,12 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
     if (namePending) {
       // Only placeholder names get the error label — a manually-typed name stays intact.
-      const appIds = await db.getApplicationIdsByCandidate(cand.id);
-      for (const appId of appIds) {
-        await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
+      // Y solo en las postulaciones de ESTE CV: una que se envió con otro currículum, ya
+      // leído, no puede quedar marcada como ilegible.
+      const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
+      for (const app of apps) {
+        if (app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl) continue;
+        await db.setDocData('applications', app.id, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
       }
     }
     return false;
@@ -2366,6 +2387,10 @@ async function startServer() {
       // Identity: derive the candidate id from the VERIFIED anonymous ID token, never
       // from the request body. This stops a leaked capability URL (which exposes a
       // victim's candidateId) from being used to overwrite that victim's profile.
+      //
+      // Más abajo, una postulación puede acabar colgada de un perfil que YA existía
+      // (isSameApplicant), pero nunca por un id suministrado: solo si coinciden teléfono,
+      // correo y nombre. Un id filtrado no abre esa puerta.
       let candidateId = body.candidateId;
       if (db.canEnforceAuth) {
         const header = req.headers.authorization || '';
@@ -2376,13 +2401,23 @@ async function startServer() {
       }
       if (!candidateId || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
 
+      // Sin `.catch(() => null)`: un fallo de lectura que devolviera null haría pasar a
+      // una sesión que SÍ tiene perfil por nueva — reescribiendo su createdAt y
+      // habilitando el reuso de otro perfil. Mejor que la postulación falle y se
+      // reintente (el handler responde 500) que escribir con la identidad equivocada.
+      const readCandidate = (id: string) => db.getDocData('candidates', id);
+
       // El navegador conserva su sesión anónima, así que quien ya fue unificado vuelve
       // con el MISMO uid. Sin seguir `mergedInto`, su nueva postulación nacería colgada
-      // del perfil muerto: invisible en el perfil vivo y reencolando su CV.
-      const ownProfile = await db.getDocData('candidates', candidateId).catch(() => null);
-      if (typeof ownProfile?.mergedInto === 'string' && ownProfile.mergedInto) {
-        const live = await db.getDocData('candidates', ownProfile.mergedInto).catch(() => null);
-        if (live && !live.mergedInto) candidateId = ownProfile.mergedInto;
+      // del perfil muerto: invisible en el perfil vivo y reencolando su CV. Se sigue la
+      // CADENA completa (A→B→C es normal: unificar dos veces está permitido).
+      let profile = await readCandidate(candidateId);
+      if (profile?.mergedInto) {
+        const liveId = await followMergedInto(readCandidate, candidateId);
+        if (liveId && liveId !== candidateId) {
+          const live = await readCandidate(liveId);
+          if (live && !live.mergedInto) { candidateId = liveId; profile = live; }
+        }
       }
 
       const vacancy = await db.getDocData('vacancies', vacancyId);
@@ -2391,18 +2426,38 @@ async function startServer() {
       const phoneNormalized = normalizePhone(phone);
 
       // Duplicate = a candidate with THIS phone/email already applied to THIS vacancy.
-      // We do NOT merge into that candidate's record (that could corrupt a different
-      // person who shares a phone/email); we only block a repeat application here.
       //
       // Checked by the application's vacancyId FIELD, not by its "<candidate>_<vacancy>"
       // id: recruiters can move an application to another vacancy, which keeps its id
       // (so the links already sent keep working) but changes the vacancy it belongs to.
       const hasApplicationFor = async (candId: string) => {
-        const ids = await db.getApplicationIdsByCandidate(candId);
-        const apps = await Promise.all(ids.map(id => db.getDocData('applications', id)));
+        const apps = await db.listDocsByField('applications', 'candidateId', candId, 300);
         return apps.some(a => a?.vacancyId === vacancyId);
       };
       const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, email);
+
+      // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así
+      // que la misma persona aplicando otro día o en otro teléfono nacía como un perfil
+      // nuevo (de ahí los duplicados con un test en cada perfil). Si el perfil que ya
+      // existe coincide en teléfono, correo Y nombre, esta postulación se cuelga de ESE
+      // perfil. No es una regla nueva: con la misma sesión ya pasaba — el perfil se
+      // actualizaba con los datos y el CV nuevos. Esto es lo mismo desde otro navegador.
+      //
+      // Solo cuando esta sesión no tiene perfil propio todavía. Si lo tiene (ya aplicó
+      // desde aquí), juntar los dos perfiles existentes es una unificación de verdad:
+      // la hace una persona desde "Revisar duplicados", viendo antes qué va a pasar.
+      if (!profile && existingId && existingId !== candidateId) {
+        const existing = await readCandidate(existingId);
+        const match = isSameApplicant(existing, { name, phoneNormalized, email });
+        if (match.same) {
+          console.log(`[apply] perfil reutilizado ${existingId} (${match.reason}); la sesión ${candidateId} no crea un duplicado`);
+          candidateId = existingId;
+          profile = existing;
+        } else if (existing && match.reason) {
+          console.log(`[apply] perfil ${existingId} parecido pero NO reutilizado (${match.reason}): queda para "Revisar duplicados"`);
+        }
+      }
+
       if (existingId && existingId !== candidateId && await hasApplicationFor(existingId)) {
         return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
@@ -2417,12 +2472,40 @@ async function startServer() {
       }
 
       const now = new Date();
+
+      // En un perfil que ya existía (el suyo de antes, o el que se acaba de reconocer)
+      // esto COMPLETA, no destruye: lo mismo que hace la unificación manual.
+      //  - el nombre más completo se conserva (una corrección del equipo no se pierde
+      //    porque la persona escribiera solo "Ana" al volver a aplicar);
+      //  - la ciudad solo se rellena si falta;
+      //  - el teléfono/correo que deja de ser el principal se guarda como alternativo:
+      //    es el número por el que el equipo quizá lleve semanas escribiéndole, y de él
+      //    depende que un WhatsApp entrante siga enlazándose con esta persona;
+      //  - el CV y su análisis sí se renuevan: es el currículum que acaba de presentar,
+      //    y sin eso su postulación nueva se quedaría sin puntuación de CV.
+      const candidateData: Record<string, any> = {
+        email, phone, phoneNormalized,
+        cvUrl, cvFileType: cvFileType.slice(0, 120),
+        aiStatus: 'pending',
+        fullName: nameTokens(profile?.fullName).length > nameTokens(name).length ? profile.fullName : name,
+        // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
+        // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
+        ...(profile?.createdAt ? {} : { createdAt: now }),
+      };
+      if (!profile?.city) candidateData.city = city.slice(0, 120);
+      if (profile) {
+        const keepPhones = [profile.phoneNormalized, profile.phone]
+          .filter(p => p && normalizePhone(String(p)) !== phoneNormalized);
+        const keepEmails = [profile.email]
+          .filter(e => e && String(e).trim().toLowerCase() !== email.trim().toLowerCase());
+        const union = (existing: unknown, add: string[]) =>
+          Array.from(new Set([...(Array.isArray(existing) ? existing : []), ...add].filter(Boolean)));
+        if (keepPhones.length) candidateData.alternatePhones = union(profile.alternatePhones, keepPhones);
+        if (keepEmails.length) candidateData.alternateEmails = union(profile.alternateEmails, keepEmails);
+      }
+
       await db.applyBatch(
-        { id: candidateId, data: {
-          fullName: name, email, phone, phoneNormalized,
-          city: city.slice(0, 120), cvUrl, cvFileType: cvFileType.slice(0, 120),
-          aiStatus: 'pending', createdAt: now,
-        } },
+        { id: candidateId, data: candidateData },
         { id: applicationId, data: {
           candidateId, vacancyId, candidateName: name,
           stage: 'Nuevo', cvUrl, cvFileType: cvFileType.slice(0, 120),
@@ -3156,6 +3239,10 @@ async function startServer() {
       const duplicateName = duplicate.fullName || duplicate.name || '';
       const origin = { candidateId: duplicateId, fullName: duplicateName, at, by };
 
+      // Avisos de lo que quedó a medias: la unificación no se aborta por ellos, pero
+      // tampoco se dan por buenos (se devuelven y la pantalla los muestra).
+      const warnings: string[] = [];
+
       // Una postulación archivada que ya no existe: el participante de la sesión de
       // entrevista tiene que apuntar a la que sobrevive, o la agenda queda huérfana.
       // Se siembra con lo que absorbieron unificaciones ANTERIORES: así un reintento tras
@@ -3186,7 +3273,27 @@ async function startServer() {
         const source = duplicateApps.find((a: any) => a.id === combine.fromAppId) || {};
         const snapshot = { ...source };
         delete (snapshot as any).mergedEvidence; // lo suyo ya viaja en su propia entrada
+
+        // Si no cabe dentro de la postulación que sobrevive, NO se pierde: se guarda
+        // completa en su propia colección. Antes se guardaba solo "era muy grande" y
+        // acto seguido se borraba el original — esa evidencia quedaba irrecuperable, y
+        // la pantalla remitía a una postulación que ya no existía.
         const tooBig = JSON.stringify(snapshot).length > 200_000;
+        let archivedApart = false;
+        if (tooBig) {
+          try {
+            await db.setDocData('merged_applications', combine.fromAppId, {
+              ...snapshot,
+              mergedIntoApplicationId: combine.intoAppId,
+              mergedFromCandidateId: duplicateId,
+              mergedAt: at,
+              mergedBy: by,
+            });
+            archivedApart = true;
+          } catch (e) {
+            console.error('[merge] no se pudo archivar aparte la postulación absorbida:', e);
+          }
+        }
         const archive = [
           ...(archiveByApp.get(combine.intoAppId)
             || (Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : [])),
@@ -3194,7 +3301,9 @@ async function startServer() {
             ...origin,
             fromApplicationId: combine.fromAppId,
             groups: combine.archived,
-            ...(tooBig ? { omitted: true } : { data: snapshot }),
+            ...(tooBig
+              ? { omitted: true, ...(archivedApart ? { archivedIn: `merged_applications/${combine.fromAppId}` } : {}) }
+              : { data: snapshot }),
           },
           // Lo que la postulación absorbida ya traía archivado de otra unificación.
           ...(Array.isArray(source.mergedEvidence) ? source.mergedEvidence : []),
@@ -3204,7 +3313,14 @@ async function startServer() {
         if (combine.intoAppId !== undefined) {
           await db.setDocData('applications', combine.intoAppId, fields);
           reassignedApp.set(combine.fromAppId, combine.intoAppId);
-          await db.deleteDocData('applications', combine.fromAppId);
+          // Solo se borra el original cuando su contenido quedó guardado en algún sitio:
+          // dentro de la postulación que sobrevive, o aparte. Si el archivo aparte falló,
+          // se queda donde está — un duplicado visible molesta; perder un test, no.
+          if (!tooBig || archivedApart) {
+            await db.deleteDocData('applications', combine.fromAppId);
+          } else {
+            warnings.push(`La postulación absorbida de ${combine.vacancyTitle} no se pudo archivar, así que NO se borró: revísala a mano.`);
+          }
         }
       }
 
@@ -3225,7 +3341,6 @@ async function startServer() {
       //    WhatsApp), la unificación NO se aborta: lo importante —las postulaciones— ya
       //    está hecho. Se devuelve el aviso para que la pantalla lo diga en vez de dar
       //    todo por bueno.
-      const warnings: string[] = [];
       const moveAll = async (label: string, collectionName: string, docs: any[], fields: (d: any) => Record<string, any>) => {
         let failed = 0;
         for (const d of docs) {
