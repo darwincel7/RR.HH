@@ -1,4 +1,5 @@
 import { PIPELINE_STAGES } from '../constants/stages';
+import { normalizeText } from './smartSearch';
 
 /**
  * Unificar dos perfiles del MISMO postulante.
@@ -57,9 +58,14 @@ export function isEmptyValue(v: unknown): boolean {
   if (v === null || v === undefined) return true;
   if (typeof v === 'string') return v.trim() === '';
   if (Array.isArray(v)) return v.length === 0;
-  // Un Timestamp de Firestore es un objeto con métodos, no un {} vacío.
-  if (typeof v === 'object' && !(v as any).toDate && !(v as any).seconds) {
-    return Object.keys(v as any).length === 0;
+  if (v instanceof Date) return false;
+  // Solo un objeto PLANO puede estar vacío. Un Timestamp de Firestore (o cualquier
+  // instancia de clase) no tiene claves propias enumerables y pasaría por "sin dato":
+  // la fecha de un test se habría tratado como inexistente.
+  if (typeof v === 'object') {
+    const proto = Object.getPrototypeOf(v);
+    const plain = proto === Object.prototype || proto === null;
+    return plain ? Object.keys(v as any).length === 0 : false;
   }
   return false;
 }
@@ -137,10 +143,11 @@ export function planApplicationMerge(
     if (hasEvidence(primaryApp, group)) {
       // Los dos hicieron esta parte del proceso: se queda la del principal y la otra
       // se guarda, que es justo el caso de "un test en cada perfil".
+      // El grupo entero se archiva y NO se mezcla nada suelto: la nota del principal
+      // con las respuestas del duplicado dejaría una postulación que se contradice —
+      // quien audite el Ranking leería respuestas que no producen esa puntuación.
       archived.push(group.label);
       group.fields.forEach(f => { if (!isEmptyValue(dupApp?.[f])) archivedData[f] = dupApp[f]; });
-      // Aun así, los huecos sueltos del grupo se completan (p. ej. faltaba el CV).
-      Object.assign(fields, fillEmpty(primaryApp, dupApp, group.fields).fields);
       continue;
     }
     taken.push(group.label);
@@ -252,11 +259,13 @@ export function planCandidateMerge(args: {
 // Encontrar al duplicado
 // ---------------------------------------------------------------------------
 
-/** Nombre comparable: sin acentos, sin mayúsculas, sin espacios de más. */
+/**
+ * Nombre comparable: sin acentos, sin mayúsculas, sin espacios de más. Usa el mismo
+ * `normalizeText` que el buscador — con dos copias de la regla, un día el buscador y
+ * este detector dejarían de estar de acuerdo en si dos nombres son la misma persona.
+ */
 export function normalizeName(name: unknown): string {
-  return String(name || '')
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .toLowerCase().replace(/\s+/g, ' ').trim();
+  return normalizeText(name).replace(/\s+/g, ' ').trim();
 }
 
 export type DuplicateReason = 'phone' | 'email' | 'name';

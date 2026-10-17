@@ -6,7 +6,7 @@ import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import Modal from '../components/ui/Modal';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { useCandidatePhotos } from '../lib/useCandidatePhotos';
-import { attendanceFields, fromParticipantStatus, interviewInviteStamp } from '../lib/interviewAttendance';
+import { attendanceFields, fromParticipantStatus, interviewAppointmentStamp } from '../lib/interviewAttendance';
 
 export default function Interviews() {
   const [sessions, setSessions] = useState<any[]>([]);
@@ -130,14 +130,15 @@ export default function Interviews() {
         addedAt: serverTimestamp()
       });
 
-      // Añadir a una sesión ES convocar (abajo sale la invitación con fecha): la
-      // postulación se queda con su sello de convocatoria para las métricas.
+      // Añadir a una sesión ES darle una cita (abajo sale la invitación con fecha): la
+      // postulación se queda con su sello de convocatoria para las métricas. Aquí el
+      // candidato ya está en "Convocado a entrevista", así que no hay cambio de etapa
+      // que detectar: si ya tenía una asistencia marcada, esto es una reconvocatoria y
+      // la marca anterior se archiva para que la cita nueva nazca sin marcar.
       const app = availableCandidates.find(c => c.id === appId);
-      const stamp = interviewInviteStamp(app || {}, app?.stage || 'Convocado a entrevista', 'Convocado a entrevista');
-      if (Object.keys(stamp).length > 0) {
-        await updateDoc(doc(db, 'applications', appId), stamp).catch(e =>
-          console.warn('No se pudo sellar la convocatoria en la postulación:', e));
-      }
+      const stamp = interviewAppointmentStamp(app || {});
+      await updateDoc(doc(db, 'applications', appId), stamp).catch(e =>
+        console.warn('No se pudo sellar la convocatoria en la postulación:', e));
 
       // Remove from available list
       setAvailableCandidates(prev => prev.filter(c => c.id !== appId));

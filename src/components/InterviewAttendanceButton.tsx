@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { doc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
+import { latestByApplication } from '../lib/participantStatus';
 import { Loader2, UserCheck } from 'lucide-react';
 import {
   ATTENDANCE_OPTIONS, attendanceFields, attendanceOf, canMarkAttendance,
@@ -32,7 +33,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
   const [saving, setSaving] = useState<AttendanceStatus | null>(null);
   const [error, setError] = useState('');
 
-  if (!app?.id || !canMarkAttendance(app)) return null;
+  if (!app?.id || !canMarkAttendance(app, participantStatus)) return null;
 
   const current = attendanceOf(app, participantStatus);
 
@@ -45,11 +46,13 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
       const by = auth.currentUser?.displayName || auth.currentUser?.email || 'Equipo';
       await updateDoc(doc(db, 'applications', app.id), attendanceFields(next, by, app.stage || '', app));
 
-      // La sesión de entrevista, si existe, queda igual. Es secundario: la marca ya
-      // está guardada, así que un fallo aquí no se le reporta como error al reclutador.
+      // La agenda queda igual, pero SOLO la última cita: si el candidato tuvo dos
+      // sesiones, escribir en las dos borraría el "asistió" real de la primera con el
+      // resultado de la segunda, y eso no se recupera.
       try {
         const parts = await getDocs(query(collection(db, 'interview_participants'), where('applicationId', '==', app.id)));
-        await Promise.all(parts.docs.map(d => updateDoc(d.ref, { status: next || 'pending' })));
+        const latest = latestByApplication(parts.docs.map(d => ({ id: d.id, ...(d.data() as any) }))).get(app.id);
+        if (latest) await updateDoc(doc(db, 'interview_participants', latest.id), { status: next || 'pending' });
       } catch (e) {
         console.warn('No se pudo sincronizar la sesión de entrevista:', e);
       }

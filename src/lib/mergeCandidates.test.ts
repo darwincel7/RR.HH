@@ -18,10 +18,13 @@ describe('qué cuenta como vacío', () => {
     expect(isEmptyValue('Ana')).toBe(false);
   });
 
-  it('un Timestamp de Firestore no es un objeto vacío', () => {
+  it('ni un Timestamp ni un Date son un objeto vacío', () => {
     // Sin esto, la fecha de una respuesta se trataría como "no hay dato" y se perdería.
     expect(isEmptyValue({ seconds: 1, nanoseconds: 0 })).toBe(false);
     expect(isEmptyValue({ toDate: () => new Date() })).toBe(false);
+    // Un Date no tiene claves propias enumerables: por conteo de claves daría "vacío".
+    expect(isEmptyValue(new Date())).toBe(false);
+    expect(isEmptyValue(new Map())).toBe(false);
   });
 });
 
@@ -83,13 +86,17 @@ describe('combinar dos postulaciones a la misma vacante', () => {
     expect(plan.archivedData.testAnswers).toEqual({ q1: 'duplicado' });
   });
 
-  it('con evidencia en los dos lados, los huecos sueltos del grupo sí se completan', () => {
+  it('con evidencia en los dos lados no se mezcla NADA del grupo, ni los huecos sueltos', () => {
+    // Mezclar dejaría la puntuación del principal junto a la fecha (o las respuestas)
+    // del duplicado: quien audite el Ranking leería respuestas que no dan ese puntaje.
     const primary = { id: 'p', vacancyId: 'v1', stage: 'Nuevo', testResults: { score: 90 } };
     const dup = { id: 'd', vacancyId: 'v1', stage: 'Nuevo', testResults: { score: 40 }, testSubmittedAt: { seconds: 5 } };
     const plan = planApplicationMerge(primary, dup);
-    expect(plan.fields.testSubmittedAt).toEqual({ seconds: 5 });
+    expect(plan.fields.testSubmittedAt).toBeUndefined();
     expect(plan.fields.testResults).toBeUndefined();
     expect(plan.archived).toContain(group('test').label);
+    // Y sigue estando todo, archivado junto.
+    expect(plan.archivedData).toEqual({ testResults: { score: 40 }, testSubmittedAt: { seconds: 5 } });
   });
 
   it('sube la etapa cuando el duplicado llegó más lejos', () => {

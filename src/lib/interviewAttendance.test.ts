@@ -12,7 +12,7 @@ vi.mock('firebase/firestore', () => ({
 }));
 
 import {
-  attendanceOf, wasInvitedToInterview, canMarkAttendance, interviewInviteStamp, attendanceFields,
+  attendanceOf, wasInvitedToInterview, canMarkAttendance, interviewInviteStamp, interviewAppointmentStamp, attendanceFields,
   computeInterviewFunnel, groupInterviewFunnel, invitedWithinDays, pct, isInterviewStage,
 } from './interviewAttendance';
 
@@ -44,6 +44,9 @@ describe('quién cuenta como convocado a entrevista', () => {
   it('lo marcado en la página Entrevistas también cuenta como convocatoria', () => {
     expect(wasInvitedToInterview(app({ stage: 'Descartado' }), 'no_show')).toBe(true);
     expect(canMarkAttendance(app({ stage: 'Nuevo' }))).toBe(false);
+    // Lo marcado en una sesión habilita el botón: si no, una asistencia que el Dashboard
+    // SÍ cuenta (en alguien ya descartado) no se podría corregir desde el perfil.
+    expect(canMarkAttendance(app({ stage: 'Descartado' }), 'attended')).toBe(true);
   });
 });
 
@@ -108,6 +111,35 @@ describe('el sello de convocatoria al mover de etapa', () => {
       __arrayUnion: [{ status: 'no_show', at: '<t2>', by: 'Ana', stage: 'Convocado a entrevista' }],
     });
     expect(fields.interviewInviteCount).toEqual({ __increment: 1 });
+  });
+});
+
+describe('dar una cita nueva desde la página Entrevistas', () => {
+  // Ahí el candidato YA está en "Convocado a entrevista", así que no hay cambio de etapa
+  // que sellar: sin esta función, una segunda cita no se registraba nunca.
+  it('la primera cita sella la convocatoria', () => {
+    const fields = interviewAppointmentStamp(app({ stage: 'Convocado a entrevista' }));
+    expect(fields.interviewInvitedAt).toBe('<serverTimestamp>');
+    expect(fields.interviewLastInvitedAt).toBe('<serverTimestamp>');
+  });
+
+  it('una cita más, sin asistencia marcada, no vuelve a contar como convocatoria', () => {
+    const fields = interviewAppointmentStamp(app({ stage: 'Convocado a entrevista', interviewInvitedAt: '<t>' }));
+    expect(fields).toEqual({ interviewLastInvitedAt: '<serverTimestamp>' });
+  });
+
+  it('tras un "no vino", la cita nueva archiva esa marca y nace sin marcar', () => {
+    // Si la marca siguiera, la tarjeta diría "no vino" de una reunión que no ha ocurrido.
+    const fields = interviewAppointmentStamp(app({
+      stage: 'Convocado a entrevista',
+      interviewInvitedAt: '<t1>',
+      interviewAttendance: { status: 'no_show', markedAt: '<t2>', markedBy: 'Ana', stage: 'Convocado a entrevista' },
+    }));
+    expect(fields.interviewAttendance).toBe('<deleteField>');
+    expect(fields.interviewInviteCount).toEqual({ __increment: 1 });
+    expect(fields.interviewAttendanceLog).toEqual({
+      __arrayUnion: [{ status: 'no_show', at: '<t2>', by: 'Ana', stage: 'Convocado a entrevista' }],
+    });
   });
 });
 

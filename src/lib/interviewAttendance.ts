@@ -91,9 +91,13 @@ export function wasInvitedToInterview(app: any, participantStatus?: unknown): bo
   return INTERVIEW_INVITE_STAGES.includes(stage) || POST_INTERVIEW_STAGES.includes(stage);
 }
 
-/** ¿Tiene sentido ofrecer el botón de asistencia en esta postulación? */
-export function canMarkAttendance(app: any): boolean {
-  return wasInvitedToInterview(app);
+/**
+ * ¿Tiene sentido ofrecer el botón de asistencia en esta postulación? Mira también lo
+ * marcado en la página Entrevistas: sin eso, una asistencia que el Dashboard SÍ cuenta
+ * (registrada en una sesión, en alguien ya descartado) no se podría corregir desde aquí.
+ */
+export function canMarkAttendance(app: any, participantStatus?: unknown): boolean {
+  return wasInvitedToInterview(app, participantStatus);
 }
 
 /**
@@ -131,6 +135,36 @@ export function interviewInviteStamp(app: any, fromStage: string, toStage: strin
       at: previous.markedAt || Timestamp.now(),
       by: previous.markedBy || '',
       stage: previous.stage || fromStage || '',
+    });
+  }
+  return fields;
+}
+
+/**
+ * Dar una CITA nueva (añadir a una sesión en la página Entrevistas). No pasa por un
+ * cambio de etapa —el candidato ya está en "Convocado a entrevista"—, así que
+ * `interviewInviteStamp` no lo vería nunca.
+ *
+ * Si ya había una asistencia marcada, esto es una reconvocatoria de verdad: la marca
+ * anterior se archiva y la cita nueva nace sin marcar, para que la tarjeta no muestre
+ * "no vino" de una reunión que todavía no ha ocurrido.
+ */
+export function interviewAppointmentStamp(app: any): Record<string, any> {
+  const fields: Record<string, any> = { interviewLastInvitedAt: serverTimestamp() };
+  if (!app?.interviewInvitedAt) {
+    fields.interviewInvitedAt = serverTimestamp();
+    fields.interviewInviteCount = increment(1);
+  }
+
+  const previous = app?.interviewAttendance;
+  if (previous?.status) {
+    fields.interviewAttendance = deleteField();
+    fields.interviewInviteCount = increment(1);
+    fields.interviewAttendanceLog = arrayUnion({
+      status: previous.status,
+      at: previous.markedAt || Timestamp.now(),
+      by: previous.markedBy || '',
+      stage: previous.stage || app?.stage || '',
     });
   }
   return fields;

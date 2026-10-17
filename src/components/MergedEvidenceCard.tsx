@@ -1,5 +1,6 @@
 import React from 'react';
 import { Archive } from 'lucide-react';
+import { EVIDENCE_GROUPS } from '../lib/mergeCandidates';
 
 /**
  * Lo que traía el perfil duplicado y el principal ya tenía.
@@ -39,6 +40,20 @@ function answerBlocks(data: any): Array<{ title: string; answers: Record<string,
   return out;
 }
 
+/**
+ * De la copia completa de la postulación absorbida, solo se destaca lo que CHOCABA (lo
+ * que el principal ya tenía). El resto se copió a la postulación que sobrevive, y
+ * mostrarlo aquí otra vez haría dudar de cuál es el dato oficial.
+ */
+function conflictingOnly(entry: any): any {
+  const labels: string[] = Array.isArray(entry?.groups) ? entry.groups : [];
+  if (labels.length === 0) return {};
+  const fields = new Set(EVIDENCE_GROUPS.filter(g => labels.includes(g.label)).flatMap(g => g.fields));
+  const out: Record<string, any> = {};
+  Object.entries(entry?.data || {}).forEach(([k, v]) => { if (fields.has(k)) out[k] = v; });
+  return out;
+}
+
 export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
   if (!Array.isArray(entries) || entries.length === 0) return null;
 
@@ -54,8 +69,9 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
 
       <div className="space-y-4">
         {entries.map((entry: any, i: number) => {
-          const chips = scoreChips(entry?.data);
-          const blocks = answerBlocks(entry?.data);
+          const conflicting = conflictingOnly(entry);
+          const chips = scoreChips(conflicting);
+          const blocks = answerBlocks(conflicting);
           return (
             <div key={i} className="bg-amber-50/50 border border-amber-100 rounded-xl p-3 lg:p-4">
               <p className="text-xs font-bold text-slate-700">
@@ -63,9 +79,11 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
                 {fmtDate(entry?.at) && <span className="font-medium text-slate-400"> · unificado el {fmtDate(entry.at)}</span>}
                 {entry?.by && <span className="font-medium text-slate-400"> · por {entry.by}</span>}
               </p>
-              {Array.isArray(entry?.groups) && entry.groups.length > 0 && (
-                <p className="text-[11px] text-slate-500 mt-0.5">Traía: {entry.groups.join(', ')}</p>
-              )}
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                {Array.isArray(entry?.groups) && entry.groups.length > 0
+                  ? `Lo que ya estaba respondido aquí: ${entry.groups.join(', ')}`
+                  : 'Nada chocaba: su contenido pasó a esta postulación y aquí queda la copia de respaldo.'}
+              </p>
 
               {entry?.omitted ? (
                 <p className="mt-2 text-[11px] text-amber-800">

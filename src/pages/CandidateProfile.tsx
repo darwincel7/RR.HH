@@ -18,6 +18,7 @@ import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
+import { useParticipantStatuses } from '../lib/participantStatus';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
 import {
   DEFAULT_SCORECARD, blankScorecard, loadScorecard, resolveScorecardTemplate, answersForSave, hasInterviewEvidence,
@@ -69,6 +70,8 @@ export default function CandidateProfile() {
   const [showMerge, setShowMerge] = useState(false);
   // Otros perfiles con ESTE mismo teléfono: una consulta indexada, no toda la colección.
   const [samePhoneCount, setSamePhoneCount] = useState(0);
+  // Sus citas en la agenda de Entrevistas: lo marcado allí vale aquí (y al revés).
+  const participants = useParticipantStatuses({ candidateId });
   const [showPhoto, setShowPhoto] = useState(false);
   const [photoBusy, setPhotoBusy] = useState<'' | 'extract' | 'upload' | 'remove'>('');
   const photoInputRef = useRef<HTMLInputElement>(null);
@@ -1037,10 +1040,11 @@ export default function CandidateProfile() {
                   <div className="space-y-4">
                     {/* ¿Vino? Lo primero que se sabe de una entrevista, y lo que alimenta
                         el porcentaje de asistencia del Dashboard. Solo si fue convocado. */}
-                    {application && canMarkAttendance(application) && (
+                    {application && canMarkAttendance(application, participants.get(application.id)?.status) && (
                       <div className="pb-4 border-b border-slate-100">
                         <InterviewAttendanceButton
                           app={application}
+                          participantStatus={participants.get(application.id)?.status}
                           onMarked={(status) => setApplication((prev: any) => (prev ? {
                             ...prev,
                             interviewAttendance: status ? { ...(prev.interviewAttendance || {}), status } : null,

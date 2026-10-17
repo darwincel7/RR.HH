@@ -2376,6 +2376,15 @@ async function startServer() {
       }
       if (!candidateId || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
 
+      // El navegador conserva su sesión anónima, así que quien ya fue unificado vuelve
+      // con el MISMO uid. Sin seguir `mergedInto`, su nueva postulación nacería colgada
+      // del perfil muerto: invisible en el perfil vivo y reencolando su CV.
+      const ownProfile = await db.getDocData('candidates', candidateId).catch(() => null);
+      if (typeof ownProfile?.mergedInto === 'string' && ownProfile.mergedInto) {
+        const live = await db.getDocData('candidates', ownProfile.mergedInto).catch(() => null);
+        if (live && !live.mergedInto) candidateId = ownProfile.mergedInto;
+      }
+
       const vacancy = await db.getDocData('vacancies', vacancyId);
       if (!vacancy || !vacancy.active) return res.status(400).json({ error: 'La vacante no existe o ya no está activa.' });
 
@@ -3149,7 +3158,19 @@ async function startServer() {
 
       // Una postulación archivada que ya no existe: el participante de la sesión de
       // entrevista tiene que apuntar a la que sobrevive, o la agenda queda huérfana.
+      // Se siembra con lo que absorbieron unificaciones ANTERIORES: así un reintento tras
+      // un fallo a medias sigue sabiendo a dónde mandar esas citas.
       const reassignedApp = new Map<string, string>();
+      for (const app of primaryApps) {
+        if (!Array.isArray(app.mergedEvidence)) continue;
+        for (const entry of app.mergedEvidence) {
+          if (entry?.fromApplicationId) reassignedApp.set(entry.fromApplicationId, app.id);
+        }
+      }
+      // `setDocData` reemplaza los arrays, no los concatena: con tres postulaciones del
+      // duplicado a la misma vacante, la última escritura borraría lo archivado por la
+      // anterior. El archivo se acumula aquí, en memoria, por postulación destino.
+      const archiveByApp = new Map<string, any[]>();
 
       // 1) Misma vacante: la postulación del principal absorbe a la del duplicado.
       for (const combine of plan.combines) {
@@ -3157,23 +3178,29 @@ async function startServer() {
           || duplicateApps.find((a: any) => a.id === combine.intoAppId);
         const fields: Record<string, any> = { ...combine.fields };
 
-        if (Object.keys(combine.archivedData).length > 0) {
-          // La evidencia que el principal ya tenía se queda; la del duplicado se archiva
-          // tal cual para poder consultarla (es el caso "un test en cada perfil").
-          // Si pesa demasiado, se guarda la referencia en vez del contenido: un documento
-          // de Firestore no puede pasar de 1MB.
-          const json = JSON.stringify(combine.archivedData);
-          const tooBig = json.length > 200_000;
-          fields.mergedEvidence = [
-            ...(Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : []),
-            {
-              ...origin,
-              fromApplicationId: combine.fromAppId,
-              groups: combine.archived,
-              ...(tooBig ? { omitted: true } : { data: combine.archivedData }),
-            },
-          ];
-        }
+        // La postulación del duplicado se borra al final, así que aquí se guarda el
+        // documento COMPLETO, no solo la evidencia que chocaba: `submittedAt`,
+        // `vacancyHistory` y cualquier otro campo propio desaparecerían con ella.
+        // Si pesa demasiado, se guarda la referencia en vez del contenido: un documento
+        // de Firestore no puede pasar de 1MB.
+        const source = duplicateApps.find((a: any) => a.id === combine.fromAppId) || {};
+        const snapshot = { ...source };
+        delete (snapshot as any).mergedEvidence; // lo suyo ya viaja en su propia entrada
+        const tooBig = JSON.stringify(snapshot).length > 200_000;
+        const archive = [
+          ...(archiveByApp.get(combine.intoAppId)
+            || (Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : [])),
+          {
+            ...origin,
+            fromApplicationId: combine.fromAppId,
+            groups: combine.archived,
+            ...(tooBig ? { omitted: true } : { data: snapshot }),
+          },
+          // Lo que la postulación absorbida ya traía archivado de otra unificación.
+          ...(Array.isArray(source.mergedEvidence) ? source.mergedEvidence : []),
+        ];
+        archiveByApp.set(combine.intoAppId, archive);
+        fields.mergedEvidence = archive;
         if (combine.intoAppId !== undefined) {
           await db.setDocData('applications', combine.intoAppId, fields);
           reassignedApp.set(combine.fromAppId, combine.intoAppId);
@@ -3241,7 +3268,10 @@ async function startServer() {
       // Si el análisis del CV llegó del duplicado, el estado tiene que acompañarlo: con
       // `aiStatus: 'error'` heredado, el perfil mostraría "Error al procesar el CV"
       // teniendo el análisis completo delante.
-      const aiStatusFix = plan.candidateFields.aiExtraction && primary.aiStatus !== 'completed'
+      // Solo el caso 'error'. Con `!== 'completed'` también pisaba un análisis PENDIENTE
+      // del CV propio del principal: `listPendingCandidates` dejaría de verlo y el perfil
+      // mostraría su CV junto al análisis del CV del otro.
+      const aiStatusFix = plan.candidateFields.aiExtraction && primary.aiStatus === 'error'
         ? { aiStatus: 'completed' }
         : {};
       await db.setDocData('candidates', primaryId, {

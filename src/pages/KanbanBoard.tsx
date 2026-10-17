@@ -24,6 +24,7 @@ import StageNotifyToggle from '../components/StageNotifyToggle';
 import { useStageNotifications } from '../lib/useStageNotifications';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import { interviewInviteStamp, isInterviewStage } from '../lib/interviewAttendance';
+import { useParticipantStatuses } from '../lib/participantStatus';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -38,6 +39,9 @@ export default function KanbanBoard() {
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
   // Per-stage "notify on move" switches (one click on each column header).
   const stageNotify = useStageNotifications();
+  // Lo marcado en la agenda de Entrevistas: así el botón ✅/❌ de la tarjeta no dice
+  // "sin registrar" de alguien que el Dashboard ya cuenta como asistido.
+  const participants = useParticipantStatuses({ all: true });
   useEffect(() => {
     loadAllNotesByCandidate().then(setNotesByCandidate).catch(e => console.warn('Notas no disponibles para la búsqueda:', e));
   }, []);
@@ -831,6 +835,7 @@ export default function KanbanBoard() {
                                     El clic no abre el perfil ni arrastra la tarjeta. */}
                                 <InterviewAttendanceButton
                                   app={item}
+                                  participantStatus={participants.get(item.id)?.status}
                                   compact
                                   onMarked={(status) => setApplications(prev => prev.map(a => (
                                     a.id === item.id

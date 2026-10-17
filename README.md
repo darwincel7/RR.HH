@@ -98,6 +98,7 @@ error es silencioso y caro:
 | [`src/lib/whatsapp.automation.test.ts`](src/lib/whatsapp.automation.test.ts) | Lo que de verdad envía un cambio de etapa: redacción distinta por candidato pero idéntica en un reintento, claves de la notificación, canal "solo correo" y que un reintento nunca repita el correo |
 | [`src/lib/interviewAttendance.test.ts`](src/lib/interviewAttendance.test.ts) | Quién cuenta como convocado a entrevista (el sello sobrevive al descarte y al avance), que avanzar de etapa no vuelva a contar ni borre la marca, y que los porcentajes nunca den NaN |
 | [`src/lib/mergeCandidates.test.ts`](src/lib/mergeCandidates.test.ts) | Unificar dos perfiles: nada se sobreescribe, nada se pierde (el test del duplicado se archiva), un "Descartado" no gana a una etapa activa y dos postulaciones a la misma vacante acaban en una |
+| [`src/lib/participantStatus.test.ts`](src/lib/participantStatus.test.ts) | Con varias citas de la misma postulación manda la última: marcar la de hoy no puede borrar el "asistió" real de la de enero |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -162,7 +163,11 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   convocatoria nueva; una reconvocatoria de verdad archiva la marca anterior en
   `interviewAttendanceLog` y deja la nueva cita sin marcar. La página *Entrevistas* sigue
   marcando asistencia en su sesión, pero escribe también en la postulación, así que las
-  dos pantallas no pueden decir cosas distintas. Lógica y métricas en
+  dos pantallas no pueden decir cosas distintas: el botón lee lo marcado en la agenda y
+  marcar desde el Kanban toca **solo la última cita** (escribir en todas borraría el
+  "asistió" real de una sesión anterior). Añadir a alguien a una sesión nueva cuando ya
+  tenía asistencia marcada es una reconvocatoria: archiva esa marca y la cita nueva nace
+  sin marcar. Lógica y métricas en
   [`src/lib/interviewAttendance.ts`](src/lib/interviewAttendance.ts).
   Además del porcentaje sobre el total de convocados, el panel muestra el porcentaje
   **sobre lo ya registrado**: es el número comparable entre períodos mientras falten
@@ -180,14 +185,22 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   postulación a una vacante donde el principal no está se **mueve** conservando su id (los
   links `/eval` y `/test` ya enviados siguen funcionando); dos postulaciones a la **misma**
   vacante se combinan en una, que se queda con la etapa más avanzada —un "Descartado"
-  nunca gana a una etapa activa— y con la evidencia que faltaba. Lo que el principal ya
-  tenía se conserva, y lo del duplicado se archiva en `mergedEvidence` y se muestra en el
-  perfil ("De un perfil unificado"): nada desaparece en silencio.
+  nunca gana a una etapa activa— y con la evidencia que faltaba. Cuando los dos tienen la
+  misma evidencia (un test cada uno) **no se mezcla nada**: se conserva la del principal
+  entera y la otra se archiva, porque juntar la puntuación de una con las respuestas de la
+  otra dejaría una postulación que se contradice. La postulación absorbida se guarda
+  **completa** en `mergedEvidence` y se muestra en el perfil ("De un perfil unificado"),
+  pero su documento desaparece: el link de test/formulario enviado *desde ese perfil* deja
+  de funcionar (la pantalla lo advierte antes de confirmar).
   El perfil duplicado **no se borra**: queda con `mergedInto`, deja de recibir
-  postulaciones y mensajes (las búsquedas por teléfono/correo del servidor siguen ese
-  rastro hasta el perfil vivo) y sus links viejos redirigen al perfil principal. El otro
-  teléfono/correo se guarda como `alternatePhones`/`alternateEmails`, entra en el buscador
-  y vuelve a enlazar un WhatsApp entrante con la persona.
+  postulaciones y mensajes y sus links viejos redirigen al perfil principal. Las búsquedas
+  de candidato del servidor siguen ese rastro hasta el perfil vivo, y `/api/apply` lo
+  sigue también para la sesión del propio postulante: su navegador conserva el UID
+  anónimo, así que sin eso su siguiente postulación nacería colgada del perfil muerto. El
+  otro teléfono/correo se guarda como `alternatePhones`/`alternateEmails`: entra en el
+  buscador, vuelve a enlazar un WhatsApp entrante con la persona y **el deduplicado de
+  `/api/apply` también lo mira**, que es lo que evita el tercer duplicado cuando vuelve a
+  aplicar con ese número.
   La pantalla propone los perfiles parecidos (mismo teléfono, correo o nombre completo),
   deja buscar cualquier otro y muestra **exactamente** qué va a pasar antes de confirmar;
   la vista previa la calcula el mismo módulo que ejecuta el servidor

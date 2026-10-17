@@ -1,11 +1,12 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, documentId, getDocs, query, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { latestByApplication } from '../lib/participantStatus';
 import { Link } from 'react-router-dom';
 import { UserCheck, UserX, Users, HelpCircle, Loader2, ArrowRight } from 'lucide-react';
 import {
   INTERVIEW_INVITE_STAGES, POST_INTERVIEW_STAGES,
-  computeInterviewFunnel, groupInterviewFunnel, invitedWithinDays, fromParticipantStatus,
+  computeInterviewFunnel, groupInterviewFunnel, invitedWithinDays,
   type InterviewFunnel,
 } from '../lib/interviewAttendance';
 
@@ -85,8 +86,16 @@ export default function InterviewAttendanceDashboard() {
         // esa consulta falla (o ni se puede construir), el panel sigue funcionando con
         // la etapa actual en vez de quedarse en blanco. Por eso el try va también
         // alrededor de query().
+        //
+        // Con un período elegido se pide solo ese rango: el panel vive en la pantalla de
+        // inicio y leer todas las postulaciones de la historia en cada visita cuesta
+        // lecturas de verdad. "Todo" es una decisión explícita de quien lo pulsa.
         const stampedQuery = async () => {
           try {
+            if (days > 0) {
+              const cutoff = new Date(Date.now() - days * 86_400_000);
+              return await getDocs(query(appsCol, where('interviewInvitedAt', '>=', cutoff)));
+            }
             return await getDocs(query(appsCol, where('interviewInvitedAt', '!=', null)));
           } catch (e) {
             console.warn('No se pudo leer por fecha de convocatoria (se usa la etapa actual):', e);
@@ -110,14 +119,28 @@ export default function InterviewAttendanceDashboard() {
         const titles: Record<string, string> = {};
         vacSnap.docs.forEach(d => { titles[d.id] = (d.data() as any).title || 'Vacante'; });
 
+        // De cada postulación, su ÚLTIMA cita: entre dos sesiones manda la más reciente
+        // (la anterior ya pasó y su resultado quedó archivado).
+        const latest = latestByApplication(partSnap?.docs.map(d => ({ id: d.id, ...(d.data() as any) })) || []);
         const parts = new Map<string, unknown>();
-        partSnap?.docs.forEach(d => {
-          const p = d.data() as any;
-          const status = fromParticipantStatus(p.status);
-          // Entre dos sesiones de la misma postulación gana una asistencia real sobre
-          // un 'pending' (se le convocó dos veces y vino a una).
-          if (p.applicationId && (status || !parts.has(p.applicationId))) parts.set(p.applicationId, p.status);
-        });
+        latest.forEach((row, appId) => parts.set(appId, row.status));
+
+        // Quien fue marcado en una sesión ANTES de que existiera el sello y luego se
+        // descartó no aparece en ninguna de las dos consultas: ni tiene sello ni está en
+        // una etapa de entrevista. Sin esto, esas ausencias históricas se perderían y el
+        // porcentaje de "no se presentó" se leería más bajo de lo que fue — justo la
+        // distorsión que este panel existe para evitar.
+        const missing = Array.from(latest.keys()).filter(id => id && !byId.has(id));
+        for (let i = 0; i < missing.length && i < 300; i += 30) {
+          try {
+            const snap = await getDocs(query(appsCol, where(documentId(), 'in', missing.slice(i, i + 30))));
+            snap.docs.forEach(d => byId.set(d.id, { id: d.id, ...(d.data() as any) }));
+          } catch (e) {
+            console.warn('No se pudieron leer las postulaciones de la agenda:', e);
+            break;
+          }
+        }
+        if (!alive) return;
 
         setApps(Array.from(byId.values()));
         setVacancyTitles(titles);
@@ -130,7 +153,7 @@ export default function InterviewAttendanceDashboard() {
       }
     })();
     return () => { alive = false; };
-  }, []);
+  }, [days]);
 
   const inPeriod = useMemo(() => invitedWithinDays(apps, days), [apps, days]);
   const funnel = useMemo(() => computeInterviewFunnel(inPeriod, participantStatus), [inPeriod, participantStatus]);

@@ -6,9 +6,10 @@ import Modal from './ui/Modal';
 import CandidateAvatar from './CandidateAvatar';
 import { apiFetch } from '../lib/api';
 import {
-  findDuplicateCandidates, planCandidateMerge, normalizeName,
+  findDuplicateCandidates, planCandidateMerge,
   DUPLICATE_REASON_LABEL, type DuplicateCandidate,
 } from '../lib/mergeCandidates';
+import { prepareSearch, smartMatch } from '../lib/smartSearch';
 
 interface Props {
   isOpen: boolean;
@@ -80,22 +81,35 @@ export default function MergeCandidatesModal({ isOpen, onClose, primaryId, prima
     [primaryId, primary, allCandidates],
   );
 
+  // Los candidatos entre los que se puede buscar (nunca uno ya unificado, ni el propio).
+  const pool = useMemo(
+    () => allCandidates.filter(c => c.id !== primaryId && !c.mergedInto),
+    [allCandidates, primaryId],
+  );
+
+  // El MISMO buscador del resto de la app (acentos, cualquier formato de teléfono,
+  // varias palabras y tolerancia a errores de escritura). Aquí importa más que en
+  // ningún sitio: un nombre mal escrito que no aparece es un duplicado que se queda
+  // en la base.
+  const searchIndex = useMemo(() => pool.map(c => prepareSearch([
+    { label: 'Nombre', value: c.fullName || c.name },
+    { label: 'Teléfono', value: c.phone, kind: 'phone' },
+    { label: 'Otro teléfono', value: c.alternatePhones, kind: 'phone' },
+    { label: 'Correo', value: c.email },
+    { label: 'Otro correo', value: c.alternateEmails },
+    { label: 'Ubicación', value: c.city },
+  ])), [pool]);
+
   const searchResults = useMemo(() => {
-    const q = normalizeName(term);
-    const digits = term.replace(/\D/g, '');
-    if (q.length < 3 && digits.length < 4) return [] as DuplicateCandidate[];
-    return allCandidates
-      .filter(c => c.id !== primaryId && !c.mergedInto)
-      .filter(c => {
-        const name = normalizeName(c.fullName || c.name);
-        const phone = String(c.phoneNormalized || c.phone || '').replace(/\D/g, '');
-        const email = String(c.email || '').toLowerCase();
-        return (q.length >= 3 && (name.includes(q) || email.includes(q)))
-          || (digits.length >= 4 && phone.includes(digits));
-      })
+    const q = term.trim();
+    if (q.length < 3 && q.replace(/\D/g, '').length < 4) return [] as DuplicateCandidate[];
+    // Exacto primero; solo si no hay nada, tolerando errores de escritura.
+    const run = (fuzzy: boolean) => pool.filter((_, i) => smartMatch(searchIndex[i], q, { fuzzy }).matched);
+    const exact = run(false);
+    return (exact.length > 0 ? exact : run(true))
       .slice(0, 12)
       .map(c => ({ id: c.id, reasons: [], candidate: c } as DuplicateCandidate));
-  }, [term, allCandidates, primaryId]);
+  }, [term, pool, searchIndex]);
 
   const selected = allCandidates.find(c => c.id === selectedId) || null;
 
@@ -313,6 +327,11 @@ export default function MergeCandidatesModal({ isOpen, onClose, primaryId, prima
                             <> Los dos tienen <strong>{c.archived.join(', ')}</strong>: se conserva el de este perfil y
                             el del duplicado queda archivado en la postulación para consultarlo.</>
                           )}
+                          {' '}
+                          <span className="text-slate-500">
+                            Su postulación se absorbe (se guarda copia completa), así que el link de test/formulario
+                            que se le envió <strong>desde ese perfil</strong> deja de funcionar; el de este sigue igual.
+                          </span>
                         </li>
                       ))}
                       {plan && plan.filled.length > 0 && <li>✍️ Se completan datos vacíos: <strong>{plan.filled.join(', ')}</strong>.</li>}

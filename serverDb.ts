@@ -204,12 +204,18 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
         const readCandidate = async (id: string) => (await adb.collection('candidates').doc(id).get()).data() ?? null;
-        if (phoneNormalized) {
-          const s = await adb.collection('candidates').where('phoneNormalized', '==', phoneNormalized).limit(1).get();
-          if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
-        }
-        if (email) {
-          const s = await adb.collection('candidates').where('email', '==', email).limit(1).get();
+        // El teléfono/correo con el que nació un perfil duplicado queda guardado al
+        // unificarlo. Buscarlo también ahí es lo que evita el TERCER duplicado: la misma
+        // persona volviendo a escribir el número con el que ya la conocíamos.
+        const attempts: Array<[string, string, unknown]> = [
+          ['phoneNormalized', '==', phoneNormalized],
+          ['email', '==', email],
+          ['alternatePhones', 'array-contains', phoneNormalized],
+          ['alternateEmails', 'array-contains', email],
+        ];
+        for (const [field, op, value] of attempts) {
+          if (!value) continue;
+          const s = await adb.collection('candidates').where(field, op as any, value).limit(1).get();
           if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
         }
         return null;
@@ -529,12 +535,16 @@ async function initClient(): Promise<ServerDb> {
         const snap = await getDoc(doc(cdb, 'candidates', id));
         return snap.exists() ? snap.data() : null;
       };
-      if (phoneNormalized) {
-        const s = await getDocs(query(collection(cdb, 'candidates'), where('phoneNormalized', '==', phoneNormalized), limit(1)));
-        if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
-      }
-      if (email) {
-        const s = await getDocs(query(collection(cdb, 'candidates'), where('email', '==', email), limit(1)));
+      // Ver el modo admin: también por los alternativos que dejó una unificación.
+      const attempts: Array<[string, any, unknown]> = [
+        ['phoneNormalized', '==', phoneNormalized],
+        ['email', '==', email],
+        ['alternatePhones', 'array-contains', phoneNormalized],
+        ['alternateEmails', 'array-contains', email],
+      ];
+      for (const [field, op, value] of attempts) {
+        if (!value) continue;
+        const s = await getDocs(query(collection(cdb, 'candidates'), where(field, op, value), limit(1)));
         if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
       }
       return null;
