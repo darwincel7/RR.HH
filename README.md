@@ -99,6 +99,7 @@ error es silencioso y caro:
 | [`src/lib/interviewAttendance.test.ts`](src/lib/interviewAttendance.test.ts) | Quién cuenta como convocado a entrevista (el sello sobrevive al descarte y al avance), que avanzar de etapa no vuelva a contar ni borre la marca, y que los porcentajes nunca den NaN |
 | [`src/lib/mergeCandidates.test.ts`](src/lib/mergeCandidates.test.ts) | Unificar dos perfiles: nada se sobreescribe, nada se pierde (el test del duplicado se archiva), un "Descartado" no gana a una etapa activa y dos postulaciones a la misma vacante acaban en una |
 | [`src/lib/participantStatus.test.ts`](src/lib/participantStatus.test.ts) | Con varias citas de la misma postulación manda la última: marcar la de hoy no puede borrar el "asistió" real de la de enero |
+| [`src/lib/duplicateGroups.test.ts`](src/lib/duplicateGroups.test.ts) | Detectar duplicados en toda la base: agrupa de forma transitiva (A~B por teléfono y B~C por correo son un grupo) y un nombre suelto como "Ana" nunca agrupa a personas distintas |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -201,6 +202,13 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   buscador, vuelve a enlazar un WhatsApp entrante con la persona y **el deduplicado de
   `/api/apply` también lo mira**, que es lo que evita el tercer duplicado cuando vuelve a
   aplicar con ese número.
+  **Revisar duplicados** (*Candidatos* → botón en la cabecera) hace la pregunta con la
+  que se limpia de verdad: cuántos duplicados hay en la base y cuáles. Agrupa **toda** la
+  base por teléfono, correo y nombre completo, de forma transitiva (si A y B comparten el
+  teléfono y B y C el correo, los tres son un grupo: tratarlos como dos parejas dejaría a
+  C fuera), propone dentro de cada grupo el perfil más completo como principal y lanza la
+  unificación de siempre con su vista previa. Un nombre suelto ("Ana") nunca agrupa: una
+  unificación equivocada no se deshace con un botón.
   La pantalla propone los perfiles parecidos (mismo teléfono, correo o nombre completo),
   deja buscar cualquier otro y muestra **exactamente** qué va a pasar antes de confirmar;
   la vista previa la calcula el mismo módulo que ejecuta el servidor

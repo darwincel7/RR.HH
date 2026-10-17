@@ -6,7 +6,7 @@ import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, 
 import { isStageMutedNow } from '../lib/stageNotifications';
 import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
-import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles, ScanFace } from 'lucide-react';
+import { Users, Search, Filter, Download, Star, ExternalLink, Trash2, AlertTriangle, MapPin, UploadCloud, CheckSquare, X, Upload, RefreshCw, ArrowRightLeft, Sparkles, ScanFace, Merge } from 'lucide-react';
 import { Link, useSearchParams } from 'react-router-dom';
 import Modal from '../components/ui/Modal';
 import { PIPELINE_STAGES } from '../constants/stages';
@@ -16,6 +16,7 @@ import { normalizePhone } from '../lib/phone';
 import { smartMatch, prepareSearch, type SearchField, type SearchHit } from '../lib/smartSearch';
 import { loadAllNotesByCandidate, deleteAllCandidateNotes, type CandidateNote } from '../lib/notes';
 import MoveVacancyModal from '../components/MoveVacancyModal';
+import DuplicateProfilesPanel from '../components/DuplicateProfilesPanel';
 import CandidateAvatar from '../components/CandidateAvatar';
 import { computeOverallScore } from '../lib/candidateScore';
 import { interviewInviteStamp } from '../lib/interviewAttendance';
@@ -73,6 +74,7 @@ export default function CandidatesList() {
   // "How do we notify this batch?" — asked before a bulk move to a messaging stage.
   const { ask: askBulkNotify, element: bulkNotifyModal } = useBulkNotifyConfirm();
   const [isBulkUploadModalOpen, setIsBulkUploadModalOpen] = useState(false);
+  const [showDuplicates, setShowDuplicates] = useState(false);
 
   const PAGE_SIZE = 100;
   const [lastDoc, setLastDoc] = useState<any>(null);
@@ -658,6 +660,14 @@ export default function CandidatesList() {
             {photoScan ? `Buscando fotos… ${photoScan.done}/${photoScan.total} (${photoScan.found} encontradas)` : 'Buscar fotos en los CV'}
           </button>
           <button
+            onClick={() => setShowDuplicates(true)}
+            title="Perfiles de la base que parecen ser la misma persona (mismo teléfono, correo o nombre completo)"
+            className="flex items-center px-4 py-2 bg-white border border-slate-200 text-slate-700 text-sm font-bold rounded-lg hover:bg-slate-50 transition-colors shadow-sm"
+          >
+            <Merge className="w-4 h-4 mr-2" />
+            Revisar duplicados
+          </button>
+          <button
             onClick={() => setIsBulkUploadModalOpen(true)}
             className="flex items-center px-4 py-2 bg-indigo-50 border border-indigo-100 text-indigo-700 text-sm font-bold rounded-lg hover:bg-indigo-100 transition-colors shadow-sm"
           >
@@ -996,6 +1006,13 @@ export default function CandidatesList() {
         onClose={() => setShowMoveVacancy(false)}
         apps={filteredCandidates.filter(c => selectedApps.includes(c.id))}
         onDone={() => { setSelectedApps([]); refresh(); }}
+      />
+
+      {/* Duplicados de toda la base: cuántos hay y cuáles. Al unificar uno, la lista se
+          actualiza sin recargar; la base se relee al reabrir el panel. */}
+      <DuplicateProfilesPanel
+        isOpen={showDuplicates}
+        onClose={() => { setShowDuplicates(false); refresh(); }}
       />
 
       {/* Bulk Upload Modal */}
