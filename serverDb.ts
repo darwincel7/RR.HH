@@ -52,6 +52,14 @@ export interface ServerDb {
    * tercer uso de mayúsculas distinto se escapa y lo recoge "Revisar duplicados".
    */
   listCandidatesByPhoneOrEmail(phone: string, email: string, max: number): Promise<any[]>;
+  /**
+   * Escribe en un candidato SOLO si su `cvUrl` sigue siendo el que se leyó; devuelve
+   * false si cambió entre medias. Leer un CV tarda decenas de segundos y la persona
+   * puede volver a aplicar con otro en ese rato: comparar y escribir por separado deja
+   * una ventana en la que esta lectura pisa la cola del CV nuevo, que ya no se leería
+   * nunca. En modo admin es una transacción; en modo cliente, una transacción del SDK.
+   */
+  writeCandidateIfCvUnchanged(id: string, expectedCvUrl: string | null | undefined, data: Record<string, any>): Promise<boolean>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -167,6 +175,18 @@ export function contactLookupAttempts(phone: unknown, email: unknown): Array<[st
 }
 
 /**
+ * A qué dato de contacto pertenece una consulta: al teléfono o al correo.
+ *
+ * La búsqueda tiene que agotar las DOS dimensiones. Si se corta al juntar suficientes
+ * resultados y diez perfiles comparten el teléfono (un número de negocio, una familia
+ * grande), las consultas del correo no llegan a ejecutarse — y el perfil que sí es esta
+ * persona puede estar fuera de ese grupo arbitrario de diez.
+ */
+export function lookupDimension(field: string): 'phone' | 'email' {
+  return field.toLowerCase().includes('mail') ? 'email' : 'phone';
+}
+
+/**
  * Sigue el rastro de una unificación de perfiles: si el candidato encontrado fue
  * unificado en otro (`mergedInto`), devuelve el id del perfil VIVO.
  *
@@ -259,12 +279,33 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async listCandidatesByPhoneOrEmail(phone, email, max) {
         const byId = new Map<string, any>();
+        // El tope es POR DIMENSIÓN, no global (ver `lookupDimension`): cortar al llegar a
+        // `max` dejaba sin ejecutar las consultas del correo cuando muchos perfiles
+        // comparten el teléfono.
+        const found = new Map<string, number>();
         for (const [field, op, value] of contactLookupAttempts(phone, email)) {
+          const dim = lookupDimension(field);
+          if ((found.get(dim) || 0) >= max) continue;
           const snap = await adb.collection('candidates').where(field, op as any, value).limit(max).get();
-          snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
-          if (byId.size >= max) break;
+          snap.docs.forEach((d: any) => {
+            if (byId.has(d.id)) return;
+            byId.set(d.id, { id: d.id, ...d.data() });
+            found.set(dim, (found.get(dim) || 0) + 1);
+          });
         }
-        return Array.from(byId.values()).slice(0, max);
+        return Array.from(byId.values());
+      },
+      async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
+        const ref = adb.collection('candidates').doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const current = snap.exists ? snap.data() : null;
+          // Solo manda cuando AMBOS existen: un `cvUrl` vacío en cualquiera de los dos
+          // lados no prueba que haya cambiado nada (perfiles sin CV, lecturas sueltas).
+          if (current && expectedCvUrl && current.cvUrl && current.cvUrl !== expectedCvUrl) return false;
+          tx.set(ref, data, { merge: true });
+          return true;
+        });
       },
       async deleteDocData(collection, id) {
         await adb.collection(collection).doc(id).delete();
@@ -554,7 +595,7 @@ async function initClient(): Promise<ServerDb> {
   const { initializeApp } = await import('firebase/app');
   const {
     initializeFirestore, collection, query, where, limit, getDocs, addDoc,
-    serverTimestamp, doc, getDoc, setDoc, deleteDoc, writeBatch,
+    serverTimestamp, doc, getDoc, setDoc, deleteDoc, writeBatch, runTransaction,
   } = await import('firebase/firestore');
 
   const app = initializeApp(firebaseConfig, 'server-client-fallback');
@@ -575,6 +616,16 @@ async function initClient(): Promise<ServerDb> {
       batch.set(doc(cdb, 'candidates', candidate.id), candidate.data, { merge: true });
       batch.set(doc(cdb, 'applications', application.id), application.data, { merge: true });
       await batch.commit();
+    },
+    async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
+      const ref = doc(cdb, 'candidates', id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        const current = snap.exists() ? (snap.data() as any) : null;
+        if (current && expectedCvUrl && current.cvUrl && current.cvUrl !== expectedCvUrl) return false;
+        tx.set(ref, data, { merge: true });
+        return true;
+      });
     },
     async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
       const readCandidate = async (id: string) => {
@@ -597,10 +648,17 @@ async function initClient(): Promise<ServerDb> {
     },
     async listCandidatesByPhoneOrEmail(phone, email, max) {
       const byId = new Map<string, any>();
+      // Tope por dimensión, igual que en modo admin (ver `lookupDimension`).
+      const found = new Map<string, number>();
       for (const [field, op, value] of contactLookupAttempts(phone, email)) {
+        const dim = lookupDimension(field);
+        if ((found.get(dim) || 0) >= max) continue;
         const snap = await getDocs(query(collection(cdb, 'candidates'), where(field, op as any, value), limit(max)));
-        snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
-        if (byId.size >= max) break;
+        snap.docs.forEach(d => {
+          if (byId.has(d.id)) return;
+          byId.set(d.id, { id: d.id, ...(d.data() as any) });
+          found.set(dim, (found.get(dim) || 0) + 1);
+        });
       }
       return Array.from(byId.values()).slice(0, max);
     },

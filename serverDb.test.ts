@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contactLookupAttempts } from './serverDb';
+import { contactLookupAttempts, lookupDimension } from './serverDb';
 
 /**
  * Buscar a una persona por su contacto es el paso del que depende reconocerla: si la
@@ -48,5 +48,23 @@ describe('las consultas para encontrar a alguien por su contacto', () => {
     // Sin teléfono, solo las del correo; sin nada, ninguna consulta.
     expect(contactLookupAttempts('', 'ana@mail.com').every(([f]) => f.toLowerCase().includes('mail'))).toBe(true);
     expect(contactLookupAttempts('', '')).toEqual([]);
+  });
+});
+
+describe('las dos dimensiones del contacto se agotan por separado', () => {
+  it('cada consulta sabe si es del teléfono o del correo', () => {
+    expect(lookupDimension('phoneNormalized')).toBe('phone');
+    expect(lookupDimension('phone')).toBe('phone');
+    expect(lookupDimension('alternatePhones')).toBe('phone');
+    expect(lookupDimension('email')).toBe('email');
+    expect(lookupDimension('alternateEmails')).toBe('email');
+  });
+
+  it('con teléfono y correo hay consultas de las DOS', () => {
+    // El tope es por dimensión: si diez perfiles comparten el teléfono (un número de
+    // negocio), cortar ahí dejaba sin ejecutar las del correo, y el perfil que sí es
+    // esta persona podía quedar fuera de ese grupo de diez.
+    const dims = new Set(contactLookupAttempts('8095551234', 'ana@mail.com').map(([f]) => lookupDimension(f)));
+    expect(dims).toEqual(new Set(['phone', 'email']));
   });
 });

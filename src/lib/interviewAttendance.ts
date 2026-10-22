@@ -104,6 +104,11 @@ export interface OptimisticAttendance {
  * Por eso la marca vale solo mientras los datos sigan diciendo lo que decían al
  * guardarla (`was`): en cuanto cambian —porque llegó nuestra propia escritura o la de
  * alguien más— manda lo que llega.
+ *
+ * Y vale solo UNA vez: en cuanto los datos la confirman, el componente la tira
+ * (`keepOptimistic`). Si se quedara guardada, alguien que más tarde devolviera la
+ * asistencia a su valor de antes la resucitaría — se volvería a ver lo que se pulsó hace
+ * rato, y el clic siguiente partiría otra vez de un valor obsoleto.
  */
 export function effectiveAttendance(
   backing: AttendanceStatus | null,
@@ -112,6 +117,22 @@ export function effectiveAttendance(
 ): AttendanceStatus | null {
   if (!mark || !appId || mark.appId !== appId) return backing;
   return backing === mark.was ? mark.status : backing;
+}
+
+/**
+ * La marca que hay que CONSERVAR tras un cambio en los datos, o null si ya sobra.
+ *
+ * Se tira en cuanto los datos la confirman (ya no aporta nada, y guardada resucitaría
+ * más tarde) y al cambiar de postulación en el perfil, donde el componente no se
+ * desmonta y la marca no es de la nueva.
+ */
+export function keepOptimistic(
+  mark: OptimisticAttendance | null,
+  backing: AttendanceStatus | null,
+  appId: string | undefined,
+): OptimisticAttendance | null {
+  if (!mark || !appId || mark.appId !== appId) return null;
+  return backing === mark.status ? null : mark;
 }
 
 /**

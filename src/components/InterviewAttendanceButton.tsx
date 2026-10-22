@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { doc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { latestByApplication } from '../lib/participantStatus';
 import { Loader2, UserCheck } from 'lucide-react';
 import {
   ATTENDANCE_OPTIONS, attendanceFields, attendanceOf, canMarkAttendance, effectiveAttendance,
-  type AttendanceStatus, type OptimisticAttendance,
+  keepOptimistic, type AttendanceStatus, type OptimisticAttendance,
 } from '../lib/interviewAttendance';
 
 interface Props {
@@ -40,9 +40,15 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
   // persona marcó esa misma asistencia desde la página Entrevistas.
   const [justSaved, setJustSaved] = useState<OptimisticAttendance | null>(null);
 
+  const backing = attendanceOf(app, participantStatus);
+  // En cuanto los datos confirman la marca, se tira: guardada, un cambio posterior que
+  // devolviera la asistencia a su valor de antes la resucitaría (ver `keepOptimistic`).
+  useEffect(() => {
+    setJustSaved(prev => keepOptimistic(prev, backing, app?.id));
+  }, [backing, app?.id]);
+
   if (!app?.id || !canMarkAttendance(app, participantStatus)) return null;
 
-  const backing = attendanceOf(app, participantStatus);
   const current = effectiveAttendance(backing, justSaved, app.id);
   // ¿Lo que se ve viene de nuestra marca o ya lo confirmaron los datos? Solo para el
   // texto de "quién lo marcó y cuándo", que sale del documento.

@@ -832,6 +832,22 @@ async function photoBackfillPass(): Promise<void> {
 
 // Parses one already-claimed candidate's CV and writes the results. Isolated so one
 // candidate's failure never aborts the others in the batch. Returns true when the CV
+// El CV de un candidato cambió mientras la IA leía el anterior, así que esa lectura se
+// descarta. Lo normal es que quien lo cambió lo dejara en la cola; solo si quedó colgado
+// en otro estado se repone, para no deshacer el `claim` de un tick que ya lo tomara —eso
+// serían dos lecturas de IA del mismo CV.
+async function requeueIfStranded(id: string) {
+  try {
+    const now = await db.getDocData('candidates', id);
+    if (now && now.aiStatus !== 'pending' && now.aiStatus !== 'processing') {
+      await db.setDocData('candidates', id, { aiStatus: 'pending', aiError: null });
+      console.log(`[server CV worker] ${id}: el CV nuevo no estaba en la cola; encolado`);
+    }
+  } catch (e) {
+    console.warn(`[server CV worker] ${id}: no se pudo comprobar si el CV nuevo quedó en la cola:`, e);
+  }
+}
+
 // was scored, false when it ended in 'error', so a run can report what it achieved.
 async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string; email?: string; phone?: string; city?: string; source?: string }): Promise<boolean> {
   // Bulk docs: created by the recruiter's mass upload. Two shapes exist — old ones with
@@ -843,17 +859,6 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
   try {
     const parsedData = await runCvParse({ fileUrl: cand.cvUrl, mimeType: cand.cvFileType || 'application/pdf' });
 
-    // Leer un CV tarda decenas de segundos: la persona pudo volver a aplicar en ese
-    // rato con OTRO currículum. Guardar esta lectura dejaría el análisis de un CV junto
-    // al link de otro y, lo peor, marcaría 'completed' sobre la cola — el CV nuevo no se
-    // leería nunca y su postulación quedaría sin puntuación. Se vuelve a la cola.
-    const fresh = await db.getDocData('candidates', cand.id).catch(() => null);
-    if (fresh && cand.cvUrl && fresh.cvUrl && fresh.cvUrl !== cand.cvUrl) {
-      console.log(`[server CV worker] ${cand.id}: el CV cambió mientras se leía; vuelve a la cola`);
-      await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
-      return false;
-    }
-
     const candidateUpdate: any = { aiExtraction: parsedData, aiStatus: 'completed' };
     if (isBulk) {
       if (namePending && parsedData.full_name) candidateUpdate.fullName = parsedData.full_name;
@@ -864,7 +869,17 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       }
       if (!cand.city && parsedData.city) candidateUpdate.city = parsedData.city;
     }
-    await db.setDocData('candidates', cand.id, candidateUpdate);
+    // Leer un CV tarda decenas de segundos: la persona pudo volver a aplicar en ese rato
+    // con OTRO currículum. Guardar esta lectura dejaría el análisis de un CV junto al
+    // link de otro y, lo peor, marcaría 'completed' sobre la cola — el CV nuevo no se
+    // leería nunca y su postulación quedaría sin puntuación. Comparar y escribir va en
+    // UNA transacción: separados dejaban una ventana en la que el CV cambiaba justo
+    // entre las dos cosas y la escritura pisaba igual.
+    if (!await db.writeCandidateIfCvUnchanged(cand.id, cand.cvUrl, candidateUpdate)) {
+      console.log(`[server CV worker] ${cand.id}: el CV cambió mientras se leía; esta lectura se descarta`);
+      await requeueIfStranded(cand.id);
+      return false;
+    }
 
     // La nota del CV va a las postulaciones de esta persona. A una que se envió con OTRO
     // currículum solo se le respeta la nota que YA tiene: quien vuelve a aplicar con un
@@ -911,14 +926,16 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     // Tampoco es de este CV si el CV ya no es este: la persona volvió a aplicar con otro
     // currículum mientras la IA leía el anterior. Marcar 'error' aquí pisaría la cola del
     // nuevo —el worker solo toma los 'pending'— y ese CV no se leería nunca, dejando su
-    // postulación sin nota. El mismo chequeo que en el camino de éxito, antes de escribir.
-    const current = await db.getDocData('candidates', cand.id).catch(() => null);
-    if (current && cand.cvUrl && current.cvUrl && current.cvUrl !== cand.cvUrl) {
-      console.log(`[server CV worker] ${cand.id}: falló el CV anterior, pero ya hay otro; vuelve a la cola`);
-      await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
+    // postulación sin nota. Misma transacción que en el camino de éxito: comparar y
+    // escribir sin ventana entre medias.
+    const marked = await db
+      .writeCandidateIfCvUnchanged(cand.id, cand.cvUrl, { aiStatus: 'error', aiError: err?.message || String(err) })
+      .catch(() => true); // si ni eso se puede escribir, no se inventa nada sobre el estado
+    if (!marked) {
+      console.log(`[server CV worker] ${cand.id}: falló el CV anterior, pero ya hay otro; este error no se apunta`);
+      await requeueIfStranded(cand.id);
       return false;
     }
-    await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
     if (namePending) {
       // Only placeholder names get the error label — a manually-typed name stays intact.
       // Y solo en las postulaciones de ESTE CV: una que se envió con otro currículum, ya
@@ -2072,10 +2089,17 @@ async function runPendingAiScorings(): Promise<{ scored: number; waiting: number
 //
 // Solo AÑADE un campo calculado (nunca pisa nada) y queda marcado en `settings/dedupe`,
 // así que recorre la colección una vez en la vida de la base, no en cada arranque.
-let contactKeysBackfilled = false;
-async function backfillCandidatePhoneKeys() {
-  if (contactKeysBackfilled) return;
-  contactKeysBackfilled = true;
+// Se guarda la PROMESA, no un "ya está": con un booleano puesto antes de empezar, una
+// postulación que entrara mientras el relleno corre seguía adelante y hacía su búsqueda
+// contra los perfiles todavía sin teléfono canónico — creando justo el duplicado que el
+// relleno existe para evitar. Quien llegue durante el relleno espera a que termine.
+let contactKeysBackfill: Promise<void> | null = null;
+function backfillCandidatePhoneKeys(): Promise<void> {
+  if (!contactKeysBackfill) contactKeysBackfill = runContactKeysBackfill();
+  return contactKeysBackfill;
+}
+
+async function runContactKeysBackfill(): Promise<void> {
   try {
     const done = await db.getDocData('settings', 'dedupe');
     if (done?.phoneKeysBackfilledAt) return;
@@ -2558,9 +2582,17 @@ async function startServer() {
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
       let applicationId = `${candidateId}_${vacancyId}`;
-      // The conventional id can be held by an application that was MOVED to another
-      // vacancy: never overwrite it — take a unique id instead.
-      if (await db.getDocData('applications', applicationId)) {
+      if (recognizedByContact) {
+        // Una postulación enlazada solo por contacto NO es la del dueño del perfil, y
+        // ahora dos sesiones distintas pueden estar enviando a la vez (ninguna bloquea a
+        // la otra). Con el id convencional las dos escribirían el MISMO documento y una
+        // pisaría a la otra en silencio — justo la postulación perdida que el cambio
+        // venía a evitar, porque las dos reciben confirmación. Comprobar si existe no
+        // sirve: entre la comprobación y la escritura cabe la otra. Id propio y ya.
+        applicationId = `${applicationId}_${crypto.randomUUID().slice(0, 8)}`;
+      } else if (await db.getDocData('applications', applicationId)) {
+        // The conventional id can be held by an application that was MOVED to another
+        // vacancy: never overwrite it — take a unique id instead.
         applicationId = `${applicationId}_${Date.now().toString(36)}`;
       }
 
