@@ -32,15 +32,18 @@ interface Props {
 export default function InterviewAttendanceButton({ app, participantStatus, compact, onMarked }: Props) {
   const [saving, setSaving] = useState<AttendanceStatus | null>(null);
   const [error, setError] = useState('');
-  // Lo que se acaba de guardar. `participantStatus` viene de una lectura única de la
-  // agenda: al quitar una marca que venía de ahí, la pantalla seguía pasando el valor
-  // viejo y el botón se quedaba marcado como si el clic no hubiera servido.
-  // `undefined` = nada guardado todavía en esta pantalla; `null` = se quitó la marca.
-  const [justSaved, setJustSaved] = useState<AttendanceStatus | null | undefined>(undefined);
+  // Lo que se acaba de guardar, CON la postulación a la que pertenece. `participantStatus`
+  // viene de una lectura única de la agenda: al quitar una marca que venía de ahí, la
+  // pantalla seguía pasando el valor viejo y el botón se quedaba marcado como si el clic
+  // no hubiera servido. Y el componente no se desmonta al cambiar de postulación en el
+  // perfil, así que sin el id esta marca se le aplicaría a la siguiente — mostrando el
+  // resultado de una entrevista en otra, y borrando la suya de verdad al pulsar.
+  const [justSaved, setJustSaved] = useState<{ appId: string; status: AttendanceStatus | null } | null>(null);
+  const savedHere = justSaved && justSaved.appId === app?.id ? justSaved : null;
 
   if (!app?.id || !canMarkAttendance(app, participantStatus)) return null;
 
-  const current = justSaved !== undefined ? justSaved : attendanceOf(app, participantStatus);
+  const current = savedHere ? savedHere.status : attendanceOf(app, participantStatus);
 
   const mark = async (status: AttendanceStatus) => {
     // La misma opción otra vez = corregir: se borra la marca.
@@ -62,7 +65,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
         console.warn('No se pudo sincronizar la sesión de entrevista:', e);
       }
 
-      setJustSaved(next);
+      setJustSaved({ appId: app.id, status: next });
       onMarked?.(next);
     } catch (e) {
       console.error('No se pudo guardar la asistencia:', e);
@@ -72,7 +75,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
     }
   };
 
-  const marked = justSaved === null ? null : app?.interviewAttendance;
+  const marked = savedHere && savedHere.status === null ? null : app?.interviewAttendance;
   const markedWhen = marked?.markedAt?.toDate ? marked.markedAt.toDate().toLocaleString('es-DO', {
     day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
   }) : '';

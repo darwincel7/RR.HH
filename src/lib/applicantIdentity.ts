@@ -60,6 +60,24 @@ export function namesCompatible(a: unknown, b: unknown): boolean {
   return ta.every(t => setB.has(t)) || tb.every(t => setA.has(t));
 }
 
+/**
+ * De dos formas del mismo nombre, la que más identifica: la que tiene más palabras y,
+ * a igualdad de palabras, la más larga escrita.
+ *
+ * "Ana de la Cruz" y "Ana Cruz" dan las dos dos palabras (las partículas no cuentan),
+ * así que sin este desempate una re-postulación acortaba a "Ana Cruz" el nombre que el
+ * equipo mantenía — justo lo contrario de completar sin destruir.
+ */
+export function preferredName(existing: unknown, incoming: unknown): string {
+  const kept = String(existing ?? '').trim();
+  const fresh = String(incoming ?? '').trim();
+  if (!nameTokens(kept).length) return fresh || kept;
+  if (!nameTokens(fresh).length) return kept;
+  const byTokens = nameTokens(kept).length - nameTokens(fresh).length;
+  if (byTokens !== 0) return byTokens > 0 ? kept : fresh;
+  return normalizeName(kept).length >= normalizeName(fresh).length ? kept : fresh;
+}
+
 /** Todos los teléfonos por los que conocemos a un perfil, en forma canónica. */
 function phonesOf(candidate: any): string[] {
   const raw = [candidate?.phoneNormalized, candidate?.phone, ...(Array.isArray(candidate?.alternatePhones) ? candidate.alternatePhones : [])];

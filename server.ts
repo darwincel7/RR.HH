@@ -50,7 +50,7 @@ import {
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
-import { isSameApplicant, nameTokens } from './src/lib/applicantIdentity';
+import { isSameApplicant, preferredName } from './src/lib/applicantIdentity';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
   INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
@@ -866,14 +866,17 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     }
     await db.setDocData('candidates', cand.id, candidateUpdate);
 
-    // La nota del CV va a las postulaciones de esta persona, pero NO a las que se
-    // enviaron con OTRO currículum: quien vuelve a aplicar con un CV nuevo no puede
-    // cambiar retroactivamente la puntuación de una postulación que ya fue evaluada con
-    // el CV que presentó entonces. Sin cvUrl guardado (postulaciones viejas) se puntúa
-    // como siempre.
+    // La nota del CV va a las postulaciones de esta persona. A una que se envió con OTRO
+    // currículum solo se le respeta la nota que YA tiene: quien vuelve a aplicar con un
+    // CV nuevo no cambia retroactivamente lo que ya fue evaluado con el CV de entonces.
+    // Pero si esa postulación no tiene nota, se le pone esta: el CV con el que se envió
+    // pudo quedar sin leer (llegó uno nuevo antes de que la IA llegara al anterior) y
+    // nadie la volvería a encolar — quedaría sin puntuación para siempre, fuera del
+    // Ranking. Una nota del currículum vigente es mejor que ninguna.
     const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
     for (const app of apps) {
-      if (app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl) continue;
+      const otherCv = app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl;
+      if (otherCv && app.scoreSummary !== undefined && app.scoreSummary !== null) continue;
       const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
       if (namePending && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
       await db.setDocData('applications', app.id, appUpdate);
@@ -906,7 +909,10 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       // leído, no puede quedar marcada como ilegible.
       const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
       for (const app of apps) {
-        if (app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl) continue;
+        // Misma regla que al puntuar: solo se respeta la postulación de otro CV que ya
+        // tiene nota; una sin nota sí se etiqueta (su CV es el que no se pudo leer).
+        const otherCv = app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl;
+        if (otherCv && app.scoreSummary !== undefined && app.scoreSummary !== null) continue;
         await db.setDocData('applications', app.id, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
       }
     }
@@ -2434,32 +2440,43 @@ async function startServer() {
         const apps = await db.listDocsByField('applications', 'candidateId', candId, 300);
         return apps.some(a => a?.vacancyId === vacancyId);
       };
-      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, email);
+      // TODOS los perfiles con este teléfono o correo, no uno arbitrario: cuando una
+      // familia comparte el celular, el que devolvía un `limit(1)` podía ser el del
+      // hermano, y entonces el perfil que SÍ era de esta persona no se miraba nunca y se
+      // duplicaba otra vez. Los ya unificados se descartan: su contenido vive en el vivo
+      // (que aparece en esta misma búsqueda, porque conserva sus contactos alternativos).
+      const matches = (await db.listCandidatesByPhoneOrEmail(phoneNormalized, email, 10))
+        .filter((c: any) => c?.id && !c.mergedInto && c.id !== candidateId);
 
       // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así
       // que la misma persona aplicando otro día o en otro teléfono nacía como un perfil
-      // nuevo (de ahí los duplicados con un test en cada perfil). Si el perfil que ya
-      // existe coincide en teléfono, correo Y nombre, esta postulación se cuelga de ESE
-      // perfil. No es una regla nueva: con la misma sesión ya pasaba — el perfil se
-      // actualizaba con los datos y el CV nuevos. Esto es lo mismo desde otro navegador.
+      // nuevo (de ahí los duplicados con un test en cada perfil). Si alguno de esos
+      // perfiles coincide en teléfono, correo Y nombre, esta postulación se cuelga de ÉL.
+      // No es una regla nueva: con la misma sesión ya pasaba — el perfil se actualizaba
+      // con los datos y el CV nuevos. Esto es lo mismo desde otro navegador.
       //
       // Solo cuando esta sesión no tiene perfil propio todavía. Si lo tiene (ya aplicó
       // desde aquí), juntar los dos perfiles existentes es una unificación de verdad:
       // la hace una persona desde "Revisar duplicados", viendo antes qué va a pasar.
-      if (!profile && existingId && existingId !== candidateId) {
-        const existing = await readCandidate(existingId);
-        const match = isSameApplicant(existing, { name, phoneNormalized, email });
-        if (match.same) {
-          console.log(`[apply] perfil reutilizado ${existingId} (${match.reason}); la sesión ${candidateId} no crea un duplicado`);
-          candidateId = existingId;
-          profile = existing;
-        } else if (existing && match.reason) {
-          console.log(`[apply] perfil ${existingId} parecido pero NO reutilizado (${match.reason}): queda para "Revisar duplicados"`);
+      if (!profile) {
+        for (const candidate of matches) {
+          const match = isSameApplicant(candidate, { name, phoneNormalized, email });
+          if (match.same) {
+            console.log(`[apply] perfil reutilizado ${candidate.id} (${match.reason}); la sesión ${candidateId} no crea un duplicado`);
+            candidateId = candidate.id;
+            profile = candidate;
+            break;
+          }
+          console.log(`[apply] perfil ${candidate.id} parecido pero NO reutilizado (${match.reason}): queda para "Revisar duplicados"`);
         }
       }
 
-      if (existingId && existingId !== candidateId && await hasApplicationFor(existingId)) {
-        return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+      // ¿Alguno de los OTROS perfiles con este contacto ya aplicó a esta vacante?
+      for (const candidate of matches) {
+        if (candidate.id === candidateId) continue;
+        if (await hasApplicationFor(candidate.id)) {
+          return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+        }
       }
       if (await hasApplicationFor(candidateId)) {
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
@@ -2487,7 +2504,7 @@ async function startServer() {
         email, phone, phoneNormalized,
         cvUrl, cvFileType: cvFileType.slice(0, 120),
         aiStatus: 'pending',
-        fullName: nameTokens(profile?.fullName).length > nameTokens(name).length ? profile.fullName : name,
+        fullName: preferredName(profile?.fullName, name),
         // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
         // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
         ...(profile?.createdAt ? {} : { createdAt: now }),

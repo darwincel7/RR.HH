@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isSameApplicant, namesCompatible, nameTokens } from './applicantIdentity';
+import { isSameApplicant, namesCompatible, nameTokens, preferredName } from './applicantIdentity';
 
 const incoming = (fields: Partial<{ name: string; phoneNormalized: string; email: string }> = {}) => ({
   name: 'Ana Pérez',
@@ -114,5 +114,29 @@ describe('cuándo dos nombres pueden ser la misma persona', () => {
     // El nombre provisional de una subida masiva no identifica a nadie.
     expect(namesCompatible('Procesando: cv.pdf', 'Ana Pérez')).toBe(false);
     expect(nameTokens('Procesando: cv.pdf')).toEqual([]);
+  });
+});
+
+describe('qué nombre se conserva al volver a aplicar', () => {
+  it('gana el que tiene más palabras', () => {
+    expect(preferredName('Ana María Pérez Gómez', 'Ana Pérez')).toBe('Ana María Pérez Gómez');
+    expect(preferredName('Ana', 'Ana Pérez')).toBe('Ana Pérez');
+  });
+
+  it('a igualdad de palabras, gana el más largo escrito', () => {
+    // Las partículas no cuentan como palabra, así que estos dos empatan a dos: sin
+    // desempate, volver a aplicar acortaba el nombre que mantenía el equipo.
+    expect(preferredName('Ana de la Cruz', 'Ana Cruz')).toBe('Ana de la Cruz');
+    expect(preferredName('Ana Cruz', 'Ana de la Cruz')).toBe('Ana de la Cruz');
+  });
+
+  it('empate real: se queda el que ya estaba (no se toca por tocar)', () => {
+    expect(preferredName('Ana Pérez', 'ana perez')).toBe('Ana Pérez');
+  });
+
+  it('un nombre inservible cede ante uno de verdad', () => {
+    expect(preferredName('Procesando: cv.pdf', 'Ana Pérez')).toBe('Ana Pérez');
+    expect(preferredName('', 'Ana Pérez')).toBe('Ana Pérez');
+    expect(preferredName('Ana Pérez', '')).toBe('Ana Pérez');
   });
 });

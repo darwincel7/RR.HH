@@ -39,6 +39,13 @@ export interface ServerDb {
   applyBatch(candidate: { id: string; data: Record<string, any> }, application: { id: string; data: Record<string, any> }): Promise<void>;
   /** First candidate id whose normalized phone OR email matches (for dedup). */
   findCandidateIdByPhoneOrEmail(phoneNormalized: string, email: string): Promise<string | null>;
+  /**
+   * TODOS los candidatos cuyo teléfono o correo coincide (principal o alternativo), como
+   * [{id, ...datos}]. `findCandidateIdByPhoneOrEmail` devuelve uno ARBITRARIO (limit 1),
+   * y eso no sirve para decidir identidad: si una familia comparte el celular, el que
+   * vuelve puede no ser el que devuelve la consulta. Quien decide necesita verlos todos.
+   */
+  listCandidatesByPhoneOrEmail(phoneNormalized: string, email: string, max: number): Promise<any[]>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -219,6 +226,23 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
         }
         return null;
+      },
+      async listCandidatesByPhoneOrEmail(phoneNormalized, email, max) {
+        const byId = new Map<string, any>();
+        const attempts: Array<[string, string, unknown]> = [
+          ['phoneNormalized', '==', phoneNormalized],
+          ['phone', '==', phoneNormalized],
+          ['alternatePhones', 'array-contains', phoneNormalized],
+          ['email', '==', email],
+          ['alternateEmails', 'array-contains', email],
+        ];
+        for (const [field, op, value] of attempts) {
+          if (!value) continue;
+          const snap = await adb.collection('candidates').where(field, op as any, value).limit(max).get();
+          snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
+          if (byId.size >= max) break;
+        }
+        return Array.from(byId.values()).slice(0, max);
       },
       async deleteDocData(collection, id) {
         await adb.collection(collection).doc(id).delete();
@@ -548,6 +572,23 @@ async function initClient(): Promise<ServerDb> {
         if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
       }
       return null;
+    },
+    async listCandidatesByPhoneOrEmail(phoneNormalized, email, max) {
+      const byId = new Map<string, any>();
+      const attempts: Array<[string, any, unknown]> = [
+        ['phoneNormalized', '==', phoneNormalized],
+        ['phone', '==', phoneNormalized],
+        ['alternatePhones', 'array-contains', phoneNormalized],
+        ['email', '==', email],
+        ['alternateEmails', 'array-contains', email],
+      ];
+      for (const [field, op, value] of attempts) {
+        if (!value) continue;
+        const snap = await getDocs(query(collection(cdb, 'candidates'), where(field, op, value), limit(max)));
+        snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
+        if (byId.size >= max) break;
+      }
+      return Array.from(byId.values()).slice(0, max);
     },
     async deleteDocData(c, id) {
       await deleteDoc(doc(cdb, c, id));
