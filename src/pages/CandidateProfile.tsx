@@ -17,7 +17,7 @@ import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
-import { APPLICATION_SCORE, PROFILE_SCORE, cvForApplication } from '../lib/applicationCv';
+import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
@@ -88,6 +88,17 @@ export default function CandidateProfile() {
   const [interviewAiError, setInterviewAiError] = useState<{ appId: string; message: string } | null>(null);
 
   const [scorecardTemplate, setScorecardTemplate] = useState<ScorecardTemplate>(DEFAULT_SCORECARD);
+
+  // El CV que acompañó a la postulación que se está gestionando. Si la persona volvió a
+  // aplicar con un CV nuevo, el perfil pasa a tener ese; esto hace que "Ver CV" siga
+  // mostrando el currículum con el que se envió la postulación elegida arriba.
+  // `needsOwnAnalysis`: ese CV propio no lo ha leído la IA, y el worker ya no vuelve a
+  // pasar por él (ver `applicationCv.ts`), así que el botón de abajo es el único camino.
+  // Se calcula aquí arriba, y no junto al botón, porque `analyzeCVWithAI` necesita lo
+  // MISMO para decidir qué currículum lee: si no, el botón prometía una cosa y la IA
+  // leía otra.
+  const cvShown = cvForApplication(application, candidate);
+  const needsOwnAnalysis = cvShown.needsOwnAnalysis;
 
   // Refs so the LIVE applications listener can keep the recruiter's chosen application
   // and in-progress edits without re-initializing on every real-time update.
@@ -273,13 +284,12 @@ export default function CandidateProfile() {
   };
 
   const analyzeCVWithAI = async () => {
-    // El CV de la postulación que se está gestionando (si envió uno propio). Analizar el
-    // del perfil y escribir su nota en esta postulación le pondría la puntuación de un
-    // currículum que nunca presentó aquí.
-    const target = application?.cvUrl
-      ? { url: application.cvUrl, fileType: application.cvFileType }
-      : { url: candidate?.cvUrl, fileType: candidate?.cvFileType };
-    const isProfileCv = !!target.url && target.url === candidate?.cvUrl;
+    // Se lee el currículum POR EL QUE apareció el botón, no "el de la postulación
+    // abierta" (ver `cvToAnalyze`): antes, con el perfil en `pending` y otra postulación
+    // seleccionada, la pasada de IA se gastaba en el CV equivocado y el perfil se
+    // quedaba igual de roto, con el botón ahí para siempre.
+    const target = cvToAnalyze(cvShown, candidate);
+    const isProfileCv = target.isProfileCv;
     if (!candidate || !target.url) return;
     setAnalyzingCV(true);
     try {
@@ -319,8 +329,11 @@ export default function CandidateProfile() {
         setCandidate({ ...candidate, aiExtraction: parsedData, aiStatus: 'completed' });
       }
 
-      // Update Application
-      if (application) {
+      // La nota va a la postulación abierta, salvo que lo leído sea el CV del PERFIL y
+      // ella tenga el suyo propio: misma regla que el worker del servidor — a quien ya
+      // fue evaluado con el currículum de entonces no se le cambia la nota por haber
+      // leído otro. (Si su CV propio estuviera sin nota, el botón habría leído ese.)
+      if (application && !(isProfileCv && cvShown.ownedByApplication)) {
         // Precalificado es un AVANCE: a quien ya pasó de ahí (finalista, oferta) no se
         // le devuelve a una etapa anterior por reanalizar su CV.
         const current = PIPELINE_STAGES.indexOf(application.stage);
@@ -328,9 +341,9 @@ export default function CandidateProfile() {
         const update: any = {
           scoreSummary: parsedData.initial_score_1_to_5,
           recommendation: parsedData.recommendation,
-          // De qué currículum salió esta nota: si era el del perfil, la postulación
-          // sigue ofreciendo el botón para leer el suyo (ver `applicationCv.ts`).
-          scoreSource: isProfileCv ? PROFILE_SCORE : APPLICATION_SCORE,
+          // La nota salió del currículum de esta postulación (el suyo propio, o el del
+          // perfil cuando son el mismo archivo), así que el botón ya no hace falta.
+          scoreSource: APPLICATION_SCORE,
           ...(advance ? { stage: 'Precalificado' } : {}),
         };
         await updateDoc(doc(db, 'applications', application.id), update);
@@ -696,13 +709,6 @@ export default function CandidateProfile() {
   if (!candidate) return <div className="p-8 text-center text-slate-500 font-display text-xl">Candidato no encontrado</div>;
 
   const ai = candidate.aiExtraction || {};
-  // El CV que acompañó a la postulación que se está gestionando. Si la persona volvió a
-  // aplicar con un CV nuevo, el perfil pasa a tener ese; esto hace que "Ver CV" siga
-  // mostrando el currículum con el que se envió la postulación elegida arriba.
-  // `needsOwnAnalysis`: ese CV propio no lo ha leído la IA, y el worker ya no vuelve a
-  // pasar por él (ver `applicationCv.ts`), así que el botón de abajo es el único camino.
-  const cvShown = cvForApplication(application, candidate);
-  const needsOwnAnalysis = cvShown.needsOwnAnalysis;
 
   return (
     <div className="max-w-6xl mx-auto pb-12 animate-fade-in px-4 lg:px-0">

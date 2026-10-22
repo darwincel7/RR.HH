@@ -109,3 +109,26 @@ export function isSameApplicant(existing: any, incoming: IncomingApplicant): Ide
   }
   return { same: true, reason: 'telefono+correo+nombre' };
 }
+
+/**
+ * ¿Esta postulación que ya existe impide enviar otra a la misma vacante?
+ *
+ * El bloqueo está para lo de siempre: la misma persona pulsando "enviar" dos veces o
+ * volviendo a aplicar a lo que ya aplicó. Pero reconocer a alguien por su teléfono,
+ * correo y nombre NO demuestra que sea quien dice (ver `isSameApplicant`), así que una
+ * postulación nacida de una sesión no verificada no puede cerrarle la puerta a nadie:
+ * quien conociera esos tres datos podría aplicar primero en nombre de otra persona y
+ * dejar fuera su postulación de verdad, sin que el equipo se enterara nunca.
+ *
+ * Así que bloquea:
+ *  - la que creó la sesión dueña del perfil (sin `linkedByContact`): esa sí es suya;
+ *  - la de la MISMA sesión que vuelve a enviar (doble clic, recargar y reenviar).
+ *
+ * Lo que cuesta: dos sesiones distintas sin verificar pueden dejar dos postulaciones a
+ * la misma vacante en un perfil. Eso se ve, se descarta en un clic y lo agrupa "Revisar
+ * duplicados"; quedarse sin poder aplicar a un trabajo no se ve nunca.
+ */
+export function blocksNewApplication(app: any, sessionUid?: string | null): boolean {
+  if (!app?.linkedByContact) return true;
+  return !!sessionUid && app.submittedByUid === sessionUid;
+}

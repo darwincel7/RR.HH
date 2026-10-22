@@ -50,7 +50,7 @@ import {
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
-import { isSameApplicant, preferredName } from './src/lib/applicantIdentity';
+import { blocksNewApplication, isSameApplicant, preferredName } from './src/lib/applicantIdentity';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
   INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
@@ -2065,6 +2065,41 @@ async function runPendingAiScorings(): Promise<{ scored: number; waiting: number
   return out;
 }
 
+// Los perfiles creados por el formulario siempre guardan `phoneNormalized`, pero los
+// que vienen de antes de ese campo pueden tener solo `phone`, escrito de cualquier
+// forma. Como la búsqueda por contacto compara valores exactos, esos perfiles son
+// invisibles para ella: se rellena el campo derivándolo del teléfono que ya está.
+//
+// Solo AÑADE un campo calculado (nunca pisa nada) y queda marcado en `settings/dedupe`,
+// así que recorre la colección una vez en la vida de la base, no en cada arranque.
+let contactKeysBackfilled = false;
+async function backfillCandidatePhoneKeys() {
+  if (contactKeysBackfilled) return;
+  contactKeysBackfilled = true;
+  try {
+    const done = await db.getDocData('settings', 'dedupe');
+    if (done?.phoneKeysBackfilledAt) return;
+    // Firestore no sabe buscar "a los que les falta un campo": se recorre la colección
+    // pidiendo solo esos dos campos.
+    const all = await db.listDocs('candidates', ['phone', 'phoneNormalized']);
+    let fixed = 0;
+    for (const c of all) {
+      if (!c?.id || c.phoneNormalized || !c.phone) continue;
+      const norm = normalizePhone(String(c.phone));
+      if (!norm) continue;
+      await db.setDocData('candidates', c.id, { phoneNormalized: norm });
+      fixed++;
+    }
+    await db.setDocData('settings', 'dedupe', { phoneKeysBackfilledAt: new Date(), phoneKeysFixed: fixed });
+    console.log(`[apply] teléfono canónico rellenado en ${fixed} perfil(es) de ${all.length}`);
+  } catch (e) {
+    // Que falle no puede tumbar la postulación. Y no se reintenta en la siguiente: si
+    // falla por permisos (modo sin credenciales de admin), recorrer la colección en cada
+    // postulación costaría una fortuna en lecturas. Se vuelve a intentar al reiniciar.
+    console.error('[apply] no se pudo rellenar el teléfono canónico de los perfiles viejos:', e);
+  }
+}
+
 async function startServer() {
   const app = express();
   // Cloud Run injects PORT (defaults to 8080); fall back to 3000 for local dev.
@@ -2422,6 +2457,10 @@ async function startServer() {
         candidateId = uid;
       }
       if (!candidateId || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
+      // La sesión que envía, antes de que `candidateId` pueda pasar a otro perfil (una
+      // unificación o un reconocimiento por contacto). Queda en la postulación para
+      // distinguir "vuelvo a enviar yo" de "otra sesión dice ser esta persona".
+      const sessionUid = candidateId;
 
       // Sin `.catch(() => null)`: un fallo de lectura que devolviera null haría pasar a
       // una sesión que SÍ tiene perfil por nueva — reescribiendo su createdAt y
@@ -2454,8 +2493,20 @@ async function startServer() {
       // (so the links already sent keep working) but changes the vacancy it belongs to.
       const hasApplicationFor = async (candId: string) => {
         const apps = await db.listDocsByField('applications', 'candidateId', candId, 300);
-        return apps.some(a => a?.vacancyId === vacancyId);
+        // `blocksNewApplication`: una postulación que nació de una sesión NO verificada
+        // (enlazada solo por teléfono+correo+nombre) no puede cerrarle la puerta a nadie
+        // más, o quien conociera esos datos aplicaría primero en nombre de otra persona
+        // y su postulación de verdad no llegaría nunca — y nadie lo vería.
+        return apps.some(a => a?.vacancyId === vacancyId && blocksNewApplication(a, sessionUid));
       };
+      // Antes de buscar: que todos los perfiles tengan su teléfono en forma canónica.
+      // Reconocer a alguien exige que su teléfono coincida, y la consulta que lo
+      // encuentra siempre es la de `phoneNormalized`; un perfil viejo que guardara
+      // "(809) 555-1234" sin ese campo no aparecería —las variantes que se prueban
+      // salen de lo que la persona ESCRIBE ahora, no de lo que hay guardado— y se
+      // duplicaría igual. Una sola vez en la vida de la base (ver la función).
+      await backfillCandidatePhoneKeys();
+
       // TODOS los perfiles con este teléfono o correo, no uno arbitrario: cuando una
       // familia comparte el celular, el que devolvía un `limit(1)` podía ser el del
       // hermano, y entonces el perfil que SÍ era de esta persona no se miraba nunca y se
@@ -2570,6 +2621,10 @@ async function startServer() {
           candidateId, vacancyId, candidateName: name,
           stage: 'Nuevo', cvUrl, cvFileType: cvFileType.slice(0, 120),
           submittedAt: now, lastStageUpdate: now,
+          // De qué sesión salió, y si el perfil se reconoció solo por sus datos de
+          // contacto: con eso `blocksNewApplication` sabe a quién puede bloquear.
+          submittedByUid: sessionUid,
+          ...(recognizedByContact ? { linkedByContact: true } : {}),
           // Cuando el CV del perfil no se toca (perfil reconocido), su `aiStatus` se
           // queda como estaba: si era 'completed', el worker —que solo mira los
           // 'pending'— no vuelve a pasar y esta postulación se quedaría SIN NOTA para

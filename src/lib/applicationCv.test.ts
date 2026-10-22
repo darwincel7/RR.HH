@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { APPLICATION_SCORE, PROFILE_SCORE, cvForApplication } from './applicationCv';
+import { APPLICATION_SCORE, PROFILE_SCORE, cvForApplication, cvToAnalyze } from './applicationCv';
 
 const candidate = (fields: Record<string, any> = {}) => ({
   cvUrl: 'https://files/perfil.pdf',
@@ -70,5 +70,47 @@ describe('cuándo falta leer con IA el currículum de la postulación', () => {
     expect(cvForApplication({}, candidate()).needsOwnAnalysis).toBe(false);
     expect(cvForApplication(null, candidate()).needsOwnAnalysis).toBe(false);
     expect(cvForApplication(null, null).url).toBeUndefined();
+  });
+});
+
+describe('qué currículum lee el botón de analizar', () => {
+  const perfil = { cvUrl: 'https://files/perfil.pdf', cvFileType: 'application/pdf' };
+  const propio = { cvUrl: 'https://files/nuevo.docx', cvFileType: 'application/msword' };
+
+  it('el de la postulación cuando es el suyo el que falta por leer', () => {
+    const t = cvToAnalyze(cvForApplication(propio, perfil), perfil);
+    expect(t.url).toBe('https://files/nuevo.docx');
+    expect(t.fileType).toBe('application/msword');
+    expect(t.isProfileCv).toBe(false);
+  });
+
+  it('el del perfil cuando el botón sale por su `pending`/`error`, aunque esté abierta otra postulación', () => {
+    // Antes se gastaba la pasada de IA en el CV de la postulación abierta y el perfil
+    // se quedaba igual de roto, con el botón ahí para siempre.
+    const yaPuntuada = { ...propio, scoreSummary: 4, scoreSource: APPLICATION_SCORE };
+    const t = cvToAnalyze(cvForApplication(yaPuntuada, perfil), perfil);
+    expect(t.url).toBe('https://files/perfil.pdf');
+    expect(t.fileType).toBe('application/pdf');
+    expect(t.isProfileCv).toBe(true);
+  });
+
+  it('una nota heredada manda a leer el CV de la postulación, no el del perfil', () => {
+    const heredada = { ...propio, scoreSummary: 4, scoreSource: PROFILE_SCORE };
+    expect(cvToAnalyze(cvForApplication(heredada, perfil), perfil).url).toBe('https://files/nuevo.docx');
+  });
+
+  it('si el perfil no tiene currículum, se lee el de la postulación (es el único)', () => {
+    // Sin esto el botón no hacía nada: apuntaba a un CV que no existe.
+    const sinCv = { cvUrl: '' };
+    const yaPuntuada = { ...propio, scoreSummary: 4, scoreSource: APPLICATION_SCORE };
+    const t = cvToAnalyze(cvForApplication(yaPuntuada, sinCv), sinCv);
+    expect(t.url).toBe('https://files/nuevo.docx');
+    expect(t.isProfileCv).toBe(false);
+  });
+
+  it('con el mismo archivo en los dos sitios, se lee como el del perfil', () => {
+    const t = cvToAnalyze(cvForApplication({ ...perfil, scoreSummary: 3 }, perfil), perfil);
+    expect(t.url).toBe('https://files/perfil.pdf');
+    expect(t.isProfileCv).toBe(true);
   });
 });

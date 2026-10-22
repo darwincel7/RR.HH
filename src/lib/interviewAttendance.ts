@@ -81,6 +81,40 @@ export function attendanceOf(app: any, participantStatus?: unknown): AttendanceS
 }
 
 /**
+ * Lo que el botón acaba de guardar, con la postulación a la que pertenece y lo que la
+ * pantalla mostraba ANTES de guardarlo.
+ */
+export interface OptimisticAttendance {
+  appId: string;
+  status: AttendanceStatus | null;
+  /** El valor que traían los datos al guardar: mientras siga ahí, nadie más ha escrito. */
+  was: AttendanceStatus | null;
+}
+
+/**
+ * Qué asistencia se muestra: la guardada hace un instante o la que traen los datos.
+ *
+ * La marca propia hace falta porque la pantalla puede venir de una lectura única: al
+ * QUITAR una marca, los datos seguirían mostrando la vieja y el clic parecería no haber
+ * servido. Pero no puede valer para siempre: si otra persona —o la página Entrevistas—
+ * cambia esa misma asistencia, lo que llega es más nuevo que lo nuestro, y seguir
+ * mostrando lo viejo haría que el siguiente clic borrara o reemplazara su marca
+ * partiendo de un valor obsoleto.
+ *
+ * Por eso la marca vale solo mientras los datos sigan diciendo lo que decían al
+ * guardarla (`was`): en cuanto cambian —porque llegó nuestra propia escritura o la de
+ * alguien más— manda lo que llega.
+ */
+export function effectiveAttendance(
+  backing: AttendanceStatus | null,
+  mark: OptimisticAttendance | null,
+  appId: string | undefined,
+): AttendanceStatus | null {
+  if (!mark || !appId || mark.appId !== appId) return backing;
+  return backing === mark.was ? mark.status : backing;
+}
+
+/**
  * ¿Se le convocó a entrevista alguna vez? El sello es la respuesta fiable; la etapa
  * actual y la marca de asistencia cubren lo que ya existía antes del sello.
  */

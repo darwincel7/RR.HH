@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 
-import { isSameApplicant, namesCompatible, nameTokens, preferredName } from './applicantIdentity';
+import { blocksNewApplication, isSameApplicant, namesCompatible, nameTokens, preferredName } from './applicantIdentity';
 
 const incoming = (fields: Partial<{ name: string; phoneNormalized: string; email: string }> = {}) => ({
   name: 'Ana Pérez',
@@ -138,5 +138,32 @@ describe('qué nombre se conserva al volver a aplicar', () => {
     expect(preferredName('Procesando: cv.pdf', 'Ana Pérez')).toBe('Ana Pérez');
     expect(preferredName('', 'Ana Pérez')).toBe('Ana Pérez');
     expect(preferredName('Ana Pérez', '')).toBe('Ana Pérez');
+  });
+});
+
+describe('cuándo una postulación que ya existe bloquea otra', () => {
+  it('la que creó la sesión dueña del perfil bloquea a cualquiera', () => {
+    // El caso normal: ya aplicaste a esta vacante.
+    expect(blocksNewApplication({ vacancyId: 'v1' }, 'uid-1')).toBe(true);
+    expect(blocksNewApplication({ linkedByContact: false }, 'uid-1')).toBe(true);
+  });
+
+  it('una enlazada solo por contacto no bloquea a otra sesión', () => {
+    // Si bloqueara, quien conociera el teléfono, el correo y el nombre de alguien podría
+    // aplicar primero en su nombre y dejar su postulación de verdad fuera, en silencio.
+    const suplantada = { linkedByContact: true, submittedByUid: 'uid-atacante' };
+    expect(blocksNewApplication(suplantada, 'uid-victima')).toBe(false);
+  });
+
+  it('pero sí bloquea a la MISMA sesión que vuelve a enviar', () => {
+    // Doble clic en "enviar", o recargar y reenviar: eso no es otra persona.
+    const propia = { linkedByContact: true, submittedByUid: 'uid-1' };
+    expect(blocksNewApplication(propia, 'uid-1')).toBe(true);
+  });
+
+  it('sin sesión conocida, una enlazada por contacto no bloquea', () => {
+    const otra = { linkedByContact: true, submittedByUid: 'uid-1' };
+    expect(blocksNewApplication(otra, null)).toBe(false);
+    expect(blocksNewApplication(otra, '')).toBe(false);
   });
 });

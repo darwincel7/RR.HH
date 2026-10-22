@@ -43,3 +43,24 @@ export function cvForApplication(application: any, candidate: any): ShownCv {
 
   return { url, fileType, ownedByApplication, needsOwnAnalysis: ownedByApplication && !scoredFromOwnCv };
 }
+
+/**
+ * Qué currículum debe leer el botón de analizar, según POR QUÉ está visible.
+ *
+ * Si está porque esta postulación trae uno sin leer, se lee el suyo: su nota no puede
+ * salir de un CV que no presentó aquí. Si está porque el perfil quedó en `pending` o
+ * `error`, lo que hay que recuperar es el del perfil —aunque arriba esté seleccionada
+ * otra postulación—, porque si no, la pasada de IA se gasta en el currículum equivocado
+ * y el perfil se queda igual de roto, con el botón ahí para siempre.
+ *
+ * `isProfileCv` es lo que decide si el análisis del PERFIL se reemplaza: solo cuando lo
+ * leído es de verdad su currículum vigente.
+ */
+export function cvToAnalyze(shown: ShownCv, candidate: any): { url: any; fileType: any; isProfileCv: boolean } {
+  // Un perfil sin currículum no tiene nada que recuperar: se lee el de la postulación,
+  // que es el único que hay.
+  if (!shown.needsOwnAnalysis && candidate?.cvUrl) {
+    return { url: candidate.cvUrl, fileType: candidate.cvFileType, isProfileCv: true };
+  }
+  return { url: shown.url, fileType: shown.fileType, isProfileCv: false };
+}

@@ -236,7 +236,12 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   que sí es esta persona impide repetir en la misma vacante. Bloquear por el celular
   compartido dejaría a la hermana sin poder aplicar a un trabajo, y eso es un daño real
   que nadie ve — la postulación no llega nunca; dos postulaciones del mismo teléfono, en
-  cambio, se ven y se descartan en un clic. Solo se reconoce cuando esa sesión no tiene perfil propio todavía; juntar
+  cambio, se ven y se descartan en un clic. Por la misma razón, **una postulación
+  reconocida solo por el contacto tampoco bloquea** a otra sesión: si lo hiciera, quien
+  conociera el teléfono, el correo y el nombre de alguien podría aplicar primero en su
+  nombre y dejar fuera su postulación de verdad. Bloquean la del dueño del perfil (la
+  sesión que lo creó) y la de la **misma** sesión que vuelve a enviar — el doble clic de
+  siempre ([`blocksNewApplication`](src/lib/applicantIdentity.ts)). Solo se reconoce cuando esa sesión no tiene perfil propio todavía; juntar
   dos perfiles que ya existen es una unificación de verdad, y la decide una persona.
   Escribir en un perfil que ya existía **completa, no destruye** (igual que la
   unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
@@ -247,13 +252,21 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   y el nombre completo de alguien —un ex, un rival, un familiar— bastaría para reemplazar
   su currículum y con él su análisis de IA y la nota de sus postulaciones sin puntuar.
   Sería sabotaje silencioso contra un candidato: ni él ni el equipo lo verían. Su
-  postulación nueva sí lleva su propio CV, y *Analizar IA* lo lee cuando el equipo quiera.
+  postulación nueva sí lleva su propio CV, y nace con la nota del análisis vigente de esa
+  persona (marcada como heredada) para no quedarse fuera del Ranking; el perfil ofrece
+  **Analizar CV de esta postulación** mientras la nota venga de otro currículum, que es el
+  único camino para leer ese CV — el worker ya no vuelve a pasar por él
+  ([`src/lib/applicationCv.ts`](src/lib/applicationCv.ts)).
   En el perfil de la **propia sesión** sí se renueva, como siempre: ese uid creó el perfil,
   así que es suyo. Y si el perfil reconocido no tenía CV, se le pone.
   Cada postulación conserva **su** CV: el Kanban y el perfil abren el currículum con el
   que se envió esa postulación, y la nota del CV no se reescribe en una postulación
   presentada con otro — ni al reanalizar a mano, ni desde el worker, que además devuelve
-  el CV a la cola si cambió mientras la IA leía el anterior.
+  el CV a la cola si cambió mientras la IA leía el anterior. Reconocer a alguien exige que
+  su teléfono coincida, y la consulta que lo encuentra es la del teléfono canónico: la
+  primera postulación tras actualizar rellena ese campo en los perfiles viejos que no lo
+  tenían (una sola vez en la vida de la base, anotado en `settings/dedupe`), porque si no
+  aparecen en la búsqueda se duplican igual.
 - **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
   CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
   ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del
