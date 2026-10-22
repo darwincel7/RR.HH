@@ -2458,31 +2458,36 @@ async function startServer() {
       const matches = (await db.listCandidatesByPhoneOrEmail(phone, email, 10))
         .filter((c: any) => c?.id && !c.mergedInto && c.id !== candidateId);
 
+      // ¿Cuáles de esos perfiles SON esta persona? Se decide una sola vez y sirve para
+      // las dos cosas que vienen: reconocerla y bloquear su postulación repetida.
+      const sameApplicant: any[] = [];
+      for (const candidate of matches) {
+        const match = isSameApplicant(candidate, { name, phoneNormalized, email });
+        if (match.same) sameApplicant.push(candidate);
+        else console.log(`[apply] perfil ${candidate.id} comparte contacto pero NO es esta persona (${match.reason}): queda para "Revisar duplicados"`);
+      }
+
       // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así
       // que la misma persona aplicando otro día o en otro teléfono nacía como un perfil
-      // nuevo (de ahí los duplicados con un test en cada perfil). Si alguno de esos
-      // perfiles coincide en teléfono, correo Y nombre, esta postulación se cuelga de ÉL.
-      // No es una regla nueva: con la misma sesión ya pasaba — el perfil se actualizaba
-      // con los datos y el CV nuevos. Esto es lo mismo desde otro navegador.
+      // nuevo (de ahí los duplicados con un test en cada perfil). Si uno de esos perfiles
+      // es esta persona, la postulación se cuelga de ÉL. No es una regla nueva: con la
+      // misma sesión ya pasaba — el perfil se actualizaba con los datos y el CV nuevos.
       //
       // Solo cuando esta sesión no tiene perfil propio todavía. Si lo tiene (ya aplicó
       // desde aquí), juntar los dos perfiles existentes es una unificación de verdad:
       // la hace una persona desde "Revisar duplicados", viendo antes qué va a pasar.
-      if (!profile) {
-        for (const candidate of matches) {
-          const match = isSameApplicant(candidate, { name, phoneNormalized, email });
-          if (match.same) {
-            console.log(`[apply] perfil reutilizado ${candidate.id} (${match.reason}); la sesión ${candidateId} no crea un duplicado`);
-            candidateId = candidate.id;
-            profile = candidate;
-            break;
-          }
-          console.log(`[apply] perfil ${candidate.id} parecido pero NO reutilizado (${match.reason}): queda para "Revisar duplicados"`);
-        }
+      if (!profile && sameApplicant.length > 0) {
+        [profile] = sameApplicant;
+        candidateId = profile.id;
+        console.log(`[apply] perfil reutilizado ${candidateId}; esta sesión no crea un duplicado`);
       }
 
-      // ¿Alguno de los OTROS perfiles con este contacto ya aplicó a esta vacante?
-      for (const candidate of matches) {
+      // ¿Otro perfil de ESTA MISMA persona ya aplicó a esta vacante? Solo los que pasan
+      // la prueba de identidad bloquean: compartir el celular en una familia es normal,
+      // y bloquear por eso dejaría a la hermana sin poder aplicar a un trabajo — un daño
+      // real e invisible (la postulación no llega nunca). Que entren dos postulaciones
+      // del mismo teléfono se ve, se descarta en un clic y lo agrupa "Revisar duplicados".
+      for (const candidate of sameApplicant) {
         if (candidate.id === candidateId) continue;
         if (await hasApplicationFor(candidate.id)) {
           return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
@@ -2514,7 +2519,10 @@ async function startServer() {
         email, phone, phoneNormalized,
         cvUrl, cvFileType: cvFileType.slice(0, 120),
         aiStatus: 'pending',
-        fullName: preferredName(profile?.fullName, name),
+        // `|| profile.name`: los perfiles viejos guardan el nombre ahí, y la interfaz lee
+        // `fullName || name`. Sin eso, una re-postulación escondía detrás de un nombre
+        // corto el que el equipo mantenía.
+        fullName: preferredName(profile?.fullName || profile?.name, name),
         // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
         // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
         ...(profile?.createdAt ? {} : { createdAt: now }),

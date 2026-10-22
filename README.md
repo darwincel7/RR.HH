@@ -231,7 +231,11 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   contenido en "Ana Gómez" y bastaría conocer el teléfono, el correo y el nombre de pila
   de alguien para caer dentro de su perfil). Si algo no cuadra se crea un perfil aparte y
   queda en *Revisar duplicados*: un duplicado se arregla en dos clics; confundir a dos
-  personas, no. Solo se reconoce cuando esa sesión no tiene perfil propio todavía; juntar
+  personas, no. Y compartir el contacto **no bloquea**: solo la postulación de un perfil
+  que sí es esta persona impide repetir en la misma vacante. Bloquear por el celular
+  compartido dejaría a la hermana sin poder aplicar a un trabajo, y eso es un daño real
+  que nadie ve — la postulación no llega nunca; dos postulaciones del mismo teléfono, en
+  cambio, se ven y se descartan en un clic. Solo se reconoce cuando esa sesión no tiene perfil propio todavía; juntar
   dos perfiles que ya existen es una unificación de verdad, y la decide una persona.
   Escribir en un perfil que ya existía **completa, no destruye** (igual que la
   unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
