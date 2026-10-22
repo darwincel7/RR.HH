@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Loader2, Save, FileText, CheckCircle, Plus, Trash2, ArrowUp, ArrowDown, ChevronDown, ChevronUp, GripVertical } from 'lucide-react';
+import { Loader2, Save, FileText, CheckCircle, Plus, Trash2, ArrowUp, ArrowDown, ChevronDown, ChevronUp, GripVertical, Fingerprint } from 'lucide-react';
 import { masterTestQuestions } from '../data/testQuestions';
 import { DEFAULT_SCORECARD, type ScorecardTemplate } from '../lib/interviewScorecard';
+import { defaultPersonalityTest, resolvePersonalityTemplate, templateForSave, templateIssues, type PersonalityTemplate } from '../lib/personalityTest';
+import PersonalityTestEditor from '../components/PersonalityTestEditor';
 import { DndContext, closestCenter, KeyboardSensor, PointerSensor, useSensor, useSensors, DragEndEvent } from '@dnd-kit/core';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, verticalListSortingStrategy, useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
@@ -142,11 +144,12 @@ export default function FormsSettings() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [expandedSection, setExpandedSection] = useState<'stage2' | 'test' | 'scorecard' | null>(null);
+  const [expandedSection, setExpandedSection] = useState<'stage2' | 'test' | 'scorecard' | 'personality' | null>(null);
 
   const [stage2Questions, setStage2Questions] = useState<Question[]>([]);
   const [testQuestions, setTestQuestions] = useState<Question[]>([]);
   const [scorecard, setScorecard] = useState<ScorecardSettings>(defaultScorecard);
+  const [personalityTest, setPersonalityTest] = useState<PersonalityTemplate>(() => defaultPersonalityTest());
 
   useEffect(() => {
     async function fetchSettings() {
@@ -199,6 +202,9 @@ export default function FormsSettings() {
               metrics: data.scorecard.metrics || defaultScorecard.metrics
             });
           }
+
+          // Test de personalidad (sin guardar todavía → el recomendado)
+          setPersonalityTest(resolvePersonalityTemplate(data.personalityTest));
         } else {
           // Defaults if no document exists
           setStage2Questions([
@@ -225,6 +231,13 @@ export default function FormsSettings() {
   }, []);
 
   const handleSave = async () => {
+    // Un test de personalidad roto no se guarda: se aplicaría así a los candidatos.
+    const blocking = templateIssues(personalityTest).filter(i => i.blocking);
+    if (blocking.length > 0) {
+      setExpandedSection('personality');
+      alert(`No se guardó: el test de personalidad tiene errores.\n\n${blocking.slice(0, 5).map(i => `• ${i.message}`).join('\n')}`);
+      return;
+    }
     setSaving(true);
     setSuccess(false);
     try {
@@ -232,7 +245,8 @@ export default function FormsSettings() {
       const payload = JSON.parse(JSON.stringify({
         stage2Questions,
         testQuestions,
-        scorecard
+        scorecard,
+        personalityTest: templateForSave(personalityTest),
       }));
       
       await setDoc(doc(db, 'settings', 'forms'), payload, { merge: true });
@@ -501,6 +515,33 @@ export default function FormsSettings() {
                 {renderScorecardList('Red Flags a Marcar', 'redFlags', 'border-rose-200')}
               </div>
               {renderScorecardList('Métricas de Presencia y Comunicación (1 al 5)', 'metrics', 'border-slate-300')}
+            </div>
+          )}
+        </div>
+
+        {/* Test de Personalidad (presencial, cuando la entrevistadora decida) */}
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+          <button
+            onClick={() => setExpandedSection(expandedSection === 'personality' ? null : 'personality')}
+            className="w-full p-4 flex items-center justify-between hover:bg-slate-50 transition-colors text-left"
+          >
+            <div className="flex items-center gap-4">
+              <div className="w-8 h-8 rounded-full bg-fuchsia-100 text-fuchsia-600 flex items-center justify-center shrink-0">
+                <Fingerprint className="w-4 h-4" />
+              </div>
+              <div>
+                <h2 className="text-lg font-bold text-slate-800">{personalityTest.name.trim() || 'Test de Personalidad'} (presencial)</h2>
+                <p className="text-sm text-slate-500">
+                  Se aplica en persona cuando la entrevistadora lo decida, desde el perfil del candidato. Contiene {personalityTest.questions.length} preguntas y mide {personalityTest.dimensions.length} rasgos.
+                </p>
+              </div>
+            </div>
+            {expandedSection === 'personality' ? <ChevronUp className="w-5 h-5 text-slate-400" /> : <ChevronDown className="w-5 h-5 text-slate-400" />}
+          </button>
+
+          {expandedSection === 'personality' && (
+            <div className="p-4 border-t border-slate-200 bg-slate-50">
+              <PersonalityTestEditor value={personalityTest} onChange={setPersonalityTest} />
             </div>
           )}
         </div>

@@ -99,6 +99,20 @@ describe('combinar dos postulaciones a la misma vacante', () => {
     expect(plan.archivedData).toEqual({ testResults: { score: 40 }, testSubmittedAt: { seconds: 5 } });
   });
 
+  it('el test de personalidad viaja entero: se toma si falta y se archiva si ya había uno', () => {
+    const test = { status: 'completed', answers: { S1: 4 }, results: { dimensions: [], warnings: [] } };
+    const taken = planApplicationMerge({ id: 'p', vacancyId: 'v1', stage: 'Nuevo' }, { id: 'd', vacancyId: 'v1', stage: 'Nuevo', personalityTest: test });
+    expect(taken.fields.personalityTest).toEqual(test);
+    expect(taken.taken).toContain(group('personality').label);
+
+    const both = planApplicationMerge(
+      { id: 'p', vacancyId: 'v1', stage: 'Nuevo', personalityTest: { status: 'completed', answers: { S1: 2 } } },
+      { id: 'd', vacancyId: 'v1', stage: 'Nuevo', personalityTest: test },
+    );
+    expect(both.fields.personalityTest).toBeUndefined();
+    expect(both.archivedData.personalityTest).toEqual(test);
+  });
+
   it('sube la etapa cuando el duplicado llegó más lejos', () => {
     const plan = planApplicationMerge(
       { id: 'p', vacancyId: 'v1', stage: 'Precalificado' },

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
-  mergeCandidatesSchema, decodeImageDataUrl, firstIssueMessage,
+  mergeCandidatesSchema, personalitySubmitSchema, personalityInterpretSchema, decodeImageDataUrl, firstIssueMessage,
 } from './serverSchemas';
 
 /** The exact message a body would produce, or null if it validates. */
@@ -136,6 +136,30 @@ describe('endpoints de reclutador', () => {
     if (r.success) expect(r.data.mimeType).toBe('application/pdf');
     // No file at all is still schema-valid: the handler answers "No PDF provided".
     expect(parseCvSchema.safeParse({}).success).toBe(true);
+  });
+});
+
+describe('test de personalidad', () => {
+  it('personalitySubmitSchema: respuestas como objeto, id seguro e intento opcional', () => {
+    const r = personalitySubmitSchema.safeParse({ applicationId: 'abc_vac1', answers: { S1: 4, T1: 'Hola' } });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.attemptId).toBe('');
+    expect(errorOf(personalitySubmitSchema, { applicationId: 'a/b', answers: {} })).toBe('applicationId inválido');
+    expect(errorOf(personalitySubmitSchema, { applicationId: 'abc', answers: [4, 5] })).toBe('Respuestas inválidas');
+  });
+
+  it('personalitySubmitSchema no deja que el cuerpo traiga las preguntas ni el resultado', () => {
+    const r = personalitySubmitSchema.safeParse({ applicationId: 'abc', answers: {}, questions: [{ id: 'x' }], results: { score: 100 } });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect((r.data as any).questions).toBeUndefined();
+      expect((r.data as any).results).toBeUndefined();
+    }
+  });
+
+  it('personalityInterpretSchema solo acepta el id de la postulación', () => {
+    expect(personalityInterpretSchema.safeParse({ applicationId: 'abc_vac1' }).success).toBe(true);
+    expect(errorOf(personalityInterpretSchema, {})).toBe('applicationId inválido');
   });
 });
 

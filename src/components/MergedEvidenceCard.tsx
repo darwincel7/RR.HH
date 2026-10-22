@@ -1,6 +1,7 @@
 import React from 'react';
 import { Archive } from 'lucide-react';
 import { EVIDENCE_GROUPS } from '../lib/mergeCandidates';
+import { answerLabel } from '../lib/personalityTest';
 
 /**
  * Lo que traía el perfil duplicado y el principal ya tenía.
@@ -26,6 +27,12 @@ function scoreChips(data: any): Array<{ label: string; value: string }> {
   }
   if (typeof data?.interviewAiEvaluation?.score === 'number') chips.push({ label: 'Entrevista IA', value: `${data.interviewAiEvaluation.score}/100` });
   if (typeof data?.scoreSummary === 'number') chips.push({ label: 'CV', value: `${data.scoreSummary}/5` });
+  const traits = data?.personalityTest?.results?.dimensions;
+  if (Array.isArray(traits)) {
+    traits.forEach((d: any) => {
+      if (typeof d?.score === 'number') chips.push({ label: String(d.name || 'Rasgo'), value: `${d.score}/100` });
+    });
+  }
   return chips;
 }
 
@@ -36,6 +43,15 @@ function answerBlocks(data: any): Array<{ title: string; answers: Record<string,
   if (test && typeof test === 'object') out.push({ title: 'Respuestas del test', answers: test });
   if (data?.stage2Answers && typeof data.stage2Answers === 'object') {
     out.push({ title: 'Respuestas del formulario de etapa 2', answers: data.stage2Answers });
+  }
+  const pt = data?.personalityTest;
+  if (pt?.answers && typeof pt.answers === 'object' && Array.isArray(pt.questions)) {
+    const answers: Record<string, any> = {};
+    pt.questions.forEach((q: any) => {
+      const a = answerLabel(q, pt.answers[q?.id]);
+      if (a && typeof q?.text === 'string') answers[q.text] = a;
+    });
+    out.push({ title: `Respuestas del ${pt.name || 'test de personalidad'}`, answers });
   }
   return out;
 }
