@@ -877,7 +877,13 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
     for (const app of apps) {
       const otherCv = app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl;
       if (otherCv && app.scoreSummary !== undefined && app.scoreSummary !== null) continue;
-      const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
+      const appUpdate: any = {
+        scoreSummary: parsedData.initial_score_1_to_5,
+        recommendation: parsedData.recommendation,
+        // De qué CV salió: si era otro, el perfil sigue ofreciendo "Analizar CV de esta
+        // postulación" para leer el que de verdad envió (ver `src/lib/applicationCv.ts`).
+        scoreSource: otherCv ? 'perfil' : 'postulacion',
+      };
       if (namePending && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
       await db.setDocData('applications', app.id, appUpdate);
     }
@@ -2564,6 +2570,19 @@ async function startServer() {
           candidateId, vacancyId, candidateName: name,
           stage: 'Nuevo', cvUrl, cvFileType: cvFileType.slice(0, 120),
           submittedAt: now, lastStageUpdate: now,
+          // Cuando el CV del perfil no se toca (perfil reconocido), su `aiStatus` se
+          // queda como estaba: si era 'completed', el worker —que solo mira los
+          // 'pending'— no vuelve a pasar y esta postulación se quedaría SIN NOTA para
+          // siempre, fuera del Ranking. Hereda la del análisis vigente de esa persona,
+          // que es lo que el equipo ya revisó, marcada como `scoreSource: 'perfil'`: por
+          // eso el perfil ofrece "Analizar CV de esta postulación" para leer el que de
+          // verdad envió aquí (ver `src/lib/applicationCv.ts`).
+          ...(keepCv && typeof profile?.aiExtraction?.initial_score_1_to_5 === 'number'
+            ? { scoreSummary: profile.aiExtraction.initial_score_1_to_5, scoreSource: 'perfil' }
+            : {}),
+          ...(keepCv && profile?.aiExtraction?.recommendation
+            ? { recommendation: profile.aiExtraction.recommendation }
+            : {}),
         } },
       );
 

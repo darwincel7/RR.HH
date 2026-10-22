@@ -50,7 +50,7 @@ export const EVIDENCE_GROUPS: EvidenceGroup[] = [
   { key: 'test', label: 'Test situacional', fields: ['testAnswers', 'testResults', 'testSubmittedAt'] },
   { key: 'interview', label: 'Entrevista (scorecard, notas y análisis IA)', fields: ['interviewScorecard', 'interviewObservation', 'interviewAiEvaluation'] },
   { key: 'attendance', label: 'Asistencia a la entrevista', fields: ['interviewAttendance', 'interviewAttendanceLog', 'interviewInvitedAt', 'interviewLastInvitedAt', 'interviewInviteCount'] },
-  { key: 'cv', label: 'CV y puntuación del CV', fields: ['cvUrl', 'cvFileType', 'scoreSummary', 'recommendation'] },
+  { key: 'cv', label: 'CV y puntuación del CV', fields: ['cvUrl', 'cvFileType', 'scoreSummary', 'scoreSource', 'recommendation'] },
 ];
 
 /** Vacío = no hay dato: null, undefined, '' o una lista/objeto sin nada dentro. */

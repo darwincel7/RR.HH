@@ -17,6 +17,7 @@ import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
+import { APPLICATION_SCORE, PROFILE_SCORE, cvForApplication } from '../lib/applicationCv';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
@@ -327,6 +328,9 @@ export default function CandidateProfile() {
         const update: any = {
           scoreSummary: parsedData.initial_score_1_to_5,
           recommendation: parsedData.recommendation,
+          // De qué currículum salió esta nota: si era el del perfil, la postulación
+          // sigue ofreciendo el botón para leer el suyo (ver `applicationCv.ts`).
+          scoreSource: isProfileCv ? PROFILE_SCORE : APPLICATION_SCORE,
           ...(advance ? { stage: 'Precalificado' } : {}),
         };
         await updateDoc(doc(db, 'applications', application.id), update);
@@ -695,11 +699,10 @@ export default function CandidateProfile() {
   // El CV que acompañó a la postulación que se está gestionando. Si la persona volvió a
   // aplicar con un CV nuevo, el perfil pasa a tener ese; esto hace que "Ver CV" siga
   // mostrando el currículum con el que se envió la postulación elegida arriba.
-  // El par url+tipo sale SIEMPRE de la misma fuente: mezclarlos elegiría el visor de un
-  // CV para el archivo de otro (un .doc abierto como imagen no se ve).
-  const cvShown = application?.cvUrl
-    ? { url: application.cvUrl, fileType: application.cvFileType, ownedByApplication: application.cvUrl !== candidate.cvUrl }
-    : { url: candidate.cvUrl, fileType: candidate.cvFileType, ownedByApplication: false };
+  // `needsOwnAnalysis`: ese CV propio no lo ha leído la IA, y el worker ya no vuelve a
+  // pasar por él (ver `applicationCv.ts`), así que el botón de abajo es el único camino.
+  const cvShown = cvForApplication(application, candidate);
+  const needsOwnAnalysis = cvShown.needsOwnAnalysis;
 
   return (
     <div className="max-w-6xl mx-auto pb-12 animate-fade-in px-4 lg:px-0">
@@ -814,14 +817,15 @@ export default function CandidateProfile() {
                 >
                   <FileText className="w-4 h-4 lg:w-5 lg:h-5 mr-2" /> Evaluar Entrevista
                 </button>
-                {(candidate.aiStatus === 'pending' || candidate.aiStatus === 'error') && (
+                {(candidate.aiStatus === 'pending' || candidate.aiStatus === 'error' || needsOwnAnalysis) && (
                   <button 
                     onClick={analyzeCVWithAI}
                     disabled={analyzingCV}
+                    title={needsOwnAnalysis ? 'Leer con IA el currículum que envió con esta postulación' : undefined}
                     className="flex items-center justify-center p-2.5 bg-gradient-ai text-white rounded-xl font-bold hover:opacity-90 transition-opacity disabled:opacity-50 text-xs lg:text-sm"
                   >
                     {analyzingCV ? <Loader2 className="w-4 h-4 lg:w-5 lg:h-5 mr-2 animate-spin" /> : <BrainCircuit className="w-4 h-4 lg:w-5 lg:h-5 mr-2" />}
-                    {analyzingCV ? 'Analizando...' : 'Analizar IA'}
+                    {analyzingCV ? 'Analizando...' : needsOwnAnalysis ? 'Analizar CV de esta postulación' : 'Analizar IA'}
                   </button>
                 )}
               </div>

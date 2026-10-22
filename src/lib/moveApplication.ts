@@ -86,7 +86,7 @@ export async function fetchVacanciesByCandidate(candidateIds: string[]): Promise
 
 // Fields that travel with a COPY: who the person is and their CV-level screening.
 // Per-vacancy work (stage-2 answers, tests, interview scorecards) stays with the original.
-const COPY_FIELDS = ['candidateId', 'candidateName', 'cvUrl', 'cvFileType', 'scoreSummary', 'recommendation'];
+const COPY_FIELDS = ['candidateId', 'candidateName', 'cvUrl', 'cvFileType', 'scoreSummary', 'scoreSource', 'recommendation'];
 
 export async function executeVacancyMove<T extends MovableApp>(
   apps: T[],
