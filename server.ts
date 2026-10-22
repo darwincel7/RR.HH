@@ -2476,9 +2476,13 @@ async function startServer() {
       // Solo cuando esta sesión no tiene perfil propio todavía. Si lo tiene (ya aplicó
       // desde aquí), juntar los dos perfiles existentes es una unificación de verdad:
       // la hace una persona desde "Revisar duplicados", viendo antes qué va a pasar.
+      // Reconocido por sus datos, NO por su sesión: quien aplica no ha demostrado que ese
+      // perfil sea suyo (ver abajo, en la escritura, qué se le permite tocar).
+      let recognizedByContact = false;
       if (!profile && sameApplicant.length > 0) {
         [profile] = sameApplicant;
         candidateId = profile.id;
+        recognizedByContact = true;
         console.log(`[apply] perfil reutilizado ${candidateId}; esta sesión no crea un duplicado`);
       }
 
@@ -2515,10 +2519,25 @@ async function startServer() {
       //    depende que un WhatsApp entrante siga enlazándose con esta persona;
       //  - el CV y su análisis sí se renuevan: es el currículum que acaba de presentar,
       //    y sin eso su postulación nueva se quedaría sin puntuación de CV.
+      // Teléfono, correo y nombre coinciden con lo que ya había (es la condición para
+      // haber llegado aquí), así que escribirlos no cambia nada de nadie. El CV y su
+      // análisis son otra cosa: son lo que el equipo juzga.
+      //
+      // En un perfil reconocido por sus DATOS no se tocan. Quien llena el formulario no
+      // ha demostrado que ese perfil sea suyo: conocer el teléfono, el correo y el nombre
+      // completo de alguien —un ex, un rival, un familiar— bastaría para reemplazar su
+      // currículum y, con él, su análisis de IA y la nota de sus postulaciones sin
+      // puntuar. Sería sabotaje silencioso contra un candidato: ni él ni el equipo lo
+      // verían. Su postulación nueva sí lleva su propio CV (el Kanban y el perfil abren
+      // el de cada postulación), y "Analizar IA" lo analiza cuando el equipo quiera.
+      //
+      // En el perfil de la PROPIA sesión sí se renueva, como siempre: ese uid creó el
+      // perfil, así que es suyo. Y si el perfil reconocido no tenía CV, se le pone: eso
+      // completa, no destruye.
+      const keepCv = recognizedByContact && !!profile?.cvUrl;
       const candidateData: Record<string, any> = {
         email, phone, phoneNormalized,
-        cvUrl, cvFileType: cvFileType.slice(0, 120),
-        aiStatus: 'pending',
+        ...(keepCv ? {} : { cvUrl, cvFileType: cvFileType.slice(0, 120), aiStatus: 'pending' }),
         // `|| profile.name`: los perfiles viejos guardan el nombre ahí, y la interfaz lee
         // `fullName || name`. Sin eso, una re-postulación escondía detrás de un nombre
         // corto el que el equipo mantenía.

@@ -240,8 +240,15 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   Escribir en un perfil que ya existía **completa, no destruye** (igual que la
   unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
   el teléfono/correo que deja de ser el principal se guarda como alternativo — de él
-  depende que un WhatsApp entrante siga enlazándose con esa persona. El CV sí se renueva:
-  es el que acaba de presentar, y sin eso su postulación nueva no tendría nota de CV.
+  depende que un WhatsApp entrante siga enlazándose con esa persona.
+  El **CV y su análisis no se tocan** en un perfil reconocido por sus datos: quien llena
+  el formulario no ha demostrado que ese perfil sea suyo, y conocer el teléfono, el correo
+  y el nombre completo de alguien —un ex, un rival, un familiar— bastaría para reemplazar
+  su currículum y con él su análisis de IA y la nota de sus postulaciones sin puntuar.
+  Sería sabotaje silencioso contra un candidato: ni él ni el equipo lo verían. Su
+  postulación nueva sí lleva su propio CV, y *Analizar IA* lo lee cuando el equipo quiera.
+  En el perfil de la **propia sesión** sí se renueva, como siempre: ese uid creó el perfil,
+  así que es suyo. Y si el perfil reconocido no tenía CV, se le pone.
   Cada postulación conserva **su** CV: el Kanban y el perfil abren el currículum con el
   que se envió esa postulación, y la nota del CV no se reescribe en una postulación
   presentada con otro — ni al reanalizar a mano, ni desde el worker, que además devuelve
