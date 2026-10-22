@@ -101,6 +101,7 @@ error es silencioso y caro:
 | [`src/lib/participantStatus.test.ts`](src/lib/participantStatus.test.ts) | Con varias citas de la misma postulación manda la última: marcar la de hoy no puede borrar el "asistió" real de la de enero |
 | [`src/lib/duplicateGroups.test.ts`](src/lib/duplicateGroups.test.ts) | Detectar duplicados en toda la base: agrupa de forma transitiva (A~B por teléfono y B~C por correo son un grupo) y un nombre suelto como "Ana" nunca agrupa a personas distintas |
 | [`src/lib/applicantIdentity.test.ts`](src/lib/applicantIdentity.test.ts) | Cuándo una postulación nueva pertenece a un perfil que ya existe: hacen falta teléfono, correo **y** nombre (dos hermanas con el celular y el correo de la casa quedan separadas, y el nombre de pila solo nunca basta) |
+| [`serverDb.test.ts`](serverDb.test.ts) | Las consultas con que se busca a una persona por su contacto: si no devuelven su perfil, la comparación de identidad nunca llega a hacerse y se duplica — así que se busca el teléfono como lo escribió (no solo canónico) y el correo en minúsculas |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los

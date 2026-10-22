@@ -902,6 +902,16 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
       return false;
     }
+    // Tampoco es de este CV si el CV ya no es este: la persona volvió a aplicar con otro
+    // currículum mientras la IA leía el anterior. Marcar 'error' aquí pisaría la cola del
+    // nuevo —el worker solo toma los 'pending'— y ese CV no se leería nunca, dejando su
+    // postulación sin nota. El mismo chequeo que en el camino de éxito, antes de escribir.
+    const current = await db.getDocData('candidates', cand.id).catch(() => null);
+    if (current && cand.cvUrl && current.cvUrl && current.cvUrl !== cand.cvUrl) {
+      console.log(`[server CV worker] ${cand.id}: falló el CV anterior, pero ya hay otro; vuelve a la cola`);
+      await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
+      return false;
+    }
     await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
     if (namePending) {
       // Only placeholder names get the error label — a manually-typed name stays intact.
@@ -2445,7 +2455,7 @@ async function startServer() {
       // hermano, y entonces el perfil que SÍ era de esta persona no se miraba nunca y se
       // duplicaba otra vez. Los ya unificados se descartan: su contenido vive en el vivo
       // (que aparece en esta misma búsqueda, porque conserva sus contactos alternativos).
-      const matches = (await db.listCandidatesByPhoneOrEmail(phoneNormalized, email, 10))
+      const matches = (await db.listCandidatesByPhoneOrEmail(phone, email, 10))
         .filter((c: any) => c?.id && !c.mergedInto && c.id !== candidateId);
 
       // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así

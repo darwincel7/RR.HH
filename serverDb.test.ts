@@ -1,0 +1,52 @@
+import { describe, it, expect } from 'vitest';
+import { contactLookupAttempts } from './serverDb';
+
+/**
+ * Buscar a una persona por su contacto es el paso del que depende reconocerla: si la
+ * consulta no devuelve su perfil, `isSameApplicant` nunca llega a compararlo y la
+ * postulación nueva nace como un duplicado. Estas pruebas fijan que se busque en las
+ * formas en que el teléfono y el correo están REALMENTE guardados en la base, no solo
+ * en la canónica.
+ */
+describe('las consultas para encontrar a alguien por su contacto', () => {
+  const attempts = (phone: unknown, email: unknown) =>
+    contactLookupAttempts(phone, email).map(([field, , value]) => `${field}=${value}`);
+
+  it('busca el teléfono como lo escribió la persona y en su forma canónica', () => {
+    // Un perfil viejo o de subida masiva puede no tener `phoneNormalized` y guardar
+    // "809-555-1234" tal cual: comparar solo la forma canónica no lo encuentra nunca.
+    const a = attempts('809-555-1234', '');
+    expect(a).toContain('phoneNormalized=18095551234');
+    expect(a).toContain('phone=809-555-1234');
+    expect(a).toContain('phone=18095551234');
+    expect(a).toContain('phone=8095551234'); // sin el 1 del país
+  });
+
+  it('busca también en los teléfonos y correos alternativos de una unificación', () => {
+    const a = attempts('8095551234', 'Ana@Mail.com');
+    expect(a).toContain('alternatePhones=18095551234');
+    expect(a).toContain('alternateEmails=Ana@Mail.com');
+    expect(a).toContain('alternateEmails=ana@mail.com');
+  });
+
+  it('busca el correo escrito y en minúsculas (Firestore no compara sin mayúsculas)', () => {
+    const a = attempts('', 'Ana@Mail.com');
+    expect(a).toContain('email=Ana@Mail.com');
+    expect(a).toContain('email=ana@mail.com');
+  });
+
+  it('pone primero las consultas que más rinden: el campo canónico y el correo', () => {
+    // Se corta en cuanto hay suficientes resultados, así que el orden importa.
+    const first = contactLookupAttempts('809-555-1234', 'ana@mail.com')[0];
+    expect(first).toEqual(['phoneNormalized', '==', '18095551234']);
+  });
+
+  it('no repite consultas ni busca valores vacíos', () => {
+    const a = contactLookupAttempts('18095551234', 'ana@mail.com');
+    expect(new Set(a.map(x => x.join('|'))).size).toBe(a.length);
+    expect(a.every(([, , value]) => !!value)).toBe(true);
+    // Sin teléfono, solo las del correo; sin nada, ninguna consulta.
+    expect(contactLookupAttempts('', 'ana@mail.com').every(([f]) => f.toLowerCase().includes('mail'))).toBe(true);
+    expect(contactLookupAttempts('', '')).toEqual([]);
+  });
+});

@@ -44,8 +44,14 @@ export interface ServerDb {
    * [{id, ...datos}]. `findCandidateIdByPhoneOrEmail` devuelve uno ARBITRARIO (limit 1),
    * y eso no sirve para decidir identidad: si una familia comparte el celular, el que
    * vuelve puede no ser el que devuelve la consulta. Quien decide necesita verlos todos.
+   *
+   * `phone` entra TAL CUAL lo escribió la persona: aquí se prueban sus variantes
+   * (canónica, cruda y sin el 1 del país), porque los perfiles viejos y los de subida
+   * masiva pueden no tener `phoneNormalized`. Del correo se prueban la forma escrita y
+   * la minúscula; Firestore no sabe comparar sin distinguir mayúsculas, así que un
+   * tercer uso de mayúsculas distinto se escapa y lo recoge "Revisar duplicados".
    */
-  listCandidatesByPhoneOrEmail(phoneNormalized: string, email: string, max: number): Promise<any[]>;
+  listCandidatesByPhoneOrEmail(phone: string, email: string, max: number): Promise<any[]>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -134,6 +140,30 @@ function resolveRoles(email: string | null, roleIds: string[]): { isRecruiter: b
   const isAdmin = roleIds.includes('admin') || ADMIN_EMAILS.includes(lower);
   const isRecruiter = isAdmin || roleIds.includes('recruiter');
   return { isRecruiter, isAdmin };
+}
+
+/**
+ * Las consultas con las que se busca a una persona por su contacto, en orden: primero
+ * las que más rinden (el campo canónico), luego las variantes que cubren los perfiles
+ * viejos y los de subida masiva, que pueden no tener `phoneNormalized` y guardan el
+ * teléfono como lo escribió alguien.
+ *
+ * Es exactamente lo que `isSameApplicant` normaliza al comparar: si la búsqueda no
+ * encuentra el perfil, esa comparación nunca llega a hacerse y la persona se duplica.
+ */
+export function contactLookupAttempts(phone: unknown, email: unknown): Array<[string, string, string]> {
+  const norm = normalizePhone(String(phone || ''));
+  const raw = String(phone || '').trim();
+  const phones = Array.from(new Set([norm, raw, norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
+  const written = String(email || '').trim();
+  const emails = Array.from(new Set([written, written.toLowerCase()].filter(Boolean)));
+
+  const attempts: Array<[string, string, string]> = [];
+  phones.forEach(p => attempts.push(['phoneNormalized', '==', p]));
+  emails.forEach(e => attempts.push(['email', '==', e]));
+  phones.forEach(p => attempts.push(['phone', '==', p], ['alternatePhones', 'array-contains', p]));
+  emails.forEach(e => attempts.push(['alternateEmails', 'array-contains', e]));
+  return attempts;
 }
 
 /**
@@ -227,17 +257,9 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         }
         return null;
       },
-      async listCandidatesByPhoneOrEmail(phoneNormalized, email, max) {
+      async listCandidatesByPhoneOrEmail(phone, email, max) {
         const byId = new Map<string, any>();
-        const attempts: Array<[string, string, unknown]> = [
-          ['phoneNormalized', '==', phoneNormalized],
-          ['phone', '==', phoneNormalized],
-          ['alternatePhones', 'array-contains', phoneNormalized],
-          ['email', '==', email],
-          ['alternateEmails', 'array-contains', email],
-        ];
-        for (const [field, op, value] of attempts) {
-          if (!value) continue;
+        for (const [field, op, value] of contactLookupAttempts(phone, email)) {
           const snap = await adb.collection('candidates').where(field, op as any, value).limit(max).get();
           snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
           if (byId.size >= max) break;
@@ -573,18 +595,10 @@ async function initClient(): Promise<ServerDb> {
       }
       return null;
     },
-    async listCandidatesByPhoneOrEmail(phoneNormalized, email, max) {
+    async listCandidatesByPhoneOrEmail(phone, email, max) {
       const byId = new Map<string, any>();
-      const attempts: Array<[string, any, unknown]> = [
-        ['phoneNormalized', '==', phoneNormalized],
-        ['phone', '==', phoneNormalized],
-        ['alternatePhones', 'array-contains', phoneNormalized],
-        ['email', '==', email],
-        ['alternateEmails', 'array-contains', email],
-      ];
-      for (const [field, op, value] of attempts) {
-        if (!value) continue;
-        const snap = await getDocs(query(collection(cdb, 'candidates'), where(field, op, value), limit(max)));
+      for (const [field, op, value] of contactLookupAttempts(phone, email)) {
+        const snap = await getDocs(query(collection(cdb, 'candidates'), where(field, op as any, value), limit(max)));
         snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
         if (byId.size >= max) break;
       }
