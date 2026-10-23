@@ -30,12 +30,22 @@ export interface IdentityMatch {
   reason: string;
 }
 
-/** Las palabras del nombre que de verdad identifican: sin partículas ("de", "la", "los"). */
+/**
+ * Las palabras del nombre que de verdad identifican: sin partículas ("de", "la", "los")
+ * y SIN REPETIR.
+ *
+ * Lo de no repetir es lo que sostiene la regla de las dos palabras: contando
+ * repeticiones, "Ana Ana" daba dos y quedaba contenido en "Ana Pérez", así que bastaba
+ * el nombre de pila (escrito dos veces) más el teléfono y el correo para caer en SU
+ * perfil — exactamente el agujero que la regla existe para tapar. Y en `preferredName`,
+ * un nombre repetido no puede ganarle a uno con un apellido de verdad.
+ */
 export function nameTokens(raw: unknown): string[] {
   if (isPlaceholderName(String(raw ?? ''))) return [];
-  return normalizeName(raw)
+  const tokens = normalizeName(raw)
     .split(' ')
     .filter(t => t.length >= 2 && !PARTICLES.has(t));
+  return Array.from(new Set(tokens));
 }
 
 /**

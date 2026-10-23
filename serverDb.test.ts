@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contactLookupAttempts, followMergedInto, lookupDimension } from './serverDb';
+import { contactLookupAttempts, exactContactLookups, followMergedInto, lookupDimension } from './serverDb';
 
 /**
  * Buscar a una persona por su contacto es el paso del que depende reconocerla: si la
@@ -103,5 +103,30 @@ describe('seguir el rastro de una unificación', () => {
 
   it('sin id no hay nada que seguir', async () => {
     expect(await followMergedInto(read(base), null)).toBe(null);
+  });
+});
+
+describe('la consulta que de verdad identifica: teléfono Y correo', () => {
+  it('pide los dos datos en la misma consulta', () => {
+    // Las consultas por un solo campo necesitan tope (un número de negocio compartido
+    // haría leer la base entera en cada postulación) y un tope siempre deja fuera al
+    // perfil número once. Pidiendo los dos juntos eso deja de importar.
+    const [primera] = exactContactLookups('809-555-1234', 'Ana@Mail.com');
+    expect(primera).toEqual([
+      ['phoneNormalized', '==', '18095551234'],
+      ['email', '==', 'Ana@Mail.com'],
+    ]);
+  });
+
+  it('prueba el correo escrito y en minúsculas (Firestore compara exacto)', () => {
+    const correos = exactContactLookups('8095551234', 'Ana@Mail.com').map(c => c[1][2]);
+    expect(correos).toEqual(['Ana@Mail.com', 'ana@mail.com']);
+    // Si ya venía en minúsculas, una sola consulta.
+    expect(exactContactLookups('8095551234', 'ana@mail.com')).toHaveLength(1);
+  });
+
+  it('sin los dos datos no hay consulta precisa que hacer', () => {
+    expect(exactContactLookups('', 'ana@mail.com')).toEqual([]);
+    expect(exactContactLookups('8095551234', '')).toEqual([]);
   });
 });

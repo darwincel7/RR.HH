@@ -98,6 +98,17 @@ describe('cuándo dos nombres pueden ser la misma persona', () => {
     expect(namesCompatible('Ana Pérez', 'Ana')).toBe(false);
   });
 
+  it('repetir el nombre de pila no vale como segunda palabra', () => {
+    // Contando repeticiones, "Ana Ana" daba dos palabras y quedaba contenido en
+    // "Ana Pérez": bastaba el nombre de pila escrito dos veces para caer en su perfil.
+    expect(namesCompatible('Ana Ana', 'Ana Pérez')).toBe(false);
+    expect(namesCompatible('Ana Pérez', 'ana ana')).toBe(false);
+    expect(nameTokens('Ana Ana')).toEqual(['ana']);
+    expect(nameTokens('Ana de la Ana')).toEqual(['ana']);
+    // Y un nombre repetido no le gana a uno con un apellido de verdad.
+    expect(preferredName('Ana Pérez', 'Ana Ana')).toBe('Ana Pérez');
+  });
+
   it('cada uno con un apellido propio: son dos personas', () => {
     expect(namesCompatible('Ana Pérez', 'Ana Gómez')).toBe(false);
     expect(namesCompatible('Juan Pérez', 'Luis Pérez')).toBe(false);

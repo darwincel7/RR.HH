@@ -187,6 +187,32 @@ export function contactLookupAttempts(phone: unknown, email: unknown): Array<[st
 }
 
 /**
+ * La consulta que de verdad IDENTIFICA: teléfono y correo a la vez, que es lo que exige
+ * `isSameApplicant`.
+ *
+ * Las consultas por un solo campo tienen que llevar tope —si no, un número de negocio
+ * compartido haría leer la base entera en cada postulación, y eso lo puede provocar
+ * cualquiera desde el formulario público— y un tope siempre deja fuera al perfil número
+ * once. Buscando los dos datos juntos eso deja de importar: devuelve a quien coincide en
+ * ambos, por muchos que compartan uno de los dos. Firestore resuelve varias igualdades
+ * con sus índices de un solo campo, sin índice compuesto.
+ *
+ * El correo se prueba escrito y en minúsculas porque Firestore compara exacto; el
+ * teléfono, en su forma canónica, que es la que todos los caminos de escritura guardan
+ * (y la que el relleno pone en los perfiles viejos).
+ */
+export function exactContactLookups(phone: unknown, email: unknown): Array<Array<[string, string, string]>> {
+  const norm = normalizePhone(String(phone || ''));
+  const written = String(email || '').trim();
+  if (!norm || !written) return [];
+  const emails = Array.from(new Set([written, written.toLowerCase()]));
+  return emails.map(e => [
+    ['phoneNormalized', '==', norm] as [string, string, string],
+    ['email', '==', e] as [string, string, string],
+  ]);
+}
+
+/**
  * A qué dato de contacto pertenece una consulta: al teléfono o al correo.
  *
  * La búsqueda tiene que agotar las DOS dimensiones. Si se corta al juntar suficientes
@@ -300,9 +326,19 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async listCandidatesByPhoneOrEmail(phone, email, max) {
         const byId = new Map<string, any>();
-        // El tope es POR DIMENSIÓN, no global (ver `lookupDimension`): cortar al llegar a
-        // `max` dejaba sin ejecutar las consultas del correo cuando muchos perfiles
-        // comparten el teléfono.
+        // Primero la consulta precisa —teléfono Y correo— porque es la que identifica y
+        // no le afecta cuántos perfiles compartan uno de los dos (ver `exactContactLookups`).
+        for (const clause of exactContactLookups(phone, email)) {
+          let q: any = adb.collection('candidates');
+          clause.forEach(([f, op, v]) => { q = q.where(f, op as any, v); });
+          const snap = await q.limit(5).get();
+          snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
+        }
+        // Y después por un solo campo, que es lo que encuentra a quien tiene el dato en
+        // otro sitio (los alternativos de una unificación, un teléfono viejo sin forma
+        // canónica). El tope es POR DIMENSIÓN, no global (ver `lookupDimension`): cortar
+        // al llegar a `max` dejaba sin ejecutar las consultas del correo cuando muchos
+        // perfiles comparten el teléfono.
         const found = new Map<string, number>();
         for (const [field, op, value] of contactLookupAttempts(phone, email)) {
           const dim = lookupDimension(field);
@@ -693,7 +729,13 @@ async function initClient(): Promise<ServerDb> {
     },
     async listCandidatesByPhoneOrEmail(phone, email, max) {
       const byId = new Map<string, any>();
-      // Tope por dimensión, igual que en modo admin (ver `lookupDimension`).
+      // La consulta precisa primero, igual que en modo admin (ver `exactContactLookups`).
+      for (const clause of exactContactLookups(phone, email)) {
+        const q = query(collection(cdb, 'candidates'), ...clause.map(([f, op, v]) => where(f, op as any, v)), limit(5));
+        const snap = await getDocs(q);
+        snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
+      }
+      // Tope por dimensión en las de un solo campo (ver `lookupDimension`).
       const found = new Map<string, number>();
       for (const [field, op, value] of contactLookupAttempts(phone, email)) {
         const dim = lookupDimension(field);
