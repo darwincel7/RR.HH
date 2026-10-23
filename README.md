@@ -102,7 +102,7 @@ error es silencioso y caro:
 | [`src/lib/duplicateGroups.test.ts`](src/lib/duplicateGroups.test.ts) | Detectar duplicados en toda la base: agrupa de forma transitiva (A~B por teléfono y B~C por correo son un grupo) y un nombre suelto como "Ana" nunca agrupa a personas distintas |
 | [`src/lib/applicantIdentity.test.ts`](src/lib/applicantIdentity.test.ts) | Cuándo una postulación nueva pertenece a un perfil que ya existe: hacen falta teléfono, correo **y** nombre (dos hermanas con el celular y el correo de la casa quedan separadas, y el nombre de pila solo nunca basta) |
 | [`src/lib/applicationCv.test.ts`](src/lib/applicationCv.test.ts) | Qué currículum se ve en cada postulación y quién lo ha leído: una nota heredada del perfil no hace pasar por analizado el CV que la persona envió aquí |
-| [`serverDb.test.ts`](serverDb.test.ts) | Las consultas con que se busca a una persona por su contacto: si no devuelven su perfil, la comparación de identidad nunca llega a hacerse y se duplica — así que se busca el teléfono como lo escribió (no solo canónico) y el correo en minúsculas |
+| [`serverDb.test.ts`](serverDb.test.ts) | Las consultas con que se busca a una persona por su contacto: si no devuelven su perfil, la comparación de identidad nunca llega a hacerse y se duplica — la precisa pide teléfono **y** correo a la vez, y las de un solo campo prueban el teléfono como lo escribió (no solo canónico) y el correo en minúsculas. También el rastro de una unificación: hasta el perfil vivo, sin colgarse en un ciclo, y qué pasa si la lectura falla |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -242,9 +242,16 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   ([`src/lib/applicantIdentity.ts`](src/lib/applicantIdentity.ts)). No es una regla nueva:
   con la misma sesión ya pasaba — el perfil se actualizaba con los datos y el CV nuevos.
   El listón es alto a propósito: compartir un celular es normal en una familia, y hacen
-  falta **dos palabras** en los dos nombres (con el nombre de pila solo, "Ana" estaría
-  contenido en "Ana Gómez" y bastaría conocer el teléfono, el correo y el nombre de pila
-  de alguien para caer dentro de su perfil). Si algo no cuadra se crea un perfil aparte y
+  falta **dos palabras distintas** en los dos nombres (con el nombre de pila solo, "Ana"
+  estaría contenido en "Ana Gómez" y bastaría conocer el teléfono, el correo y el nombre
+  de pila de alguien para caer dentro de su perfil; y repetirlo tampoco vale — "Ana Ana"
+  no es compatible con "Ana Pérez").
+  Se busca primero por **teléfono y correo a la vez**, que es la consulta que de verdad
+  identifica y a la que no le afecta cuántos perfiles compartan uno de los dos; después
+  por cada dato por separado, que es lo que encuentra a quien lo tiene en otro sitio (los
+  alternativos de una unificación, un teléfono viejo sin forma canónica). Esas llevan
+  tope, porque si no un número de negocio compartido haría leer la base entera en cada
+  postulación — y eso lo puede provocar cualquiera desde el formulario público. Si algo no cuadra se crea un perfil aparte y
   queda en *Revisar duplicados*: un duplicado se arregla en dos clics; confundir a dos
   personas, no. Y compartir el contacto **no bloquea**: solo la postulación de un perfil
   que sí es esta persona impide repetir en la misma vacante. Bloquear por el celular
