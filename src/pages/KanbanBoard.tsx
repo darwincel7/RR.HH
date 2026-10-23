@@ -1,16 +1,16 @@
 import React, { useState, useEffect } from 'react';
-import { useParams, Link, useNavigate } from 'react-router-dom';
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { collection, query, where, onSnapshot, doc, updateDoc, getDoc, serverTimestamp, setDoc, writeBatch, documentId } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
-import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, FileText, Calendar, AlertTriangle, CheckCircle, ArrowRightLeft, Search } from 'lucide-react';
+import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, FileText, Calendar, AlertTriangle, CheckCircle, ArrowRightLeft, Search, ListOrdered, Trophy } from 'lucide-react';
 import { HistoryNavButtons } from '../components/layout/TopBar';
 
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
-import Modal from '../components/ui/Modal';
+import CvPreviewModal, { type CvPreview } from '../components/CvPreviewModal';
 import WhatsAppSendReport from '../components/WhatsAppSendReport';
 import { requestCvWorkerRun } from '../lib/api';
 import { getKanbanOrder, computeDropOrder } from '../lib/kanbanOrder';
@@ -26,6 +26,7 @@ import { useStageNotifications } from '../lib/useStageNotifications';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import { interviewInviteStamp, isInterviewStage } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
+import { useScrollMemory } from '../lib/useScrollMemory';
 
 export default function KanbanBoard() {
   const { vacancyId } = useParams();
@@ -34,7 +35,16 @@ export default function KanbanBoard() {
   const [applications, setApplications] = useState<any[]>([]);
   const [candidates, setCandidates] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
-  const [searchTerm, setSearchTerm] = useState('');
+  // Back from a profile = same horizontal spot on the board and same spot in each column.
+  useScrollMemory(!loading);
+  // The search lives in the URL (?q=) so "Atrás" from a profile brings it back too.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const searchTerm = searchParams.get('q') || '';
+  const setSearchTerm = (value: string) => setSearchParams(prev => {
+    const next = new URLSearchParams(prev);
+    if (value) next.set('q', value); else next.delete('q');
+    return next;
+  }, { replace: true });
   const searchRef = React.useRef<HTMLInputElement>(null);
   // Notes are searchable from the board too (loaded once; optional).
   const [notesByCandidate, setNotesByCandidate] = useState<Map<string, CandidateNote[]>>(new Map());
@@ -48,7 +58,7 @@ export default function KanbanBoard() {
     loadAllNotesByCandidate().then(setNotesByCandidate).catch(e => console.warn('Notas no disponibles para la búsqueda:', e));
   }, []);
   // CV preview modal (floating window) — shown in-place instead of a new tab.
-  const [cvPreview, setCvPreview] = useState<{ url: string; name: string; fileType?: string } | null>(null);
+  const [cvPreview, setCvPreview] = useState<CvPreview | null>(null);
 
   // Bulk selection state
   const [selectedApps, setSelectedApps] = useState<Set<string>>(new Set());
@@ -642,10 +652,11 @@ export default function KanbanBoard() {
           </div>
           <Link
             to={`/vacancies/${vacancyId}/ranking`}
-            title="Ver el ranking final de esta vacante"
+            title="Ver a todos en una tabla: puntajes de cada evaluación, pros y contras"
             className="h-9 shrink-0 flex items-center px-3 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap"
           >
-            Ranking final
+            <Trophy className="w-3.5 h-3.5 mr-1.5 text-amber-400" />
+            Ranking
           </Link>
         </div>
       </div>
@@ -710,7 +721,7 @@ export default function KanbanBoard() {
 
       {/* The board takes exactly the height left under the header; each column scrolls
           on its own, and its drop zone still covers the whole column. */}
-      <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden pb-2">
+      <div data-scroll-key="board" className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden pb-2">
         <DragDropContext onDragEnd={onDragEnd}>
           <div className="flex h-full space-x-3 min-w-max px-1">
             {columns.map(column => (
@@ -742,6 +753,15 @@ export default function KanbanBoard() {
                     <span className="bg-white border border-slate-200 text-slate-600 py-0.5 px-2 rounded-full text-[10px] font-bold shadow-sm">
                       {column.items.length}
                     </span>
+                    {column.items.length > 0 && (
+                      <Link
+                        to={`/vacancies/${vacancyId}/ranking?etapas=${encodeURIComponent(column.id)}`}
+                        title={`Ver "${column.title}" en el ranking: puntajes, pros y contras en una línea`}
+                        className="p-0.5 rounded text-slate-400 hover:text-violet-700 hover:bg-violet-50 transition-colors"
+                      >
+                        <ListOrdered className="w-3.5 h-3.5" />
+                      </Link>
+                    )}
                   </div>
                 </div>
 
@@ -766,6 +786,7 @@ export default function KanbanBoard() {
                     <div
                       ref={provided.innerRef}
                       {...provided.droppableProps}
+                      data-scroll-key={`col:${column.id}`}
                       className={`flex-1 overflow-y-auto p-1.5 lg:p-2 min-h-[120px] rounded-2xl transition-all duration-300 ${
                         snapshot.isDraggingOver ? 'bg-violet-50/50 border-2 border-dashed border-violet-300' : 'bg-slate-100/50 border-2 border-transparent'
                       }`}
@@ -774,6 +795,14 @@ export default function KanbanBoard() {
                         const daysInStage = getDaysInStage(item.lastStageUpdate, item.submittedAt);
                         const isStale = daysInStage > 5;
                         const isSelected = selectedApps.has(item.id);
+                        // El CV de ESTA postulación primero: quien volvió a aplicar con un
+                        // CV nuevo no puede dejar sin CV visible a la postulación que envió
+                        // con el anterior. url y tipo salen juntos de la misma fuente:
+                        // mezclarlos abriría un .doc con el visor de otro formato.
+                        const cand = candidates[item.candidateId];
+                        const cv = item.cvUrl
+                          ? { url: item.cvUrl, fileType: item.cvFileType }
+                          : { url: cand?.cvUrl, fileType: cand?.cvFileType };
 
                         return (
                           // @ts-ignore - React 18 types issue with @hello-pangea/dnd
@@ -853,9 +882,30 @@ export default function KanbanBoard() {
                                       </div>
                                     )}
                                   </div>
-                                  <div className="text-[10px] text-violet-600 font-bold flex items-center bg-violet-50 px-2 py-1 rounded-md">
-                                    <User className="w-2.5 h-2.5 mr-1" />
-                                    Perfil
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    {/* Open the candidate's CV in a floating window, right from the card. */}
+                                    <button
+                                      type="button"
+                                      onMouseDown={(e) => e.stopPropagation()}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (cv.url) setCvPreview({ url: cv.url, name: item.candidateName || 'Candidato', fileType: cv.fileType });
+                                      }}
+                                      disabled={!cv.url}
+                                      title={cv.url ? 'Ver el currículum en una ventana' : 'CV aún no disponible'}
+                                      className={`flex items-center gap-1 text-[10px] font-bold px-2 py-1 rounded-md transition-colors ${
+                                        cv.url
+                                          ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                                      }`}
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      {cv.url ? 'Ver CV' : 'Sin CV'}
+                                    </button>
+                                    {/* The whole card opens the profile; this is just the hint. */}
+                                    <span title="Abrir el perfil" className="text-violet-600 bg-violet-50 p-1 rounded-md">
+                                      <User className="w-3 h-3" />
+                                    </span>
                                   </div>
                                 </div>
 
@@ -882,39 +932,6 @@ export default function KanbanBoard() {
                                   )))}
                                 />
 
-                                {/* Open the candidate's CV directly from the card. */}
-                                {(() => {
-                                  // El de ESTA postulación primero: quien volvió a
-                                  // aplicar con un CV nuevo no puede dejar sin CV
-                                  // visible a la postulación que envió con el anterior.
-                                  // url y tipo salen juntos de la misma fuente: mezclarlos
-                                  // abriría un .doc con el visor de otro formato.
-                                  const cand = candidates[item.candidateId];
-                                  const cv = item.cvUrl
-                                    ? { url: item.cvUrl, fileType: item.cvFileType }
-                                    : { url: cand?.cvUrl, fileType: cand?.cvFileType };
-                                  const cvUrl = cv.url;
-                                  return (
-                                    <button
-                                      type="button"
-                                      onMouseDown={(e) => e.stopPropagation()}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        if (cvUrl) setCvPreview({ url: cvUrl, name: item.candidateName || 'Candidato', fileType: cv.fileType });
-                                      }}
-                                      disabled={!cvUrl}
-                                      title={cvUrl ? 'Ver el currículum en una ventana' : 'CV aún no disponible'}
-                                      className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs font-bold py-1.5 rounded-lg transition-colors ${
-                                        cvUrl
-                                          ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
-                                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
-                                      }`}
-                                    >
-                                      <FileText className="w-3.5 h-3.5" />
-                                      {cvUrl ? 'Ver Currículum' : 'CV no disponible'}
-                                    </button>
-                                  );
-                                })()}
                               </div>
                             )}
                           </Draggable>
@@ -1002,45 +1019,8 @@ export default function KanbanBoard() {
         onClose={() => setSendReport(null)}
       />
 
-      {/* CV preview — floating window in the same tab. Closes on X, Escape, or click outside. */}
-      <Modal isOpen={!!cvPreview} onClose={() => setCvPreview(null)} closeOnBackdrop overlayClassName="bg-slate-900/60 z-[110]">
-        <div className="bg-white rounded-2xl shadow-2xl w-full max-w-4xl h-[85vh] flex flex-col overflow-hidden animate-scale-in">
-          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200 shrink-0">
-            <div className="flex items-center gap-2 min-w-0">
-              <FileText className="w-5 h-5 text-indigo-600 shrink-0" />
-              <h3 className="font-bold text-slate-800 truncate">Currículum — {cvPreview?.name}</h3>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <a
-                href={cvPreview?.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs font-bold text-indigo-600 hover:bg-indigo-50 px-3 py-1.5 rounded-lg transition-colors"
-              >
-                Abrir aparte
-              </a>
-              <button
-                onClick={() => setCvPreview(null)}
-                className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
-                title="Cerrar"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-          </div>
-          <div className="flex-1 bg-slate-100 min-h-0">
-            {cvPreview && (
-              <iframe
-                src={cvPreview.fileType?.includes('word') || cvPreview.fileType === 'application/msword'
-                  ? `https://docs.google.com/gview?embedded=true&url=${encodeURIComponent(cvPreview.url)}`
-                  : cvPreview.url}
-                title="Currículum"
-                className="w-full h-full border-0"
-              />
-            )}
-          </div>
-        </div>
-      </Modal>
+      {/* CV preview — floating window in the same tab. */}
+      <CvPreviewModal cv={cvPreview} onClose={() => setCvPreview(null)} />
 
       {/* Floating notices: right-middle, never block clicks elsewhere (pointer-events-none
           on the rail), fade out on their own; click one to dismiss it early. */}

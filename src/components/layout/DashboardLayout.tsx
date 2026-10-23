@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock, Smartphone } from 'lucide-react';
+import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock, Trophy, Smartphone } from 'lucide-react';
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import AiStatusBanner from '../AiStatusBanner';
 import CVWorker from '../CVWorker';
@@ -118,15 +118,16 @@ export default function DashboardLayout() {
     );
   }
 
-  // The Kanban needs every pixel of height for its columns: it brings its own one-row
-  // header (arrows + title + its search), so here it gets no TopBar, tight padding,
-  // the full width, and exactly the screen's height (each column scrolls on its own).
-  const isBoard = /^\/vacancies\/[^/]+\/kanban\/?$/.test(location.pathname);
+  // The Kanban and the Ranking need every pixel of height for their lists: they bring
+  // their own one-row header (arrows + title + their search), so here they get no TopBar,
+  // tight padding, the full width, and exactly the screen's height (lists scroll inside).
+  const isBoard = /^\/(vacancies\/[^/]+\/(kanban|ranking)|ranking)\/?$/.test(location.pathname);
 
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Vacantes', href: '/vacancies', icon: Briefcase },
     { name: 'Candidatos', href: '/candidates', icon: Users },
+    { name: 'Ranking', href: '/ranking', icon: Trophy },
     { name: 'Entrevistas', href: '/interviews', icon: Users },
     { name: 'Formularios', href: '/forms', icon: FileText },
     { name: 'Teléfonos', href: '/phones', icon: Smartphone },
