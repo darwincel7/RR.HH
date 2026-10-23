@@ -18,6 +18,7 @@ import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
+import PersonalityTestCard from '../components/PersonalityTestCard';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
@@ -1275,6 +1276,18 @@ export default function CandidateProfile() {
                   )}
                 </div>
               </div>
+
+              {/* Test de personalidad: lo aplica la entrevistadora en el momento que decida. */}
+              {/* El key reinicia su estado local (errores, IA en curso) al cambiar de postulación. */}
+              {application && (
+                <div key={application.id}>
+                  <PersonalityTestCard
+                    application={application}
+                    candidateName={candidate?.fullName}
+                    completedElsewhere={allApplications.find(a => a.id !== application.id && a.personalityTest?.status === 'completed')?.vacancyTitle}
+                  />
+                </div>
+              )}
 
               {/* AI analysis of the interview (scorecard + described answers + comments).
                   Appears once there is an interview to talk about — not on every new applicant. */}

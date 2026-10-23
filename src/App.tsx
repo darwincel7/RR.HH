@@ -22,6 +22,7 @@ const Stage2Form = lazy(() => import("./pages/Stage2Form"));
 const Interviews = lazy(() => import("./pages/Interviews"));
 const Ranking = lazy(() => import("./pages/Ranking"));
 const CandidateTest = lazy(() => import("./pages/CandidateTest"));
+const PersonalityTest = lazy(() => import("./pages/PersonalityTest"));
 const FormsSettings = lazy(() => import("./pages/FormsSettings"));
 const CandidatesList = lazy(() => import("./pages/CandidatesList"));
 const Careers = lazy(() => import("./pages/Careers"));
@@ -45,6 +46,7 @@ export default function App() {
             <Route path="/apply/:vacancyId" element={<Apply />} />
             <Route path="/eval/:applicationId" element={<Stage2Form />} />
             <Route path="/test/:applicationId" element={<CandidateTest />} />
+            <Route path="/personalidad/:applicationId" element={<PersonalityTest />} />
             <Route path="/" element={<DashboardLayout />}>
               <Route index element={<Dashboard />} />
               <Route path="vacancies" element={<Vacancies />} />

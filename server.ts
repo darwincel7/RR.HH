@@ -44,13 +44,16 @@ import { getServerDb, followMergedInto, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
-  mergeCandidatesSchema,
+  mergeCandidatesSchema, personalitySubmitSchema, personalityInterpretSchema,
   decodeImageDataUrl, firstIssueMessage, EMAIL_RE, isOurStorageUrl,
 } from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
 import { blocksNewApplication, isSameApplicant, preferredName } from './src/lib/applicantIdentity';
+import { resolvePersonalityTemplate, publicQuestions, checkAnswers, scorePersonality } from './src/lib/personalityTest';
+import { firstNameOf } from './src/lib/personName';
+import { buildPersonalityEvidence, buildPersonalityPrompt, normalizePersonalityInterpretation } from './serverPersonalityEval';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
   INTERVIEW_RECOMMENDATIONS, INSIGHT_SIGNALS,
@@ -3843,6 +3846,162 @@ async function startServer() {
     } catch (error: any) {
       console.error("Error evaluating interview:", error);
       res.status(500).json({ error: "No se pudo analizar la entrevista con IA. Intenta de nuevo en unos minutos.", details: error.message || String(error) });
+    }
+  });
+
+  // ============================================================================
+  // Test de Personalidad (presencial)
+  // ============================================================================
+  // La entrevistadora lo APLICA desde el perfil cuando lo decide: eso guarda en la
+  // postulación una copia de la plantilla con status 'open'. El candidato lo responde en
+  // /personalidad/:id —en el dispositivo que se le dé o escaneando el QR—. Sin esa
+  // activación el link no muestra preguntas, y una vez respondido se cierra.
+  app.get("/api/public/personality/:applicationId", rateLimit(60), async (req, res) => {
+    try {
+      const { applicationId } = req.params;
+      if (!applicationId || applicationId.includes('/') || applicationId.length > 200) {
+        return res.status(400).json({ error: 'Link inválido' });
+      }
+      const [settings, application] = await Promise.all([
+        getFormSettings(),
+        db.getDocData('applications', applicationId),
+      ]);
+      if (!application) return res.json({ valid: false });
+      const company = settings.company
+        ? { name: settings.company.name || '', logoUrl: settings.company.logoUrl || '' }
+        : null;
+      const pt = application.personalityTest;
+      const status = pt?.status === 'completed' ? 'completed' : pt?.status === 'open' ? 'open' : 'not_started';
+      if (status !== 'open') return res.json({ valid: true, status, company });
+      const tpl = resolvePersonalityTemplate(pt);
+      // Solo el nombre de pila, para que la entrevistadora confirme que abrió el test de la
+      // persona correcta ("⚠️ Error de lectura…" y similares no son un nombre).
+      const first = firstNameOf(String(pt.candidateName || application.candidateName || ''));
+      return res.json({
+        valid: true,
+        status,
+        company,
+        candidateFirstName: /^\p{L}/u.test(first) ? first : '',
+        test: {
+          name: tpl.name,
+          instructions: tpl.instructions,
+          attemptId: typeof pt.attemptId === 'string' ? pt.attemptId : '',
+          // Sin rasgos ni frases invertidas: el candidato no debe saber qué mide cada una.
+          questions: publicQuestions(tpl.questions),
+        },
+      });
+    } catch (err) {
+      console.error('[personality] error al cargar el test:', (err as any)?.message || err);
+      res.status(503).json({ error: 'No disponible temporalmente. Intenta de nuevo en unos segundos.' });
+    }
+  });
+
+  // Público: el candidato envía sus respuestas. Se validan contra la copia GUARDADA del
+  // test (nunca contra preguntas que traiga la petición) y el resultado lo calcula el
+  // servidor: el candidato no puede escribir su propio perfil.
+  app.post("/api/public/personality/submit", globalRateLimit(60), rateLimit(20), async (req, res) => {
+    try {
+      const body = validate(personalitySubmitSchema, req, res);
+      if (!body) return;
+      const application = await db.getDocData('applications', body.applicationId);
+      if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
+      const pt = application.personalityTest;
+      if (pt?.status === 'completed') return res.json({ success: true, alreadyCompleted: true });
+      if (pt?.status !== 'open') {
+        return res.status(409).json({ error: 'Este test no está habilitado. Pide a la entrevistadora que lo active.' });
+      }
+      if (body.attemptId && pt.attemptId && body.attemptId !== pt.attemptId) {
+        return res.status(409).json({ error: 'La entrevistadora reinició este test. Recarga la página para empezar de nuevo.', restarted: true });
+      }
+      const tpl = resolvePersonalityTemplate(pt);
+      const check = checkAnswers(tpl.questions, body.answers);
+      if ('error' in check) return res.status(400).json({ error: check.error, missing: check.missing });
+      const answers = check.answers;
+      await db.setDocData('applications', body.applicationId, {
+        personalityTest: {
+          status: 'completed',
+          answers,
+          results: scorePersonality(tpl, answers),
+          completedAt: new Date(),
+        },
+      });
+      return res.json({ success: true });
+    } catch (err) {
+      console.error('[personality] error al guardar las respuestas:', (err as any)?.message || err);
+      res.status(500).json({ error: 'No se pudieron guardar tus respuestas. Intenta de nuevo.' });
+    }
+  });
+
+  // Reclutador: la IA traduce el resultado (ya calculado) a un perfil legible, cruzado con
+  // las respuestas abiertas y la vacante. Lee todo de la postulación guardada.
+  const personalityInterpretationSchema: Schema = {
+    type: Type.OBJECT,
+    properties: {
+      summary: { type: Type.STRING, description: "Perfil de la persona en 3 o 4 oraciones." },
+      strengths: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Fortalezas para el trabajo." },
+      watch_outs: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Aspectos a explorar o vigilar." },
+      work_style: { type: Type.STRING, description: "Cómo suele trabajar y cómo sacarle el mejor provecho." },
+      role_fit: { type: Type.STRING, description: "Encaje con la vacante." },
+      follow_up_questions: { type: Type.ARRAY, items: { type: Type.STRING }, description: "Hasta 4 preguntas para validar en la entrevista." },
+    },
+    required: ["summary", "strengths", "watch_outs", "work_style", "role_fit", "follow_up_questions"],
+  };
+
+  app.post("/api/personality/interpret", requireRecruiter, globalRateLimit(30), rateLimit(15), async (req, res) => {
+    try {
+      const body = validate(personalityInterpretSchema, req, res);
+      if (!body) return;
+      const application = await db.getDocData('applications', body.applicationId);
+      if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
+      const pt = application.personalityTest;
+      if (pt?.status !== 'completed' || !pt.results) {
+        return res.status(400).json({ error: 'El candidato aún no ha completado el test de personalidad.' });
+      }
+      const ai = getAI();
+      if (!ai) return res.status(400).json({ error: 'La IA no está configurada en el servidor (falta GEMINI_API_KEY).' });
+
+      let vacancyTitle = application.vacancyTitle || '';
+      if (!vacancyTitle && application.vacancyId) {
+        const vacancy = await db.getDocData('vacancies', application.vacancyId).catch(() => null);
+        vacancyTitle = vacancy?.title || '';
+      }
+      const response = await generateContentResilient(ai, {
+        model: GEMINI_MODEL,
+        contents: buildPersonalityPrompt(buildPersonalityEvidence({ test: pt, vacancyTitle })),
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: personalityInterpretationSchema,
+          temperature: 0.3,
+        }
+      }, { bypassBudgetBlock: true });
+      const resultText = response.text;
+      if (!resultText) throw new Error("Empty response from Gemini");
+      const parsed = JSON.parse(resultText.replace(/```json\n?|```/g, '').trim());
+      const attemptId = typeof pt.attemptId === 'string' ? pt.attemptId : '';
+      const interpretation = { ...normalizePersonalityInterpretation(parsed), interpretedAt: new Date(), attemptId };
+
+      // La IA tarda: si mientras tanto se borró la postulación o se repitió el test, esta
+      // lectura ya no corresponde (y una escritura merge resucitaría un test a medias).
+      const fresh = await db.getDocData('applications', body.applicationId).catch(() => null);
+      if (!fresh) return res.status(404).json({ error: 'La postulación ya no existe.' });
+      if (fresh.personalityTest?.status !== 'completed' || (fresh.personalityTest?.attemptId || '') !== attemptId) {
+        return res.status(409).json({ error: 'El test cambió mientras la IA lo interpretaba. Vuelve a intentarlo.' });
+      }
+      // Dev mode (no Admin SDK) may not be allowed to write: the client stores it then.
+      let saved = true;
+      try {
+        await db.setDocData('applications', body.applicationId, { personalityTest: { aiInterpretation: interpretation } });
+      } catch (writeErr) {
+        saved = false;
+        console.error('[personality-ai] no se pudo guardar la interpretación:', writeErr);
+      }
+      res.json({ saved, interpretation: { ...interpretation, interpretedAt: interpretation.interpretedAt.toISOString() } });
+    } catch (error: any) {
+      if (isAiBudgetError(error)) {
+        return res.status(503).json({ error: 'La IA no tiene saldo (se alcanzó el límite de gasto mensual de Google). El resultado del test sigue disponible sin la interpretación.' });
+      }
+      console.error("Error interpreting personality test:", error);
+      res.status(500).json({ error: "No se pudo interpretar el test con IA. Intenta de nuevo en unos minutos.", details: error.message || String(error) });
     }
   });
 

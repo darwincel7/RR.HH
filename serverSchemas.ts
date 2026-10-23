@@ -83,6 +83,16 @@ export const evaluateTestSchema = z.object({
   force: z.boolean().catch(false).default(false),
 });
 
+/** POST /api/public/personality/submit — the answers are checked against the copy of the
+ * test SAVED on the application (personalityTest.ts → checkAnswers), never against
+ * questions the request carries. `attemptId` ties the submission to the attempt the
+ * candidate opened: if the interviewer restarted the test meanwhile, it is refused. */
+export const personalitySubmitSchema = z.object({
+  applicationId: docIdField('applicationId inválido'),
+  answers: answersField,
+  attemptId: lenientString(),
+});
+
 // ---------------------------------------------------------------------------
 // Recruiter endpoints
 // ---------------------------------------------------------------------------
@@ -112,6 +122,12 @@ export const stageChangeSchema = z.object({
 /** POST /api/evaluate-interview — only the id travels: the evidence is read from the SAVED
  * application server-side, so the request can't feed the AI a scorecard nobody saved. */
 export const evaluateInterviewSchema = z.object({
+  applicationId: docIdField('applicationId inválido'),
+});
+
+/** POST /api/personality/interpret — only the id travels: the AI reads the answers and the
+ * result SAVED on the application. */
+export const personalityInterpretSchema = z.object({
   applicationId: docIdField('applicationId inválido'),
 });
 

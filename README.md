@@ -32,9 +32,13 @@ Cada etapa filtra candidatos mediante puntuaciones de IA:
 3. **Test situacional presencial** → `/api/evaluate-test` evalúa 6 dimensiones conductuales (sobre 100).
 4. **Ranking** combina todas las puntuaciones para la decisión final (contratar / descartar).
 
+Aparte del embudo, la entrevistadora puede aplicar en cualquier momento un **Test de
+Personalidad** presencial (ver *Herramientas del día a día*). Describe rasgos, no es
+"mejor" ni "peor": por eso no suma al Ranking.
+
 ## Rutas principales
 
-- Públicas: `/careers`, `/apply/:vacancyId`, `/eval/:applicationId`, `/test/:applicationId`
+- Públicas: `/careers`, `/apply/:vacancyId`, `/eval/:applicationId`, `/test/:applicationId`, `/personalidad/:applicationId`
 - Internas (requieren login): `/` (dashboard), `/vacancies`, `/candidates`, `/interviews`, `/forms`, `/settings`
 
 ## Ejecutar localmente
@@ -103,6 +107,8 @@ error es silencioso y caro:
 | [`src/lib/applicantIdentity.test.ts`](src/lib/applicantIdentity.test.ts) | Cuándo una postulación nueva pertenece a un perfil que ya existe: hacen falta teléfono, correo **y** nombre (dos hermanas con el celular y el correo de la casa quedan separadas, y el nombre de pila solo nunca basta) |
 | [`src/lib/applicationCv.test.ts`](src/lib/applicationCv.test.ts) | Qué currículum se ve en cada postulación y quién lo ha leído: una nota heredada del perfil no hace pasar por analizado el CV que la persona envió aquí |
 | [`serverDb.test.ts`](serverDb.test.ts) | Las consultas con que se busca a una persona por su contacto: si no devuelven su perfil, la comparación de identidad nunca llega a hacerse y se duplica — la precisa pide teléfono **y** correo a la vez, y las de un solo campo prueban el teléfono como lo escribió (no solo canónico) y el correo en minúsculas. También el rastro de una unificación: hasta el perfil vivo, sin colgarse en un ciclo, y qué pasa si la lectura falla |
+| [`src/lib/personalityTest.test.ts`](src/lib/personalityTest.test.ts) | El test de personalidad: las frases invertidas cuentan al revés, el resultado se calcula solo con las preguntas que la persona vio, todas se exigen, una plantilla rota no se guarda ni se aplica y los avisos de "respondió todo igual" / "perfil demasiado perfecto" |
+| [`serverPersonalityEval.test.ts`](serverPersonalityEval.test.ts) | Qué ve la IA del test de personalidad (resultado ya calculado, frases invertidas, avisos, respuestas abiertas como datos y no como instrucciones) y qué se guarda de su respuesta |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -296,6 +302,35 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   primera postulación tras actualizar rellena ese campo en los perfiles viejos que no lo
   tenían (una sola vez en la vida de la base, anotado en `settings/dedupe`), porque si no
   aparecen en la búsqueda se duplican igual.
+- **Test de Personalidad presencial** (perfil → tarjeta *Test de personalidad*): se aplica
+  **cuando la entrevistadora lo decide**, no lo dispara ninguna etapa. *Aplicar test ahora*
+  guarda en la postulación una **copia** del test tal como está en Formularios y habilita
+  el link `/personalidad/:id`; desde la tarjeta se abre en esa misma pantalla, se muestra un
+  **QR** para el teléfono del candidato o se copia el link. Sin esa activación el link solo
+  dice "aún no está habilitado" (y se activa solo en cuanto se aplique), y una vez
+  respondido se cierra. El candidato ve una pregunta por pantalla con botones grandes, pensado
+  para tableta o teléfono; su progreso sobrevive a una recarga y al terminar **no** ve el
+  resultado. El perfil lo recibe en vivo.
+  El test por defecto mide los **Cinco Grandes rasgos** adaptados a atención al cliente
+  (Sociabilidad, Amabilidad, Responsabilidad, Estabilidad emocional y Apertura): 25 frases
+  de escala 1–5 —2 invertidas por rasgo, intercaladas— más 2 de opción múltiple y 2
+  abiertas, unos 10 minutos. El **servidor** calcula el resultado
+  (`/api/public/personality/submit`): por rasgo, el promedio de sus frases llevado a 0–100
+  (bajo < 40, alto ≥ 70) con la lectura de "alto"/"bajo" de cada rasgo, y avisos cuando la
+  persona respondió casi todo igual o salió perfecta en todo. Las respuestas se validan
+  contra la copia guardada, nunca contra preguntas que traiga la petición, y una entrega de
+  un intento que la entrevistadora reinició se rechaza. *Interpretar con IA*
+  (`/api/personality/interpret`, solo reclutadores) lo traduce a un perfil práctico:
+  fortalezas, qué explorar, cómo trabaja, encaje con la vacante y preguntas para validar.
+  **Editable en Formularios** → *Test de Personalidad (presencial)*: cambiar el nombre y las
+  instrucciones; añadir, renombrar o quitar rasgos (con su texto para "alto" y "bajo");
+  añadir, editar, duplicar, reordenar arrastrando o quitar preguntas de escala (con su
+  rasgo y si es invertida), de opción múltiple o abiertas; y *Restaurar test recomendado*.
+  Un test con errores (sin nombre, pregunta vacía, opción múltiple con menos de 2 opciones)
+  no se guarda ni se aplica; los avisos (frase sin rasgo, rasgo con menos de 3 frases) solo
+  informan. Lo ya respondido nunca cambia al editar: cada postulación guarda la versión que
+  se le aplicó. Lógica en [`src/lib/personalityTest.ts`](src/lib/personalityTest.ts).
+  Al unificar perfiles el test viaja entero como el resto de la evidencia.
 - **Foto del candidato** (perfil, tarjetas del Kanban y lista de candidatos): al analizar el
   CV, si la IA ve una foto de la persona, el worker la recorta y la guarda como avatar
   ([`serverCvPhoto.ts`](serverCvPhoto.ts)). Saca las imágenes del PDF (JPEG y Flate), del
@@ -316,9 +351,10 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   (visible en *Candidatos*). El botón **Buscar fotos en los CV** sigue disponible para
   acelerar a mano (`/api/photos/backfill`).
 
-> Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`). Se
-> publican solas al llegar a `main` (workflow *Deploy Firebase Rules*) o con
-> `npm run deploy:rules`.
+> Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`), y el test
+> de personalidad también (un postulante no puede crear su postulación con un
+> `personalityTest` ya puesto). Se publican solas al llegar a `main` (workflow *Deploy
+> Firebase Rules*) o con `npm run deploy:rules`.
 
 ## Mensajería de WhatsApp: cola durable y propietario único
 
