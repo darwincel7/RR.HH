@@ -302,6 +302,27 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   primera postulación tras actualizar rellena ese campo en los perfiles viejos que no lo
   tenían (una sola vez en la vida de la base, anotado en `settings/dedupe`), porque si no
   aparecen en la búsqueda se duplican igual.
+- **Test situacional en el teléfono de la empresa** (perfil → *Resultados Test*, mientras
+  está pendiente): *QR para el teléfono* abre `/test/:id` sin escribir nada ni pasar por
+  WhatsApp —lo escanea la reclutadora con el teléfono de la empresa y lo entrega ya
+  abierto, así el candidato no lo abre en el suyo—; también *Abrir aquí* y *Copiar link*.
+  El test empieza con **"Este test es para: Juan C. P."** (nombre de pila e iniciales, que
+  da `/api/public/form-data/test/:id`; nunca el apellido completo en una página pública) y
+  el botón *Sí, soy Juan C. P. Comenzar test*, para que nadie responda el de otro. Los
+  campos de texto van **sin corrector**: sin revisión ortográfica, autocorrección,
+  mayúsculas automáticas ni autocompletar (el teclado del teléfono puede ignorarlo: hay
+  que apagarlo también en sus ajustes). **Pegar está bloqueado**, también el texto que
+  entra de golpe sin evento `paste` (portapapeles del teclado, dictado): más de 20
+  caracteres en un solo cambio no se acepta. La página cuenta cada vez que la pantalla del
+  test deja de verse (otra app o pestaña, teléfono bloqueado, recarga) con el tiempo fuera,
+  los intentos de pegar y la duración; el conteo sobrevive a una recarga y viaja con las
+  respuestas. El servidor lo guarda en `testIntegrity` —aparte de `testResults`, que la
+  calificación IA reescribe entero— y el perfil lo muestra como **Integridad del test**:
+  en verde si no salió ni intentó pegar, en ámbar con el detalle si lo hizo. Lo cuenta el
+  navegador del candidato: es una señal para conversar, no una prueba (una salida corta
+  puede ser la pantalla que se apagó sola). Lógica en
+  [`src/lib/testIntegrity.ts`](src/lib/testIntegrity.ts). *Eliminar Test* lo borra con
+  las respuestas y al unificar perfiles viaja con el resto del test.
 - **Test de Personalidad presencial** (perfil → tarjeta *Test de personalidad*): se aplica
   **cuando la entrevistadora lo decide**, no lo dispara ninguna etapa. *Aplicar test ahora*
   guarda en la postulación una **copia** del test tal como está en Formularios y habilita

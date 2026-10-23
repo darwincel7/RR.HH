@@ -5,7 +5,7 @@ import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, Merge } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, Merge, QrCode, ShieldCheck, ShieldAlert } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
@@ -19,6 +19,8 @@ import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
 import PersonalityTestCard from '../components/PersonalityTestCard';
+import LinkQrModal from '../components/LinkQrModal';
+import { readIntegrity } from '../lib/testIntegrity';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
 import { notifyWhatsAppActivityChanged } from '../lib/whatsappActivity';
@@ -66,6 +68,7 @@ export default function CandidateProfile() {
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [interviewObs, setInterviewObs] = useState({ score: 0, notes: '', redFlags: '' });
   const [savingObs, setSavingObs] = useState(false);
+  const [showTestQr, setShowTestQr] = useState(false);
   const [showCVModal, setShowCVModal] = useState(false);
   const [showEditCandidate, setShowEditCandidate] = useState(false);
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
@@ -550,9 +553,12 @@ export default function CandidateProfile() {
     }
   };
 
+  const testUrl = application ? `${window.location.origin}/test/${application.id}` : '';
+  const testIntegrity = readIntegrity(application?.testIntegrity);
+
   const copyTestLink = async () => {
     if (!application) return;
-    const url = `${window.location.origin}/test/${application.id}`;
+    const url = testUrl;
     try {
       await navigator.clipboard.writeText(url);
       alert('Link de test copiado');
@@ -669,13 +675,15 @@ export default function CandidateProfile() {
       await updateDoc(doc(db, 'applications', application.id), {
         testAnswers: deleteField(),
         testResults: deleteField(),
-        testSubmittedAt: deleteField()
+        testSubmittedAt: deleteField(),
+        testIntegrity: deleteField()
       });
       setApplication({
         ...application,
         testAnswers: undefined,
         testResults: undefined,
-        testSubmittedAt: undefined
+        testSubmittedAt: undefined,
+        testIntegrity: undefined
       });
       alert('Respuestas del Test eliminadas con éxito. El candidato puede usar el mismo link para volver a realizarlo.');
     } catch (error) {
@@ -1199,6 +1207,22 @@ export default function CandidateProfile() {
                         </div>
                       </div>
                       
+                      {testIntegrity && (
+                        <div className={`mb-4 p-3 rounded-xl border text-xs ${testIntegrity.clean ? 'bg-emerald-50 border-emerald-100 text-emerald-800' : 'bg-amber-50 border-amber-200 text-amber-900'}`}>
+                          <p className="font-bold flex items-center mb-1">
+                            {testIntegrity.clean ? <ShieldCheck className="w-3.5 h-3.5 mr-1.5" /> : <ShieldAlert className="w-3.5 h-3.5 mr-1.5" />}
+                            Integridad del test
+                          </p>
+                          {testIntegrity.clean
+                            ? <p>No salió de la pantalla ni intentó pegar texto.</p>
+                            : testIntegrity.lines.map(line => <p key={line}>{line}</p>)}
+                          {!testIntegrity.clean && (
+                            <p className="text-[10px] mt-1 opacity-80">Es una señal para conversar, no una prueba: una salida corta puede ser la pantalla que se apagó sola.</p>
+                          )}
+                          {testIntegrity.duration && <p className="text-[10px] mt-1 opacity-80">{testIntegrity.duration}</p>}
+                        </div>
+                      )}
+
                       {application.testResults.aiFeedback && (
                         <div className="mb-4">
                           <p className="text-xs text-slate-600 italic bg-slate-50 p-3 rounded-lg border border-slate-100">
@@ -1266,12 +1290,39 @@ export default function CandidateProfile() {
                         <AlertTriangle className="w-6 h-6 lg:w-8 lg:h-8 text-slate-300" />
                       </div>
                       <p className="text-[10px] lg:text-sm font-medium text-slate-500">Test pendiente.</p>
-                      <button
-                        onClick={copyTestLink}
-                        className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
-                      >
-                        <Copy className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Copiar Link
-                      </button>
+                      <p className="text-[10px] lg:text-xs text-slate-400 max-w-xs">
+                        Escanea el QR con el teléfono de la empresa y entrégaselo ya abierto: el test empieza mostrando su nombre para que confirme que es el suyo.
+                      </p>
+                      <div className="flex flex-wrap justify-center gap-2">
+                        <button
+                          onClick={() => setShowTestQr(true)}
+                          className="flex items-center px-3 py-1.5 bg-violet-600 text-white text-[10px] lg:text-xs font-bold rounded-lg hover:bg-violet-700 transition-all shadow-sm"
+                        >
+                          <QrCode className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> QR para el teléfono
+                        </button>
+                        <a
+                          href={testUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
+                        >
+                          <ExternalLink className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Abrir aquí
+                        </a>
+                        <button
+                          onClick={copyTestLink}
+                          className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
+                        >
+                          <Copy className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Copiar Link
+                        </button>
+                      </div>
+                      <LinkQrModal
+                        isOpen={showTestQr}
+                        onClose={() => setShowTestQr(false)}
+                        url={testUrl}
+                        title="QR del test"
+                        hint="Escanéalo tú con el teléfono de la empresa y entrégaselo ya abierto, así no lo abre en su propio teléfono."
+                        label="QR del test situacional"
+                      />
                     </div>
                   )}
                 </div>

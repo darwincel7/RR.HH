@@ -1,10 +1,29 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Loader2, CheckCircle, Send, Building2 } from 'lucide-react';
+import { Loader2, CheckCircle, Send, Building2, AlertTriangle, UserCheck } from 'lucide-react';
 import SubmitOverlay from '../components/SubmitOverlay';
 import { masterTestQuestions, Question } from '../data/testQuestions';
+import { shortNameOf } from '../lib/personName';
+import { isPastedInsert } from '../lib/testIntegrity';
+
+// The test is graded on spelling too: the field must not fix it for the candidate. These
+// switch off the browser's checker and, on most phone keyboards, autocorrect and
+// suggestions (the keyboard's own settings remain the sure way).
+const NO_WRITING_AIDS = { spellCheck: false, autoCorrect: 'off', autoCapitalize: 'off', autoComplete: 'off' } as const;
+
+/** What the page counts while the test is answered (src/lib/testIntegrity.ts). Saved
+ * with the progress, so reloading the page doesn't wipe it. */
+interface IntegrityState {
+  exits: number;
+  awayMs: number;
+  pasteBlocked: number;
+  /** When "Comenzar" was pressed (0 = not yet). */
+  startedAt: number;
+  /** When the screen stopped being visible (0 = it is visible). */
+  hiddenAt: number;
+}
 
 export default function CandidateTest() {
   const { applicationId } = useParams();
@@ -21,6 +40,25 @@ export default function CandidateTest() {
   const [showMemoryWords, setShowMemoryWords] = useState(false);
   const [memoryWordsShown, setMemoryWordsShown] = useState(false); // only once per attempt
   const [memoryTimeLeft, setMemoryTimeLeft] = useState(8);
+  // "Este test es para: Juan C. P." — the phone is the company's, so the candidate
+  // confirms the test is theirs before starting.
+  const [candidateShortName, setCandidateShortName] = useState('');
+  // Shown when they come back from another app or a paste was blocked.
+  const [notice, setNotice] = useState('');
+  const integrityRef = useRef<IntegrityState>({ exits: 0, awayMs: 0, pasteBlocked: 0, startedAt: 0, hiddenAt: 0 });
+  // Leaving only counts while the test is being answered (not on the intro or once sent).
+  const answeringRef = useRef(false);
+  answeringRef.current = currentQuestionIndex >= 0 && !success && !submitting;
+
+  const storageKey = `aura_test_${applicationId}`;
+
+  // Read-modify-write: called from event handlers, where the state may be stale.
+  const persistIntegrity = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || '{}');
+      localStorage.setItem(storageKey, JSON.stringify({ ...saved, integrity: integrityRef.current }));
+    } catch { /* storage blocked: the counters still travel with the answers */ }
+  };
 
   // Load saved answers from localStorage
   useEffect(() => {
@@ -37,6 +75,16 @@ export default function CandidateTest() {
           if (parsed.currentIndex !== undefined && parsed.currentIndex >= -1) {
              setCurrentQuestionIndex(parsed.currentIndex);
           }
+          if (parsed.integrity && typeof parsed.integrity === 'object') {
+            const it = { ...integrityRef.current, ...parsed.integrity };
+            // The page was closed or reloaded while it was hidden: the time until it was
+            // opened again was spent outside the test.
+            if (it.hiddenAt > 0) {
+              it.awayMs += Math.max(0, Date.now() - it.hiddenAt);
+              it.hiddenAt = 0;
+            }
+            integrityRef.current = it;
+          }
         } catch (e) {
           console.error("Error loading saved test progress", e);
         }
@@ -49,10 +97,55 @@ export default function CandidateTest() {
     if (applicationId && currentQuestionIndex >= 0) {
       localStorage.setItem(`aura_test_${applicationId}`, JSON.stringify({
         answers,
-        currentIndex: currentQuestionIndex
+        currentIndex: currentQuestionIndex,
+        integrity: integrityRef.current,
       }));
     }
   }, [answers, currentQuestionIndex, applicationId]);
+
+  // Every time the test screen stops being visible (another app or tab, the phone
+  // locked, the page reloaded) counts as an exit, with the time spent away.
+  useEffect(() => {
+    const onVisibility = () => {
+      const it = integrityRef.current;
+      if (document.visibilityState === 'hidden') {
+        if (!answeringRef.current || it.hiddenAt) return;
+        it.exits += 1;
+        it.hiddenAt = Date.now();
+      } else {
+        if (!it.hiddenAt) return;
+        it.awayMs += Math.max(0, Date.now() - it.hiddenAt);
+        it.hiddenAt = 0;
+        setNotice('Saliste de la pantalla del test. Cada salida queda registrada.');
+      }
+      persistIntegrity();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [applicationId]);
+
+  const blockPaste = () => {
+    integrityRef.current.pasteBlocked += 1;
+    persistIntegrity();
+    setNotice('No se permite pegar ni dictar texto: escribe tu respuesta.');
+  };
+
+  // Typed answers only: a block of text arriving at once (pasted from the keyboard's own
+  // clipboard, dictated) is refused and counted, like a paste.
+  const setTypedAnswer = (qId: string, next: string) => {
+    const prev = typeof answers[qId] === 'string' ? (answers[qId] as string) : '';
+    if (isPastedInsert(prev, next)) {
+      blockPaste();
+      return;
+    }
+    setAnswers({ ...answers, [qId]: next });
+  };
+
+  const noPaste = {
+    onPaste: (e: React.ClipboardEvent) => { e.preventDefault(); blockPaste(); },
+    onDrop: (e: React.DragEvent) => { e.preventDefault(); blockPaste(); },
+  };
 
   useEffect(() => {
     let timer: any;
@@ -98,6 +191,7 @@ export default function CandidateTest() {
             setErrorMsg('El link del test no es válido.');
           } else {
             if (data.company) setCompany({ name: data.company.name || 'AuraATS', logoUrl: data.company.logoUrl || '' });
+            setCandidateShortName(typeof data.candidateShortName === 'string' ? data.candidateShortName : '');
             setApplication({ testResults: data.completed ? true : undefined });
             if (data.completed) setSuccess(true);
             // null → use the bundled master question set (kept off the wire).
@@ -120,6 +214,7 @@ export default function CandidateTest() {
         if (docSnap.exists()) {
           const appData = docSnap.data();
           setApplication(appData);
+          setCandidateShortName(shortNameOf(String(appData.candidateName || '')));
           if (appData.testResults) setSuccess(true);
         } else {
           setErrorMsg('El link del test no es válido.');
@@ -142,6 +237,10 @@ export default function CandidateTest() {
   }, [applicationId]);
 
   const handleNext = () => {
+    setNotice('');
+    if (currentQuestionIndex === -1 && !integrityRef.current.startedAt) {
+      integrityRef.current.startedAt = Date.now();
+    }
     if (currentQuestionIndex < questions.length - 1) {
       const nextIndex = currentQuestionIndex + 1;
       setCurrentQuestionIndex(nextIndex);
@@ -158,6 +257,7 @@ export default function CandidateTest() {
   };
 
   const handlePrev = () => {
+    setNotice('');
     if (currentQuestionIndex > 0) {
       setCurrentQuestionIndex(prev => prev - 1);
     }
@@ -172,10 +272,17 @@ export default function CandidateTest() {
     try {
       // Submit to the backend, which evaluates AND persists testResults via the
       // Admin SDK (server-authoritative — the candidate never writes their own score).
+      const it = integrityRef.current;
+      const integrity = {
+        exits: it.exits,
+        awayMs: it.awayMs,
+        pasteBlocked: it.pasteBlocked,
+        durationMs: it.startedAt ? Math.max(0, Date.now() - it.startedAt) : 0,
+      };
       const response = await fetch('/api/evaluate-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applicationId, questions, answers })
+        body: JSON.stringify({ applicationId, questions, answers, integrity })
       });
       if (!response.ok) {
         throw new Error(`evaluate-test respondió ${response.status}`);
@@ -197,10 +304,12 @@ export default function CandidateTest() {
         return (
           <textarea
             required
+            {...NO_WRITING_AIDS}
+            {...noPaste}
             className="w-full p-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
             rows={4}
             value={answers[q.id] || ''}
-            onChange={e => setAnswers({...answers, [q.id]: e.target.value})}
+            onChange={e => setTypedAnswer(q.id, e.target.value)}
           />
         );
       case 'multiple_choice':
@@ -273,9 +382,11 @@ export default function CandidateTest() {
           <input
             type="text"
             required
+            {...NO_WRITING_AIDS}
+            {...noPaste}
             className="w-full p-3 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
             value={answers[q.id] || ''}
-            onChange={e => setAnswers({...answers, [q.id]: e.target.value})}
+            onChange={e => setTypedAnswer(q.id, e.target.value)}
           />
         );
     }
@@ -334,15 +445,28 @@ export default function CandidateTest() {
         ) : qIndex === -1 ? (
           <div className="text-center space-y-6">
             <h1 className="text-2xl font-bold text-gray-900">Test de Juicio Situacional</h1>
+            {candidateShortName && (
+              <div className="border-2 border-blue-100 p-5 rounded-lg">
+                <p className="text-sm text-gray-500">Este test es para</p>
+                <p className="text-2xl font-bold text-gray-900 mt-1">{candidateShortName}</p>
+                <p className="text-xs text-gray-500 mt-2">¿No eres tú? No lo empieces y avisa a quien te entregó el teléfono.</p>
+              </div>
+            )}
             <div className="bg-blue-50 p-6 rounded-lg text-blue-800 text-left">
               <p className="font-medium text-lg mb-2">Instrucciones:</p>
-              <p>No hay respuestas correctas o incorrectas; responde con honestidad lo que harías o piensas en cada situación.</p>
+              <ul className="list-disc pl-5 space-y-1">
+                <li>No hay respuestas correctas o incorrectas; responde con honestidad lo que harías o piensas en cada situación.</li>
+                <li>Escribe con tus propias palabras: no se puede pegar ni dictar texto.</li>
+                <li>Quédate en esta pantalla hasta terminar: si sales a otra aplicación, queda registrado.</li>
+              </ul>
             </div>
             <button
               onClick={handleNext}
-              className="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
+              className="w-full flex justify-center items-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
             >
-              Comenzar Test
+              {candidateShortName ? (
+                <><UserCheck className="w-4 h-4 mr-2" /> Sí, soy {candidateShortName.replace(/\.$/, '')}. Comenzar test</>
+              ) : 'Comenzar Test'}
             </button>
           </div>
         ) : (
@@ -356,6 +480,12 @@ export default function CandidateTest() {
                 ></div>
               </div>
             </div>
+
+            {notice && (
+              <p role="alert" className="flex items-start text-sm font-medium text-amber-900 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                <AlertTriangle className="w-4 h-4 mr-2 mt-0.5 shrink-0" /> {notice}
+              </p>
+            )}
 
             {showMemoryWords ? (
               <div className="text-center space-y-6 py-8">

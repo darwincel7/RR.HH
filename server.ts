@@ -52,7 +52,7 @@ import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
 import { blocksNewApplication, isSameApplicant, preferredName } from './src/lib/applicantIdentity';
 import { resolvePersonalityTemplate, publicQuestions, checkAnswers, scorePersonality } from './src/lib/personalityTest';
-import { firstNameOf } from './src/lib/personName';
+import { firstNameOf, shortNameOf } from './src/lib/personName';
 import { buildPersonalityEvidence, buildPersonalityPrompt, normalizePersonalityInterpretation } from './serverPersonalityEval';
 import {
   buildInterviewEvidence, buildInterviewPrompt, normalizeInterviewEvaluation,
@@ -2444,10 +2444,23 @@ async function startServer() {
       // kind === 'test'
       const custom = settings.forms?.testQuestions;
       const useCustom = Array.isArray(custom) && custom.length > 0 && !custom.some((x: any) => x.id === 'C1' || x.id === 'q1');
+      // The test is taken in person on a company phone: the page opens with "Este test es
+      // para: Juan C. P." so nobody answers someone else's test. Only the first name and
+      // initials — the page is public to whoever holds the link.
+      let candidateShortName = '';
+      if (!application.testResults) {
+        candidateShortName = shortNameOf(String(application.candidateName || ''));
+        const candidateId = application.candidateId;
+        if (!candidateShortName && typeof candidateId === 'string' && candidateId && !candidateId.includes('/')) {
+          const cand = await db.getDocData('candidates', candidateId).catch(() => null);
+          candidateShortName = shortNameOf(String(cand?.fullName || cand?.name || ''));
+        }
+      }
       return res.json({
         valid: true,
         completed: !!application.testResults,
         company,
+        candidateShortName,
         // null → the client uses the bundled masterTestQuestions (kept off the wire).
         questions: useCustom ? custom : null,
       });
@@ -3728,6 +3741,9 @@ async function startServer() {
         // candidate's submission (see /api/score-stage2).
         await db.setDocData('applications', applicationId, {
           testResults: { answers: formatTestAnswers(questions, answers), completedAt: new Date(), status: 'pending_ai' },
+          // Exits from the test screen and blocked pastes (src/lib/testIntegrity.ts). Its own
+          // field: the AI grading rewrites testResults whole and must not erase it.
+          ...(body.integrity ? { testIntegrity: { ...body.integrity, recordedAt: new Date() } } : {}),
           stage: 'Tests presenciales',
           lastStageUpdate: new Date(),
           testScoringStatus: 'pending',
