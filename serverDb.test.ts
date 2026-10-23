@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { contactLookupAttempts, lookupDimension } from './serverDb';
+import { contactLookupAttempts, followMergedInto, lookupDimension } from './serverDb';
 
 /**
  * Buscar a una persona por su contacto es el paso del que depende reconocerla: si la
@@ -66,5 +66,42 @@ describe('las dos dimensiones del contacto se agotan por separado', () => {
     // esta persona podía quedar fuera de ese grupo de diez.
     const dims = new Set(contactLookupAttempts('8095551234', 'ana@mail.com').map(([f]) => lookupDimension(f)));
     expect(dims).toEqual(new Set(['phone', 'email']));
+  });
+});
+
+describe('seguir el rastro de una unificación', () => {
+  const base: Record<string, any> = {
+    A: { mergedInto: 'B' },
+    B: { mergedInto: 'C' },
+    C: { fullName: 'Ana' },
+  };
+  const read = (db: Record<string, any>) => async (id: string) => db[id] ?? null;
+
+  it('llega hasta el perfil vivo aunque se haya unificado dos veces', async () => {
+    expect(await followMergedInto(read(base), 'A')).toBe('C');
+    expect(await followMergedInto(read(base), 'C')).toBe('C');
+  });
+
+  it('un ciclo corta en seco en vez de colgar el servidor', async () => {
+    const ciclo = { X: { mergedInto: 'Y' }, Y: { mergedInto: 'X' } };
+    expect(await followMergedInto(read(ciclo), 'X')).toBe('X');
+  });
+
+  it('sin `strict`, un fallo de lectura devuelve lo que se tenía', async () => {
+    // Para ENCONTRAR a alguien: enlazar un WhatsApp al perfil unificado es peor que
+    // enlazarlo bien, pero mucho mejor que perder el mensaje.
+    const falla = async () => { throw new Error('firestore caído'); };
+    expect(await followMergedInto(falla, 'A')).toBe('A');
+  });
+
+  it('con `strict`, el fallo se propaga', async () => {
+    // Para ESCRIBIR: tratar un perfil muerto como vivo colgaría de él la postulación y
+    // el CV, invisibles en el vivo. Mejor fallar y que la persona reintente.
+    const falla = async () => { throw new Error('firestore caído'); };
+    await expect(followMergedInto(falla, 'A', { strict: true })).rejects.toThrow('firestore caído');
+  });
+
+  it('sin id no hay nada que seguir', async () => {
+    expect(await followMergedInto(read(base), null)).toBe(null);
   });
 });

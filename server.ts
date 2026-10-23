@@ -2498,7 +2498,12 @@ async function startServer() {
       // CADENA completa (A→B→C es normal: unificar dos veces está permitido).
       let profile = await readCandidate(candidateId);
       if (profile?.mergedInto) {
-        const liveId = await followMergedInto(readCandidate, candidateId);
+        // `strict`: aquí se va a ESCRIBIR. Un fallo pasajero de lectura que hiciera
+        // pasar por vivo a este perfil muerto colgaría de él la postulación y el CV
+        // —invisibles en el perfil vivo, y sin que nadie se entere—. Mejor un 500 y que
+        // la persona reintente. (En los alias de OTROS perfiles, más abajo, no: ahí un
+        // fallo solo degrada a crear un duplicado, que se ve y se arregla en dos clics.)
+        const liveId = await followMergedInto(readCandidate, candidateId, { strict: true });
         if (liveId && liveId !== candidateId) {
           const live = await readCandidate(liveId);
           if (live && !live.mergedInto) { candidateId = liveId; profile = live; }

@@ -194,17 +194,26 @@ export function lookupDimension(field: string): 'phone' | 'email' {
  * correo: la respuesta de WhatsApp se guardaría en un perfil que nadie abre, y el
  * deduplicado de /api/apply miraría un perfil sin postulaciones. Hasta 5 saltos, por si
  * alguien unificó A→B y luego B→C; un ciclo corta en seco en vez de colgar el servidor.
+ *
+ * `strict` decide qué pasa si la lectura FALLA (un fallo pasajero de Firestore). Sin él
+ * se sigue adelante y se devuelve el id que se tenía, que es lo que conviene a quien
+ * solo quiere ENCONTRAR a alguien: enlazar un WhatsApp al perfil unificado es peor que
+ * enlazarlo bien, pero mucho mejor que perder el mensaje. Con él, el fallo se propaga,
+ * porque quien va a ESCRIBIR en el perfil que salga de aquí —el intake— no puede tratar
+ * un perfil muerto como vivo: la postulación y el CV nacerían colgados de un perfil que
+ * nadie abre, invisibles en el vivo. Ahí es mejor fallar y que la persona reintente.
  */
 export async function followMergedInto(
   read: (id: string) => Promise<any | null>,
   id: string | null,
+  opts?: { strict?: boolean },
 ): Promise<string | null> {
   let current = id;
   const seen = new Set<string>();
   for (let hop = 0; current && hop < 5; hop++) {
     if (seen.has(current)) return current;
     seen.add(current);
-    const data = await read(current).catch(() => null);
+    const data = opts?.strict ? await read(current) : await read(current).catch(() => null);
     const next = data?.mergedInto;
     if (typeof next !== 'string' || !next || next === current) return current;
     current = next;
