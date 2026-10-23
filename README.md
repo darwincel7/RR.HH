@@ -196,9 +196,11 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   entera y la otra se archiva, porque juntar la puntuación de una con las respuestas de la
   otra dejaría una postulación que se contradice. La postulación absorbida se guarda
   **completa** en `mergedEvidence` y se muestra en el perfil ("De un perfil unificado");
-  si no cabe ahí (más de 200 KB) va a `merged_applications`, y la misma tarjeta la trae
-  con un botón — decir "se guardó aparte" sin poder abrirla era prometer una consulta que
-  no existía,
+  si no cabe ahí (más de 200 KB) va a `merged_applications`, y si ni eso se pudo, la
+  postulación original se deja sin borrar; la misma tarjeta la trae con un botón de los
+  dos sitios — decir "se guardó aparte" o "se dejó sin borrar" sin poder abrirla era
+  prometer una consulta que no existía, y menos aún desde el perfil duplicado, que
+  redirige al principal,
   pero su documento desaparece: el link de test/formulario enviado *desde ese perfil* deja
   de funcionar (la pantalla lo advierte antes de confirmar).
   El perfil duplicado **no se borra**: queda con `mergedInto`, deja de recibir

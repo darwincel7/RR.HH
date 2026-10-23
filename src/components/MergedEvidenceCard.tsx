@@ -94,22 +94,39 @@ const EvidenceDetail: React.FC<{ data: any }> = ({ data }) => {
 };
 
 /**
- * Lo que no cupo dentro de la postulación y se guardó en `merged_applications`.
+ * Lo que no cupo dentro de la postulación, traído de donde haya quedado.
  *
- * Se trae solo cuando el reclutador lo pide: decir "se guardó completo aparte" y dejar
- * ahí la ruta del documento era prometer una consulta que la pantalla no hacía — el test
- * de la persona existía y nadie podía leerlo. Se lee al pulsar y no antes, porque es
- * justo el caso en que el contenido es grande.
+ * Dos sitios, según cómo acabó la unificación:
+ *  - `merged_applications`, si se pudo archivar aparte;
+ *  - la propia postulación original, que en ese caso se deja SIN BORRAR a propósito.
+ *
+ * Los dos hacían falta: decir "se guardó completo aparte" o "se dejó sin borrar" y
+ * dejar ahí un id era prometer una consulta que la pantalla no hacía — el test de la
+ * persona existía y nadie podía leerlo, y menos aún desde el perfil duplicado, que
+ * redirige al principal. Se lee al pulsar y no antes, porque es justo el caso en que el
+ * contenido es grande.
  */
 const ArchivedApart: React.FC<{ entry: any }> = ({ entry }) => {
   const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
   const [data, setData] = useState<any>(null);
-  const id = String(entry?.archivedIn || '').split('/').pop() || '';
+
+  const archivedId = String(entry?.archivedIn || '').split('/').pop() || '';
+  const source = archivedId
+    ? {
+        collection: 'merged_applications',
+        id: archivedId,
+        where: 'Su contenido era demasiado grande para guardarlo dentro de la postulación, así que se guardó completo aparte.',
+      }
+    : {
+        collection: 'applications',
+        id: String(entry?.fromApplicationId || ''),
+        where: 'Su contenido era demasiado grande y no se pudo archivar, así que la postulación original se dejó sin borrar.',
+      };
 
   const load = async () => {
     setState('loading');
     try {
-      const snap = await getDoc(doc(db, 'merged_applications', id));
+      const snap = await getDoc(doc(db, source.collection, source.id));
       if (!snap.exists()) throw new Error('no existe');
       setData(conflictingOnly({ groups: entry?.groups, data: snap.data() }));
       setState('idle');
@@ -123,21 +140,19 @@ const ArchivedApart: React.FC<{ entry: any }> = ({ entry }) => {
 
   return (
     <div className="mt-2">
-      <p className="text-[11px] text-amber-800">
-        Su contenido era demasiado grande para guardarlo dentro de la postulación, así que se guardó completo aparte.
-      </p>
+      <p className="text-[11px] text-amber-800">{source.where}</p>
       <button
         type="button"
         onClick={load}
-        disabled={state === 'loading' || !id}
+        disabled={state === 'loading' || !source.id}
         className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold text-amber-900 bg-white border border-amber-300 rounded-lg px-2.5 py-1 hover:bg-amber-100 transition-colors disabled:opacity-60"
       >
         {state === 'loading' && <Loader2 className="w-3 h-3 animate-spin" />}
-        {state === 'loading' ? 'Buscándolo...' : 'Ver lo que se archivó'}
+        {state === 'loading' ? 'Buscándolo...' : 'Ver lo que quedó guardado'}
       </button>
       {state === 'error' && (
         <p className="mt-1 text-[10px] font-bold text-rose-600">
-          No se pudo leer. Está guardado en <code className="font-mono">{entry.archivedIn}</code>.
+          No se pudo leer. Está en <code className="font-mono">{source.collection}/{source.id}</code>.
         </p>
       )}
     </div>
@@ -174,14 +189,7 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
               </p>
 
               {entry?.omitted ? (
-                entry.archivedIn
-                  ? <ArchivedApart entry={entry} />
-                  : (
-                    <p className="mt-2 text-[11px] text-amber-800">
-                      Su contenido era demasiado grande y no se pudo archivar: la postulación original
-                      ({entry.fromApplicationId}) se dejó sin borrar.
-                    </p>
-                  )
+                <ArchivedApart entry={entry} />
               ) : (
                 <EvidenceDetail data={conflicting} />
               )}
