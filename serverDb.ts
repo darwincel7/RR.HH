@@ -669,7 +669,9 @@ async function initClient(): Promise<ServerDb> {
           found.set(dim, (found.get(dim) || 0) + 1);
         });
       }
-      return Array.from(byId.values()).slice(0, max);
+      // Sin recorte global: dejaría fuera lo que encontró la segunda dimensión cuando la
+      // primera ya llenó el cupo, que es justo lo que el tope por dimensión evita.
+      return Array.from(byId.values());
     },
     async deleteDocData(c, id) {
       await deleteDoc(doc(cdb, c, id));
