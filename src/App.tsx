@@ -58,6 +58,7 @@ export default function App() {
                 element={<KanbanBoard />}
               />
               <Route path="vacancies/:vacancyId/ranking" element={<Ranking />} />
+              <Route path="ranking" element={<Ranking />} />
               <Route path="interviews" element={<Interviews />} />
               <Route
                 path="candidates/:candidateId"

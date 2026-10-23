@@ -3,8 +3,15 @@ import { useLocation, useNavigate, useNavigationType, useSearchParams } from 're
 import { ArrowLeft, ArrowRight, Search, X } from 'lucide-react';
 import { historyIndex, parentPath } from '../../lib/navigation';
 
+// Furthest history position reachable with "Adelante". A new navigation (PUSH)
+// discards the forward entries, exactly like the browser does. Module-level so it
+// survives the bar unmounting: the Kanban hides it and draws its own compact copy of
+// these buttons, and coming back must still know there is a page ahead.
+let furthestIdx = 0;
+
 /**
- * Always-visible bar above every internal page:
+ * Bar above every internal page (the Kanban folds it into its own one-row header to
+ * leave the height to the columns, keeping the arrows and its own search box):
  *  - "Atrás" / "Adelante" move through the screens visited in this tab (like the
  *    browser buttons, but inside the app and visible on mobile). With nothing to go back
  *    to, "Atrás" goes to the logical parent screen instead of leaving the app.
@@ -16,18 +23,17 @@ export function useHistoryNav() {
   const location = useLocation();
   const navType = useNavigationType();
   const [idx, setIdx] = useState(historyIndex());
-  // Furthest history position reachable with "Adelante". A new navigation (PUSH)
-  // discards the forward entries, exactly like the browser does.
-  const maxIdx = useRef(idx);
+  const [maxIdx, setMaxIdx] = useState(() => (navType === 'PUSH' ? idx : Math.max(furthestIdx, idx)));
 
   useEffect(() => {
     const i = historyIndex();
+    if (navType === 'PUSH' || i > furthestIdx) furthestIdx = i;
     setIdx(i);
-    if (navType === 'PUSH' || i > maxIdx.current) maxIdx.current = i;
+    setMaxIdx(furthestIdx);
   }, [location.key, navType]);
 
   const canGoBack = idx > 0;
-  const canGoForward = idx < maxIdx.current;
+  const canGoForward = idx < maxIdx;
 
   const goBack = () => {
     if (canGoBack) navigate(-1);
@@ -38,8 +44,37 @@ export function useHistoryNav() {
   return { goBack, goForward, canGoBack, canGoForward, isHome: location.pathname === '/' };
 }
 
-export default function TopBar() {
+/** "Atrás" / "Adelante". `compact` = icon-only, for a page that brings its own header row. */
+export function HistoryNavButtons({ compact = false }: { compact?: boolean }) {
   const { goBack, goForward, canGoForward, isHome, canGoBack } = useHistoryNav();
+  const navBtn = `flex items-center justify-center gap-1 ${compact ? 'h-9 w-9 shrink-0' : 'px-3 py-2'} rounded-xl text-sm font-bold transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:text-violet-700 shadow-sm`;
+
+  return (
+    <>
+      <button
+        onClick={goBack}
+        disabled={isHome && !canGoBack}
+        title="Volver a la pantalla anterior (Alt + ←)"
+        aria-label="Atrás"
+        className={navBtn}
+      >
+        <ArrowLeft className="w-4 h-4" />
+        {!compact && <span className="hidden sm:inline">Atrás</span>}
+      </button>
+      <button
+        onClick={goForward}
+        disabled={!canGoForward}
+        title="Ir a la pantalla siguiente (Alt + →)"
+        aria-label="Adelante"
+        className={navBtn}
+      >
+        <ArrowRight className="w-4 h-4" />
+      </button>
+    </>
+  );
+}
+
+export default function TopBar() {
   const navigate = useNavigate();
   const location = useLocation();
   const [searchParams] = useSearchParams();
@@ -80,28 +115,9 @@ export default function TopBar() {
     navigate(`/candidates${qs ? `?${qs}` : ''}`, { replace: onCandidates });
   };
 
-  const navBtn = 'flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-bold transition-colors disabled:opacity-30 disabled:cursor-not-allowed';
-
   return (
     <div className="max-w-7xl mx-auto w-full mb-4 lg:mb-6 flex items-center gap-2">
-      <button
-        onClick={goBack}
-        disabled={isHome && !canGoBack}
-        title="Volver a la pantalla anterior (Alt + ←)"
-        className={`${navBtn} bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:text-violet-700 shadow-sm`}
-      >
-        <ArrowLeft className="w-4 h-4" />
-        <span className="hidden sm:inline">Atrás</span>
-      </button>
-      <button
-        onClick={goForward}
-        disabled={!canGoForward}
-        title="Ir a la pantalla siguiente (Alt + →)"
-        aria-label="Adelante"
-        className={`${navBtn} bg-white border border-slate-200 text-slate-700 hover:bg-slate-50 hover:text-violet-700 shadow-sm`}
-      >
-        <ArrowRight className="w-4 h-4" />
-      </button>
+      <HistoryNavButtons />
 
       <form onSubmit={submit} className="relative flex-1 max-w-xl ml-auto" role="search">
         <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />

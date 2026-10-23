@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock, Smartphone } from 'lucide-react';
+import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock, Trophy, Smartphone } from 'lucide-react';
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import AiStatusBanner from '../AiStatusBanner';
 import CVWorker from '../CVWorker';
@@ -118,10 +118,16 @@ export default function DashboardLayout() {
     );
   }
 
+  // The Kanban and the Ranking need every pixel of height for their lists: they bring
+  // their own one-row header (arrows + title + their search), so here they get no TopBar,
+  // tight padding, the full width, and exactly the screen's height (lists scroll inside).
+  const isBoard = /^\/(vacancies\/[^/]+\/(kanban|ranking)|ranking)\/?$/.test(location.pathname);
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Vacantes', href: '/vacancies', icon: Briefcase },
     { name: 'Candidatos', href: '/candidates', icon: Users },
+    { name: 'Ranking', href: '/ranking', icon: Trophy },
     { name: 'Entrevistas', href: '/interviews', icon: Users },
     { name: 'Formularios', href: '/forms', icon: FileText },
     { name: 'Teléfonos', href: '/phones', icon: Smartphone },
@@ -254,14 +260,14 @@ export default function DashboardLayout() {
         flex-1 transition-all duration-300 ease-in-out flex flex-col
         ${isCollapsed ? 'lg:ml-28' : 'lg:ml-80'}
         ${waPanelOpen ? 'lg:mr-[316px]' : 'lg:mr-[72px]'}
-        min-h-screen
+        ${isBoard ? 'h-dvh min-w-0' : 'min-h-screen'}
       `}>
         <CVWorker />
-        <div className="p-4 md:p-8 pt-20 lg:pt-8 flex-1 flex flex-col">
+        <div className={`${isBoard ? 'px-3 pb-2 pt-[4.5rem] lg:px-4 lg:pt-3 min-h-0' : 'p-4 md:p-8 pt-20 lg:pt-8'} flex-1 flex flex-col`}>
           <WhatsAppStatusBanner />
           <AiStatusBanner />
-          <TopBar />
-          <div className="max-w-7xl mx-auto animate-fade-in w-full flex-1">
+          {!isBoard && <TopBar />}
+          <div className={`${isBoard ? 'min-h-0 flex flex-col' : 'max-w-7xl mx-auto'} animate-fade-in w-full flex-1`}>
             <Outlet />
           </div>
         </div>
