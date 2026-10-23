@@ -201,6 +201,21 @@ export function contactLookupAttempts(phone: unknown, email: unknown): Array<[st
  * teléfono, en su forma canónica, que es la que todos los caminos de escritura guardan
  * (y la que el relleno pone en los perfiles viejos).
  */
+/**
+ * Cuántos perfiles se traen de la consulta precisa (teléfono Y correo iguales).
+ *
+ * Alguna cota tiene que haber: `/api/apply` es público, y sin tope quien quisiera podría
+ * sembrar perfiles con un mismo contacto y convertir cada postulación en un recorrido de
+ * todos ellos. Así que el número no es "el correcto", es el que cubre de sobra lo que
+ * pasa de verdad —una familia o un cibercafé rellenando por varias personas con el mismo
+ * correo y el mismo teléfono— sin dejar la puerta abierta.
+ *
+ * Lo que pasa si se superara: la comparación de nombre se hace igual sobre los que SÍ
+ * vuelven, así que nunca se confunde a una persona con otra; a lo sumo no se reconoce a
+ * la que estaba fuera y nace un duplicado, visible y agrupado en "Revisar duplicados".
+ */
+const EXACT_CONTACT_MAX = 25;
+
 export function exactContactLookups(phone: unknown, email: unknown): Array<Array<[string, string, string]>> {
   const norm = normalizePhone(String(phone || ''));
   const written = String(email || '').trim();
@@ -331,7 +346,7 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         for (const clause of exactContactLookups(phone, email)) {
           let q: any = adb.collection('candidates');
           clause.forEach(([f, op, v]) => { q = q.where(f, op as any, v); });
-          const snap = await q.limit(5).get();
+          const snap = await q.limit(EXACT_CONTACT_MAX).get();
           snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
         }
         // Y después por un solo campo, que es lo que encuentra a quien tiene el dato en
@@ -731,7 +746,7 @@ async function initClient(): Promise<ServerDb> {
       const byId = new Map<string, any>();
       // La consulta precisa primero, igual que en modo admin (ver `exactContactLookups`).
       for (const clause of exactContactLookups(phone, email)) {
-        const q = query(collection(cdb, 'candidates'), ...clause.map(([f, op, v]) => where(f, op as any, v)), limit(5));
+        const q = query(collection(cdb, 'candidates'), ...clause.map(([f, op, v]) => where(f, op as any, v)), limit(EXACT_CONTACT_MAX));
         const snap = await getDocs(q);
         snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
       }
