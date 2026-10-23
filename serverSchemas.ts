@@ -80,6 +80,10 @@ const integrityField = () => z.object({
   durationMs: integrityCounter(DAY_MS),
 }).optional().catch(undefined);
 
+/** A Firestore id that may be absent: anything that isn't one becomes ''. */
+const optionalDocId = () =>
+  z.string().max(200).refine(v => !v.includes('/')).catch('').default('');
+
 /** POST /api/score-stage2 */
 export const scoreStage2Schema = z.object({
   applicationId: docIdField('applicationId inválido'),
@@ -95,6 +99,8 @@ export const evaluateTestSchema = z.object({
   questions: z.unknown().optional(),
   force: z.boolean().catch(false).default(false),
   integrity: integrityField(),
+  // Answered on a company phone (station mode): the server checks it was assigned there.
+  stationId: optionalDocId(),
 });
 
 /** POST /api/public/personality/submit — the answers are checked against the copy of the
@@ -105,6 +111,39 @@ export const personalitySubmitSchema = z.object({
   applicationId: docIdField('applicationId inválido'),
   answers: answersField,
   attemptId: lenientString(),
+});
+
+// ---------------------------------------------------------------------------
+// Station mode (company phones — src/lib/stations.ts)
+// ---------------------------------------------------------------------------
+
+const stationIdField = () => docIdField('Este teléfono no está vinculado.');
+const intIn = (min: number, max: number, msg: string) =>
+  z.number({ error: msg }).int({ error: msg }).min(min, { error: msg }).max(max, { error: msg });
+
+/** POST /api/public/station/pair */
+export const stationPairSchema = z.object({
+  code: z.string({ error: 'Escribe los 6 dígitos del código.' }).regex(/^\d{6}$/, { error: 'Escribe los 6 dígitos del código.' }),
+  name: z.string({ error: 'Ponle un nombre al teléfono.' }).transform(v => v.replace(/\s+/g, ' ').trim())
+    .pipe(z.string().min(1, { error: 'Ponle un nombre al teléfono.' }).max(40, { error: 'El nombre puede tener hasta 40 caracteres.' })),
+});
+
+/** POST /api/public/station/poll */
+export const stationPollSchema = z.object({ stationId: stationIdField() });
+
+/** POST /api/public/station/progress */
+export const stationProgressSchema = z.object({
+  stationId: stationIdField(),
+  applicationId: docIdField('applicationId inválido'),
+  index: intIn(-1, 1000, 'Avance inválido'),
+  total: intIn(0, 1000, 'Avance inválido'),
+  exits: intIn(0, 10_000, 'Avance inválido'),
+});
+
+/** POST /api/public/station/release */
+export const stationReleaseSchema = z.object({
+  stationId: stationIdField(),
+  applicationId: docIdField('applicationId inválido'),
 });
 
 // ---------------------------------------------------------------------------

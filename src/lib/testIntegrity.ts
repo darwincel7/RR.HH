@@ -54,18 +54,24 @@ const count = (v: unknown): number => {
 };
 
 export interface IntegrityReading {
+  /** La página contó salidas y pegados (false: solo se sabe dónde se respondió). */
+  measured: boolean;
   /** Ni salió de la pantalla ni intentó pegar. */
   clean: boolean;
   /** Lo que el reclutador debe saber, en frases. */
   lines: string[];
   /** "Duración: 18 min", o '' si no se registró. */
   duration: string;
+  /** "Respondido en Teléfono 2" (modo estación, comprobado por el servidor), o ''. */
+  place: string;
 }
 
 /** Lo que se muestra en el perfil. null = el test se hizo antes de que existiera el registro. */
 export function readIntegrity(raw: unknown): IntegrityReading | null {
   if (!raw || typeof raw !== 'object') return null;
   const r = raw as Record<string, unknown>;
+  const measured = ['exits', 'awayMs', 'pasteBlocked', 'durationMs'].some(k => k in r);
+  const stationName = typeof (r.station as any)?.name === 'string' ? (r.station as any).name.trim() : '';
   const exits = count(r.exits);
   const awayMs = count(r.awayMs);
   const pasteBlocked = count(r.pasteBlocked);
@@ -78,8 +84,10 @@ export function readIntegrity(raw: unknown): IntegrityReading | null {
     lines.push(`Intentó pegar o dictar texto ${pasteBlocked} ${pasteBlocked === 1 ? 'vez' : 'veces'} (bloqueado).`);
   }
   return {
+    measured,
     clean: lines.length === 0,
     lines,
     duration: durationMs > 0 ? `Duración: ${formatDuration(durationMs)}` : '',
+    place: stationName ? `Respondido en ${stationName}` : '',
   };
 }

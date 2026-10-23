@@ -1,0 +1,17 @@
+{
+  "name": "Estación de tests",
+  "short_name": "Estación",
+  "description": "Teléfono de la empresa donde los candidatos responden su test.",
+  "id": "/estacion",
+  "start_url": "/estacion",
+  "scope": "/estacion",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f9fafb",
+  "theme_color": "#2563eb",
+  "lang": "es",
+  "icons": [
+    { "src": "/estacion-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "/estacion-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
