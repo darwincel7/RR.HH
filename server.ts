@@ -2545,20 +2545,13 @@ async function startServer() {
       // contacto por el que llegó— y la postulación se cuelga del VIVO.
       const found = await db.listCandidatesByPhoneOrEmail(phone, email, 10);
       const matches: Array<{ test: any; live: any }> = [];
-      const seen = new Set<string>([candidateId]);
       for (const c of found) {
         if (!c?.id) continue;
-        if (!c.mergedInto) {
-          if (seen.has(c.id)) continue;
-          seen.add(c.id);
-          matches.push({ test: c, live: c });
-          continue;
-        }
+        if (!c.mergedInto) { matches.push({ test: c, live: c }); continue; }
         const liveId = await followMergedInto(readCandidate, c.id);
-        if (!liveId || seen.has(liveId)) continue;
+        if (!liveId || liveId === c.id) continue;
         const live = await readCandidate(liveId);
         if (!live || live.mergedInto) continue;
-        seen.add(liveId);
         // `mergedInto: undefined` SOLO para la comprobación: `isSameApplicant` rechaza de
         // plano un perfil unificado —no puede recibir nada—, y aquí la pregunta es de
         // QUIÉN son esos contactos, no quién recibe la postulación.
@@ -2567,10 +2560,19 @@ async function startServer() {
 
       // ¿Cuáles de esos perfiles SON esta persona? Se decide una sola vez y sirve para
       // las dos cosas que vienen: reconocerla y bloquear su postulación repetida.
+      //
+      // Se comprueban TODOS los alias y solo después se deduplica, por los vivos que
+      // pasaron. Deduplicar antes perdía el caso que motivó todo esto: el perfil vivo
+      // puede aparecer por su teléfono y fallar la comprobación —cambió de correo, o el
+      // equipo le corrigió el nombre— mientras el perfil muerto que apunta a él sí tiene
+      // los tres datos de entonces. Descartado ese alias por "ya lo vimos", la persona
+      // volvía a duplicarse justo en la situación que el salto al perfil vivo resuelve.
       const sameApplicant: any[] = [];
+      const taken = new Set<string>([candidateId]);
       for (const m of matches) {
+        if (taken.has(m.live.id)) continue;
         const match = isSameApplicant(m.test, { name, phoneNormalized, email });
-        if (match.same) sameApplicant.push(m.live);
+        if (match.same) { taken.add(m.live.id); sameApplicant.push(m.live); }
         else console.log(`[apply] perfil ${m.test.id} comparte contacto pero NO es esta persona (${match.reason}): queda para "Revisar duplicados"`);
       }
 
