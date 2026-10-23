@@ -2497,6 +2497,9 @@ async function startServer() {
       // del perfil muerto: invisible en el perfil vivo y reencolando su CV. Se sigue la
       // CADENA completa (A→B→C es normal: unificar dos veces está permitido).
       let profile = await readCandidate(candidateId);
+      // Lo que hay que reparar en este perfil si la petición llega a buen puerto: ver
+      // abajo, cuando el rastro de una unificación no acaba en ningún perfil vivo.
+      let pendingRevive: Record<string, any> | null = null;
       if (profile?.mergedInto) {
         // `strict`: aquí se va a ESCRIBIR. Un fallo pasajero de lectura que hiciera
         // pasar por vivo a este perfil muerto colgaría de él la postulación y el CV
@@ -2518,7 +2521,12 @@ async function startServer() {
           // Así que se revive este perfil: su contenido sigue aquí y el destino al que
           // apuntaba ya no existe. En el peor caso reaparece un duplicado, que se ve y se
           // arregla en dos clics; perder una postulación no se ve nunca.
-          await db.setDocData('candidates', candidateId, { mergedInto: null, revivedAt: new Date() });
+          //
+          // La reparación se ESCRIBE cuando la petición llega a una conclusión sobre esta
+          // persona (se crea su postulación, o se le dice que ya tiene una), no aquí: si
+          // la vacante ya no existe o algo falla después, la petición no deja nada escrito
+          // —un perfil que reaparece sin motivo visible solo confunde—.
+          pendingRevive = { mergedInto: null, revivedAt: new Date() };
           profile = { ...profile, mergedInto: null };
           console.warn(`[apply] el perfil ${candidateId} apuntaba a ${liveId || 'nada'} y ahí no hay perfil vivo: se reactiva para no esconder su postulación`);
         }
@@ -2619,13 +2627,24 @@ async function startServer() {
       // y bloquear por eso dejaría a la hermana sin poder aplicar a un trabajo — un daño
       // real e invisible (la postulación no llega nunca). Que entren dos postulaciones
       // del mismo teléfono se ve, se descarta en un clic y lo agrupa "Revisar duplicados".
+      // Decirle "ya existe una postulación" es una conclusión sobre esta persona, así que
+      // la reparación pendiente se escribe aquí también. Y es justo donde más falta hace:
+      // si su postulación está colgada de este perfil escondido, sin reparar nadie la
+      // vería nunca y a ella se le seguiría diciendo que ya aplicó.
+      const commitRevive = async () => {
+        if (!pendingRevive) return;
+        await db.setDocData('candidates', candidateId, pendingRevive)
+          .catch(e => console.error(`[apply] no se pudo reactivar el perfil ${candidateId}:`, e));
+      };
       for (const candidate of sameApplicant) {
         if (candidate.id === candidateId) continue;
         if (await hasApplicationFor(candidate.id)) {
+          await commitRevive();
           return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
         }
       }
       if (await hasApplicationFor(candidateId)) {
+        await commitRevive();
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
       let applicationId = `${candidateId}_${vacancyId}`;
@@ -2694,6 +2713,9 @@ async function startServer() {
         // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
         // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
         ...(profile?.createdAt ? {} : { createdAt: now }),
+        // La reparación del rastro de unificación roto, si había que hacerla: va en el
+        // mismo lote que la postulación, así que o se escriben las dos o ninguna.
+        ...(pendingRevive || {}),
       };
       if (!profile?.city) candidateData.city = city.slice(0, 120);
       // Degradar el contacto anterior a alternativo solo tiene sentido cuando el nuevo

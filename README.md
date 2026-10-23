@@ -209,7 +209,8 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   Si el rastro no acaba en ningún perfil vivo —el que recibió la unificación se **borró**,
   y borrar un candidato no limpia los `mergedInto` que apuntan a él—, la postulación
   **reactiva** el perfil de esa sesión en vez de colgarse de un perfil que las pantallas
-  esconden: en el peor caso reaparece un duplicado, que se ve y se arregla en dos clics,
+  esconden (la reparación se escribe con la postulación, o al decirle "ya existe una
+  postulación" — nunca en una petición que no concluye nada): en el peor caso reaparece un duplicado, que se ve y se arregla en dos clics,
   mientras que fallar dejaría a esa persona sin poder aplicar nunca desde su navegador. El
   otro teléfono/correo se guarda como `alternatePhones`/`alternateEmails` —incluidos los
   que el duplicado ya traía de una unificación anterior, para que unificar dos veces
