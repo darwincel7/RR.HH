@@ -34,7 +34,7 @@ describe('readIntegrity', () => {
 
   it('reports a clean test with its duration', () => {
     expect(readIntegrity({ exits: 0, awayMs: 0, pasteBlocked: 0, durationMs: 18 * 60_000 }))
-      .toEqual({ clean: true, lines: [], duration: 'Duración: 18 min' });
+      .toEqual({ measured: true, clean: true, lines: [], duration: 'Duración: 18 min', place: '' });
   });
 
   it('spells out exits and paste attempts', () => {
@@ -45,6 +45,13 @@ describe('readIntegrity', () => {
       'Intentó pegar o dictar texto 1 vez (bloqueado).',
     ]);
     expect(r?.duration).toBe('');
+  });
+
+  it('says on which company phone it was answered', () => {
+    const r = readIntegrity({ exits: 0, awayMs: 0, pasteBlocked: 0, durationMs: 0, station: { id: 's1', name: 'Teléfono 2' } });
+    expect(r?.place).toBe('Respondido en Teléfono 2');
+    // Only the phone is known (no counters): nothing to claim about exits or pastes.
+    expect(readIntegrity({ station: { id: 's1', name: 'Teléfono 2' } })?.measured).toBe(false);
   });
 
   it('ignores junk counters instead of showing them', () => {

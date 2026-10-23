@@ -5,7 +5,7 @@ import { db } from '../lib/firebase';
 import { PIPELINE_STAGES } from '../constants/stages';
 import { sendWhatsAppAutomation } from '../lib/whatsapp';
 import { apiFetch } from '../lib/api';
-import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, Merge, QrCode, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Loader2, ArrowRightLeft, Camera, ScanFace, Trash2, Mail, Phone, MapPin, AlertTriangle, CheckCircle, Star, StarHalf, MessageSquare, Send, User, BrainCircuit, Briefcase, FileText, Copy, Eye, X, ExternalLink , Pencil, Merge, QrCode, ShieldCheck, ShieldAlert, Smartphone } from 'lucide-react';
 import Modal from '../components/ui/Modal';
 import EditCandidateModal from '../components/EditCandidateModal';
 import CandidateNotes from '../components/CandidateNotes';
@@ -20,6 +20,7 @@ import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
 import PersonalityTestCard from '../components/PersonalityTestCard';
 import LinkQrModal from '../components/LinkQrModal';
+import TestStationPanel from '../components/TestStationPanel';
 import { readIntegrity } from '../lib/testIntegrity';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
@@ -1213,9 +1214,12 @@ export default function CandidateProfile() {
                             {testIntegrity.clean ? <ShieldCheck className="w-3.5 h-3.5 mr-1.5" /> : <ShieldAlert className="w-3.5 h-3.5 mr-1.5" />}
                             Integridad del test
                           </p>
-                          {testIntegrity.clean
+                          {testIntegrity.place && (
+                            <p className="flex items-center"><Smartphone className="w-3.5 h-3.5 mr-1.5 shrink-0" /> {testIntegrity.place}</p>
+                          )}
+                          {testIntegrity.measured && (testIntegrity.clean
                             ? <p>No salió de la pantalla ni intentó pegar texto.</p>
-                            : testIntegrity.lines.map(line => <p key={line}>{line}</p>)}
+                            : testIntegrity.lines.map(line => <p key={line}>{line}</p>))}
                           {!testIntegrity.clean && (
                             <p className="text-[10px] mt-1 opacity-80">Es una señal para conversar, no una prueba: una salida corta puede ser la pantalla que se apagó sola.</p>
                           )}
@@ -1290,13 +1294,22 @@ export default function CandidateProfile() {
                         <AlertTriangle className="w-6 h-6 lg:w-8 lg:h-8 text-slate-300" />
                       </div>
                       <p className="text-[10px] lg:text-sm font-medium text-slate-500">Test pendiente.</p>
+                      {/* El key reinicia su estado local (selector abierto, errores) al cambiar de postulación. */}
+                      {application && (
+                        <div key={application.id} className="w-full">
+                          <TestStationPanel
+                            application={application}
+                            candidateName={candidate?.fullName || candidate?.name || application.candidateName || ''}
+                          />
+                        </div>
+                      )}
                       <p className="text-[10px] lg:text-xs text-slate-400 max-w-xs">
-                        Escanea el QR con el teléfono de la empresa y entrégaselo ya abierto: el test empieza mostrando su nombre para que confirme que es el suyo.
+                        O ábrelo con el QR en el teléfono de la empresa y entrégaselo ya abierto. El test empieza mostrando su nombre para que confirme que es el suyo.
                       </p>
                       <div className="flex flex-wrap justify-center gap-2">
                         <button
                           onClick={() => setShowTestQr(true)}
-                          className="flex items-center px-3 py-1.5 bg-violet-600 text-white text-[10px] lg:text-xs font-bold rounded-lg hover:bg-violet-700 transition-all shadow-sm"
+                          className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[10px] lg:text-xs font-bold rounded-lg hover:bg-slate-50 transition-all shadow-sm"
                         >
                           <QrCode className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> QR para el teléfono
                         </button>

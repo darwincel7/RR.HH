@@ -172,5 +172,17 @@ service cloud.firestore {
     match /interview_participants/{participantId} {
       allow read, write: if isRecruiter();
     }
+
+    // Modo estación (src/lib/stations.ts): los teléfonos de la empresa y sus códigos de
+    // vinculación. El teléfono NUNCA lee ni escribe aquí: habla con el servidor (Admin SDK)
+    // con el id secreto de su documento. Solo el equipo los ve, les asigna tests y genera
+    // códigos; el id de cada teléfono es su llave, así que la lista no es pública.
+    match /stations/{stationId} {
+      allow read, write: if isRecruiter();
+    }
+
+    match /station_codes/{code} {
+      allow read, write: if isRecruiter();
+    }
   }
 }

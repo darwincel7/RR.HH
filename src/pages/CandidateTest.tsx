@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Loader2, CheckCircle, Send, Building2, AlertTriangle, UserCheck } from 'lucide-react';
+import { Loader2, CheckCircle, Send, Building2, AlertTriangle, UserCheck, Smartphone } from 'lucide-react';
 import SubmitOverlay from '../components/SubmitOverlay';
 import { masterTestQuestions, Question } from '../data/testQuestions';
 import { shortNameOf } from '../lib/personName';
@@ -25,8 +25,26 @@ interface IntegrityState {
   hiddenAt: number;
 }
 
-export default function CandidateTest() {
-  const { applicationId } = useParams();
+/**
+ * On a company phone (station mode, src/pages/Station.tsx) the test is embedded: its
+ * application comes from the phone's assignment instead of the URL — the candidate never
+ * sees a link — and it reports how it goes so the panel can follow it live.
+ */
+export interface StationEmbed {
+  stationId: string;
+  name: string;
+  /** The question on screen (-1 = the cover) and the exits so far, whenever they change. */
+  onProgress: (p: { index: number; total: number; exits: number }) => void;
+  /** Sent now, or found already answered when it opened. */
+  onDone: (info: { firstName: string; alreadyAnswered: boolean }) => void;
+}
+
+export default function CandidateTest({ applicationId: embeddedId, station }: { applicationId?: string; station?: StationEmbed } = {}) {
+  const params = useParams();
+  const applicationId = embeddedId ?? params.applicationId;
+  // The parent re-renders with fresh callbacks; handlers read the latest from here.
+  const stationRef = useRef(station);
+  stationRef.current = station;
   const [application, setApplication] = useState<any>(null);
   const [company, setCompany] = useState({ name: 'AuraATS', logoUrl: '' });
   const [loading, setLoading] = useState(true);
@@ -117,6 +135,7 @@ export default function CandidateTest() {
         it.awayMs += Math.max(0, Date.now() - it.hiddenAt);
         it.hiddenAt = 0;
         setNotice('Saliste de la pantalla del test. Cada salida queda registrada.');
+        reportProgress();
       }
       persistIntegrity();
     };
@@ -124,6 +143,21 @@ export default function CandidateTest() {
     return () => document.removeEventListener('visibilitychange', onVisibility);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [applicationId]);
+
+  // Station mode: the panel follows the question on screen and the exits.
+  const progressRef = useRef({ index: -1, total: 0 });
+  const reportProgress = () => {
+    const { index, total } = progressRef.current;
+    if (total > 0) stationRef.current?.onProgress({ index, total, exits: integrityRef.current.exits });
+  };
+  useEffect(() => {
+    if (!station || loading || questions.length === 0) return;
+    progressRef.current = { index: Math.min(currentQuestionIndex, questions.length - 1), total: questions.length };
+    reportProgress();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentQuestionIndex, questions.length, loading]);
+
+  const firstNameOf = (shortName: string) => shortName.split(' ')[0] || '';
 
   const blockPaste = () => {
     integrityRef.current.pasteBlocked += 1;
@@ -188,12 +222,16 @@ export default function CandidateTest() {
         if (res.ok) {
           const data = await res.json();
           if (!data.valid) {
-            setErrorMsg('El link del test no es válido.');
+            setErrorMsg(stationRef.current ? 'No se encontró este test. Avisa a quien te entregó el teléfono.' : 'El link del test no es válido.');
           } else {
             if (data.company) setCompany({ name: data.company.name || 'AuraATS', logoUrl: data.company.logoUrl || '' });
-            setCandidateShortName(typeof data.candidateShortName === 'string' ? data.candidateShortName : '');
+            const shortName = typeof data.candidateShortName === 'string' ? data.candidateShortName : '';
+            setCandidateShortName(shortName);
             setApplication({ testResults: data.completed ? true : undefined });
-            if (data.completed) setSuccess(true);
+            if (data.completed) {
+              setSuccess(true);
+              stationRef.current?.onDone({ firstName: firstNameOf(shortName), alreadyAnswered: true });
+            }
             // null → use the bundled master question set (kept off the wire).
             setQuestions(Array.isArray(data.questions) && data.questions.length > 0 ? data.questions : masterTestQuestions);
           }
@@ -215,9 +253,12 @@ export default function CandidateTest() {
           const appData = docSnap.data();
           setApplication(appData);
           setCandidateShortName(shortNameOf(String(appData.candidateName || '')));
-          if (appData.testResults) setSuccess(true);
+          if (appData.testResults) {
+            setSuccess(true);
+            stationRef.current?.onDone({ firstName: firstNameOf(shortNameOf(String(appData.candidateName || ''))), alreadyAnswered: true });
+          }
         } else {
-          setErrorMsg('El link del test no es válido.');
+          setErrorMsg(stationRef.current ? 'No se encontró este test. Avisa a quien te entregó el teléfono.' : 'El link del test no es válido.');
         }
         const settingsSnap = await getDoc(doc(db, 'settings', 'forms'));
         if (settingsSnap.exists() && settingsSnap.data().testQuestions && !settingsSnap.data().testQuestions.some((q: any) => q.id === 'C1' || q.id === 'q1')) {
@@ -282,7 +323,7 @@ export default function CandidateTest() {
       const response = await fetch('/api/evaluate-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applicationId, questions, answers, integrity })
+        body: JSON.stringify({ applicationId, questions, answers, integrity, ...(station ? { stationId: station.stationId } : {}) })
       });
       if (!response.ok) {
         throw new Error(`evaluate-test respondió ${response.status}`);
@@ -290,6 +331,7 @@ export default function CandidateTest() {
 
       localStorage.removeItem(`aura_test_${applicationId}`);
       setSuccess(true);
+      stationRef.current?.onDone({ firstName: firstNameOf(candidateShortName), alreadyAnswered: false });
     } catch (error) {
       console.error("Error submitting test:", error);
       alert('Error al enviar el test. Por favor, intenta de nuevo.');
@@ -425,7 +467,7 @@ export default function CandidateTest() {
       />
       <div className="max-w-2xl mx-auto bg-white rounded-lg shadow-md p-8">
         {/* Company Header */}
-        <div className="flex items-center justify-center mb-8 pb-6 border-b border-gray-100">
+        <div className={`flex items-center mb-8 pb-6 border-b border-gray-100 ${station ? 'justify-between gap-3' : 'justify-center'}`}>
           {company.logoUrl ? (
             <img src={company.logoUrl} alt={company.name} className="h-10 max-w-[150px] object-contain" />
           ) : (
@@ -433,6 +475,11 @@ export default function CandidateTest() {
               <Building2 className="w-6 h-6 text-blue-600 mr-2" />
               {company.name}
             </div>
+          )}
+          {station && (
+            <span className="shrink-0 text-xs font-bold px-2.5 py-1 rounded-full bg-blue-50 text-blue-700 flex items-center">
+              <Smartphone className="w-3.5 h-3.5 mr-1" /> {station.name}
+            </span>
           )}
         </div>
 

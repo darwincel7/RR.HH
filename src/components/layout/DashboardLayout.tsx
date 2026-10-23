@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Outlet, Navigate, Link, useLocation } from 'react-router-dom';
 import { useAuth } from '../../contexts/AuthContext';
-import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock } from 'lucide-react';
+import { Briefcase, LayoutDashboard, LogOut, Settings, Users, Sparkles, Menu, X, ChevronLeft, ChevronRight, FileText, Clock, Smartphone } from 'lucide-react';
 import WhatsAppStatusBanner from '../WhatsAppStatusBanner';
 import AiStatusBanner from '../AiStatusBanner';
 import CVWorker from '../CVWorker';
@@ -124,6 +124,7 @@ export default function DashboardLayout() {
     { name: 'Candidatos', href: '/candidates', icon: Users },
     { name: 'Entrevistas', href: '/interviews', icon: Users },
     { name: 'Formularios', href: '/forms', icon: FileText },
+    { name: 'Teléfonos', href: '/phones', icon: Smartphone },
     { name: 'Configuración', href: '/settings', icon: Settings },
   ];
 

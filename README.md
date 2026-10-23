@@ -38,8 +38,8 @@ Personalidad** presencial (ver *Herramientas del día a día*). Describe rasgos,
 
 ## Rutas principales
 
-- Públicas: `/careers`, `/apply/:vacancyId`, `/eval/:applicationId`, `/test/:applicationId`, `/personalidad/:applicationId`
-- Internas (requieren login): `/` (dashboard), `/vacancies`, `/candidates`, `/interviews`, `/forms`, `/settings`
+- Públicas: `/careers`, `/apply/:vacancyId`, `/eval/:applicationId`, `/test/:applicationId`, `/personalidad/:applicationId`, `/estacion` (teléfonos de la empresa)
+- Internas (requieren login): `/` (dashboard), `/vacancies`, `/candidates`, `/interviews`, `/forms`, `/phones`, `/settings`
 
 ## Ejecutar localmente
 
@@ -323,6 +323,35 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   puede ser la pantalla que se apagó sola). Lógica en
   [`src/lib/testIntegrity.ts`](src/lib/testIntegrity.ts). *Eliminar Test* lo borra con
   las respuestas y al unificar perfiles viaja con el resto del test.
+- **Modo estación: los teléfonos de la empresa** (menú *Teléfonos* y perfil → *Resultados
+  Test* → *Enviar a un teléfono*): el test situacional llega solo al teléfono que la
+  reclutadora elige, sin QR, link ni WhatsApp. Cada teléfono se **vincula una vez**: abre
+  `/estacion` (el QR de *Teléfonos* la abre), escribe un código de 6 dígitos que genera el
+  panel (`station_codes/{código}`, vence en 10 minutos, un solo uso, se consume en una
+  transacción) y un nombre («Teléfono 2»). El servidor crea `stations/{id}` con un id
+  **secreto** de 32 caracteres que es la llave del teléfono: lo guarda su navegador y el
+  teléfono nunca toca Firestore — habla solo con `/api/public/station/*` (`pair`, `poll`,
+  `progress`, `release`); las reglas dejan `stations` y `station_codes` solo al equipo.
+  Desde entonces la página espera: cada 3 s pregunta si tiene test (`poll`, que anota
+  `lastSeenAt` como mucho cada 30 s; sin noticias en 2 minutos el panel lo muestra *Sin
+  conexión*). *Enviar* escribe `assignment` en el teléfono en una transacción que rechaza
+  uno ocupado con otra persona; *Pasar a otro teléfono* lo quita del anterior en la misma
+  transacción. El teléfono abre el test **embebido** (el mismo `/test`, sin link a la vista),
+  con su nombre arriba y la confirmación *Sí, soy …*; informa la pregunta en pantalla y las
+  salidas (`progress`, que solo escribe si sigue siendo su test), y el perfil lo muestra en
+  vivo: *En Teléfono 2 · Confirmó su nombre a las … · Pregunta 7 de 20 · No ha salido de la
+  pantalla*, con *Pasar a otro teléfono* y *Cancelar*. Al enviar, `/api/evaluate-test`
+  comprueba que el test estaba asignado a ese teléfono, anota `testIntegrity.station`
+  (*Respondido en Teléfono 2* en el perfil) y lo **libera**; el teléfono despide al
+  candidato («¡Listo, Juan!») y a los 8 s vuelve a *Esperando candidato…*. Mientras está a
+  la vista mantiene la pantalla encendida (Wake Lock), para que un teléfono que se bloquea
+  solo no cuente como salida. Se instala como app (`public/estacion.webmanifest`: abre
+  `/estacion` sin barra de direcciones) y *Teléfonos* explica cómo dejarlo listo: instalar,
+  apagar las ayudas del teclado, fijar la app y no dejar cuenta en la Play Store. Esa
+  página muestra cada teléfono en vivo (libre, ocupado con quién y por qué pregunta, sin
+  conexión), los tests terminados hoy (`doneToday`, por día de RD), *Liberar* y
+  *Desvincular* (el teléfono vuelve a *Vincular* en su próxima consulta). El QR y el link
+  siguen como respaldo. Lógica en [`src/lib/stations.ts`](src/lib/stations.ts).
 - **Test de Personalidad presencial** (perfil → tarjeta *Test de personalidad*): se aplica
   **cuando la entrevistadora lo decide**, no lo dispara ninguna etapa. *Aplicar test ahora*
   guarda en la postulación una **copia** del test tal como está en Formularios y habilita
