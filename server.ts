@@ -2504,9 +2504,23 @@ async function startServer() {
         // la persona reintente. (En los alias de OTROS perfiles, más abajo, no: ahí un
         // fallo solo degrada a crear un duplicado, que se ve y se arregla en dos clics.)
         const liveId = await followMergedInto(readCandidate, candidateId, { strict: true });
-        if (liveId && liveId !== candidateId) {
-          const live = await readCandidate(liveId);
-          if (live && !live.mergedInto) { candidateId = liveId; profile = live; }
+        const live = liveId && liveId !== candidateId ? await readCandidate(liveId) : null;
+        if (live && !live.mergedInto) {
+          candidateId = liveId!;
+          profile = live;
+        } else {
+          // El rastro no acaba en ningún perfil vivo: el que recibió la unificación se
+          // BORRÓ (borrar un candidato no limpia los `mergedInto` que apuntan a él), o la
+          // cadena es más larga que el límite de saltos. Las dos salidas obvias son malas:
+          // escribir aquí deja la postulación y el CV en un perfil que las pantallas
+          // esconden —invisible, y nadie se entera—, y fallar deja a esta persona sin
+          // poder aplicar NUNCA desde este navegador, porque su uid no cambia.
+          // Así que se revive este perfil: su contenido sigue aquí y el destino al que
+          // apuntaba ya no existe. En el peor caso reaparece un duplicado, que se ve y se
+          // arregla en dos clics; perder una postulación no se ve nunca.
+          await db.setDocData('candidates', candidateId, { mergedInto: null, revivedAt: new Date() });
+          profile = { ...profile, mergedInto: null };
+          console.warn(`[apply] el perfil ${candidateId} apuntaba a ${liveId || 'nada'} y ahí no hay perfil vivo: se reactiva para no esconder su postulación`);
         }
       }
 
@@ -2667,10 +2681,16 @@ async function startServer() {
         // actualiza, como siempre: ahí el contacto nuevo es una corrección suya.
         ...(recognizedByContact ? {} : { email, phone, phoneNormalized }),
         ...(keepCv ? {} : { cvUrl, cvFileType: cvFileType.slice(0, 120), aiStatus: 'pending' }),
+        // El nombre, como el CV y el contacto: en un perfil reconocido por sus datos no se
+        // toca. `namesCompatible` acepta un nombre que CONTENGA al guardado, así que
+        // quien conociera el teléfono y el correo de Ana Pérez podría reescribirla como
+        // "Ana María Pérez Gómez" —con apellidos inventados— y ese nombre es el que ve el
+        // equipo y el que va en los mensajes que se le envían. El perfil reconocido ya
+        // tiene un nombre usable: es la condición para haberlo reconocido.
         // `|| profile.name`: los perfiles viejos guardan el nombre ahí, y la interfaz lee
         // `fullName || name`. Sin eso, una re-postulación escondía detrás de un nombre
         // corto el que el equipo mantenía.
-        fullName: preferredName(profile?.fullName || profile?.name, name),
+        ...(recognizedByContact ? {} : { fullName: preferredName(profile?.fullName || profile?.name, name) }),
         // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
         // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
         ...(profile?.createdAt ? {} : { createdAt: now }),

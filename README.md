@@ -205,7 +205,12 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   postulaciones y mensajes y sus links viejos redirigen al perfil principal. Las búsquedas
   de candidato del servidor siguen ese rastro hasta el perfil vivo, y `/api/apply` lo
   sigue también para la sesión del propio postulante: su navegador conserva el UID
-  anónimo, así que sin eso su siguiente postulación nacería colgada del perfil muerto. El
+  anónimo, así que sin eso su siguiente postulación nacería colgada del perfil muerto.
+  Si el rastro no acaba en ningún perfil vivo —el que recibió la unificación se **borró**,
+  y borrar un candidato no limpia los `mergedInto` que apuntan a él—, la postulación
+  **reactiva** el perfil de esa sesión en vez de colgarse de un perfil que las pantallas
+  esconden: en el peor caso reaparece un duplicado, que se ve y se arregla en dos clics,
+  mientras que fallar dejaría a esa persona sin poder aplicar nunca desde su navegador. El
   otro teléfono/correo se guarda como `alternatePhones`/`alternateEmails` —incluidos los
   que el duplicado ya traía de una unificación anterior, para que unificar dos veces
   (A→B→C) no pierda el contacto de A—: entran en el buscador, vuelven a enlazar un
@@ -253,8 +258,10 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
   el teléfono/correo que deja de ser el principal se guarda como alternativo — de él
   depende que un WhatsApp entrante siga enlazándose con esa persona.
-  En un perfil reconocido por sus datos, el teléfono y el correo **principales tampoco se
-  tocan**: para ser reconocido basta coincidir con un contacto *alternativo* (ahí está
+  En un perfil reconocido por sus datos, el **nombre** y el teléfono y el correo
+  **principales tampoco se tocan** (`namesCompatible` acepta un nombre que contenga al
+  guardado, así que si no, quien conociera el contacto de alguien podría añadirle
+  apellidos inventados, y ese nombre es el que ve el equipo y el que va en sus mensajes): para ser reconocido basta coincidir con un contacto *alternativo* (ahí está
   justo el número por el que nació un duplicado), así que escribirlo como principal
   ascendería un dato viejo y la siguiente respuesta de WhatsApp saldría hacia otro número.
   En el perfil de la propia sesión sí se actualiza: ahí el contacto nuevo es una
