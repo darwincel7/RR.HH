@@ -40,7 +40,7 @@ import {
 } from './serverWhatsAppQueue';
 import { parseSendWindow, isWithinSendWindow, nextSendWindowOpenMs, formatWindowHour } from './src/lib/sendWindow';
 import { estimateQueueEtas, describeFailure, vacancyFromTopicKey } from './serverWhatsAppActivity';
-import { getServerDb, type ServerDb } from './serverDb';
+import { getServerDb, followMergedInto, type ServerDb } from './serverDb';
 import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
@@ -50,6 +50,7 @@ import {
 import { normalizePhone } from './src/lib/phone';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
+import { blocksNewApplication, isSameApplicant, preferredName } from './src/lib/applicantIdentity';
 import { resolvePersonalityTemplate, publicQuestions, checkAnswers, scorePersonality } from './src/lib/personalityTest';
 import { firstNameOf } from './src/lib/personName';
 import { buildPersonalityEvidence, buildPersonalityPrompt, normalizePersonalityInterpretation } from './serverPersonalityEval';
@@ -834,6 +835,22 @@ async function photoBackfillPass(): Promise<void> {
 
 // Parses one already-claimed candidate's CV and writes the results. Isolated so one
 // candidate's failure never aborts the others in the batch. Returns true when the CV
+// El CV de un candidato cambió mientras la IA leía el anterior, así que esa lectura se
+// descarta. Lo normal es que quien lo cambió lo dejara en la cola; solo si quedó colgado
+// en otro estado se repone, para no deshacer el `claim` de un tick que ya lo tomara —eso
+// serían dos lecturas de IA del mismo CV.
+async function requeueIfStranded(id: string) {
+  try {
+    const now = await db.getDocData('candidates', id);
+    if (now && now.aiStatus !== 'pending' && now.aiStatus !== 'processing') {
+      await db.setDocData('candidates', id, { aiStatus: 'pending', aiError: null });
+      console.log(`[server CV worker] ${id}: el CV nuevo no estaba en la cola; encolado`);
+    }
+  } catch (e) {
+    console.warn(`[server CV worker] ${id}: no se pudo comprobar si el CV nuevo quedó en la cola:`, e);
+  }
+}
+
 // was scored, false when it ended in 'error', so a run can report what it achieved.
 async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileType?: string; fullName?: string; email?: string; phone?: string; city?: string; source?: string }): Promise<boolean> {
   // Bulk docs: created by the recruiter's mass upload. Two shapes exist — old ones with
@@ -855,13 +872,38 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       }
       if (!cand.city && parsedData.city) candidateUpdate.city = parsedData.city;
     }
-    await db.setDocData('candidates', cand.id, candidateUpdate);
+    // Leer un CV tarda decenas de segundos: la persona pudo volver a aplicar en ese rato
+    // con OTRO currículum. Guardar esta lectura dejaría el análisis de un CV junto al
+    // link de otro y, lo peor, marcaría 'completed' sobre la cola — el CV nuevo no se
+    // leería nunca y su postulación quedaría sin puntuación. Comparar y escribir va en
+    // UNA transacción: separados dejaban una ventana en la que el CV cambiaba justo
+    // entre las dos cosas y la escritura pisaba igual.
+    if (!await db.writeCandidateIfCvUnchanged(cand.id, cand.cvUrl, candidateUpdate)) {
+      console.log(`[server CV worker] ${cand.id}: el CV cambió mientras se leía; esta lectura se descarta`);
+      await requeueIfStranded(cand.id);
+      return false;
+    }
 
-    const appIds = await db.getApplicationIdsByCandidate(cand.id);
-    for (const appId of appIds) {
-      const appUpdate: any = { scoreSummary: parsedData.initial_score_1_to_5, recommendation: parsedData.recommendation };
+    // La nota del CV va a las postulaciones de esta persona. A una que se envió con OTRO
+    // currículum solo se le respeta la nota que YA tiene: quien vuelve a aplicar con un
+    // CV nuevo no cambia retroactivamente lo que ya fue evaluado con el CV de entonces.
+    // Pero si esa postulación no tiene nota, se le pone esta: el CV con el que se envió
+    // pudo quedar sin leer (llegó uno nuevo antes de que la IA llegara al anterior) y
+    // nadie la volvería a encolar — quedaría sin puntuación para siempre, fuera del
+    // Ranking. Una nota del currículum vigente es mejor que ninguna.
+    const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
+    for (const app of apps) {
+      const otherCv = app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl;
+      if (otherCv && app.scoreSummary !== undefined && app.scoreSummary !== null) continue;
+      const appUpdate: any = {
+        scoreSummary: parsedData.initial_score_1_to_5,
+        recommendation: parsedData.recommendation,
+        // De qué CV salió: si era otro, el perfil sigue ofreciendo "Analizar CV de esta
+        // postulación" para leer el que de verdad envió (ver `src/lib/applicationCv.ts`).
+        scoreSource: otherCv ? 'perfil' : 'postulacion',
+      };
       if (namePending && parsedData.full_name) appUpdate.candidateName = parsedData.full_name;
-      await db.setDocData('applications', appId, appUpdate);
+      await db.setDocData('applications', app.id, appUpdate);
     }
     console.log(`[server CV worker] Scored candidate ${cand.id}: ${parsedData.initial_score_1_to_5} stars`);
     // The CV analysis said there is a photo of the person → cut it out for the avatar.
@@ -884,12 +926,30 @@ async function processOneCandidate(cand: { id: string; cvUrl?: string; cvFileTyp
       await db.setDocData('candidates', cand.id, { aiStatus: 'pending', aiError: null });
       return false;
     }
-    await db.setDocData('candidates', cand.id, { aiStatus: 'error', aiError: err?.message || String(err) });
+    // Tampoco es de este CV si el CV ya no es este: la persona volvió a aplicar con otro
+    // currículum mientras la IA leía el anterior. Marcar 'error' aquí pisaría la cola del
+    // nuevo —el worker solo toma los 'pending'— y ese CV no se leería nunca, dejando su
+    // postulación sin nota. Misma transacción que en el camino de éxito: comparar y
+    // escribir sin ventana entre medias.
+    const marked = await db
+      .writeCandidateIfCvUnchanged(cand.id, cand.cvUrl, { aiStatus: 'error', aiError: err?.message || String(err) })
+      .catch(() => true); // si ni eso se puede escribir, no se inventa nada sobre el estado
+    if (!marked) {
+      console.log(`[server CV worker] ${cand.id}: falló el CV anterior, pero ya hay otro; este error no se apunta`);
+      await requeueIfStranded(cand.id);
+      return false;
+    }
     if (namePending) {
       // Only placeholder names get the error label — a manually-typed name stays intact.
-      const appIds = await db.getApplicationIdsByCandidate(cand.id);
-      for (const appId of appIds) {
-        await db.setDocData('applications', appId, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
+      // Y solo en las postulaciones de ESTE CV: una que se envió con otro currículum, ya
+      // leído, no puede quedar marcada como ilegible.
+      const apps = await db.listDocsByField('applications', 'candidateId', cand.id, 300);
+      for (const app of apps) {
+        // Misma regla que al puntuar: solo se respeta la postulación de otro CV que ya
+        // tiene nota; una sin nota sí se etiqueta (su CV es el que no se pudo leer).
+        const otherCv = app.cvUrl && cand.cvUrl && app.cvUrl !== cand.cvUrl;
+        if (otherCv && app.scoreSummary !== undefined && app.scoreSummary !== null) continue;
+        await db.setDocData('applications', app.id, { candidateName: `⚠️ Error de lectura: ${cand.fullName!.replace('Procesando: ', '')}` });
       }
     }
     return false;
@@ -2025,6 +2085,48 @@ async function runPendingAiScorings(): Promise<{ scored: number; waiting: number
   return out;
 }
 
+// Los perfiles creados por el formulario siempre guardan `phoneNormalized`, pero los
+// que vienen de antes de ese campo pueden tener solo `phone`, escrito de cualquier
+// forma. Como la búsqueda por contacto compara valores exactos, esos perfiles son
+// invisibles para ella: se rellena el campo derivándolo del teléfono que ya está.
+//
+// Solo AÑADE un campo calculado (nunca pisa nada) y queda marcado en `settings/dedupe`,
+// así que recorre la colección una vez en la vida de la base, no en cada arranque.
+// Se guarda la PROMESA, no un "ya está": con un booleano puesto antes de empezar, una
+// postulación que entrara mientras el relleno corre seguía adelante y hacía su búsqueda
+// contra los perfiles todavía sin teléfono canónico — creando justo el duplicado que el
+// relleno existe para evitar. Quien llegue durante el relleno espera a que termine.
+let contactKeysBackfill: Promise<void> | null = null;
+function backfillCandidatePhoneKeys(): Promise<void> {
+  if (!contactKeysBackfill) contactKeysBackfill = runContactKeysBackfill();
+  return contactKeysBackfill;
+}
+
+async function runContactKeysBackfill(): Promise<void> {
+  try {
+    const done = await db.getDocData('settings', 'dedupe');
+    if (done?.phoneKeysBackfilledAt) return;
+    // Firestore no sabe buscar "a los que les falta un campo": se recorre la colección
+    // pidiendo solo esos dos campos. Lo leído aquí solo sirve para elegir a quién mirar:
+    // el valor que se escribe sale del documento vivo, en una transacción, porque el
+    // equipo puede haberle cambiado el teléfono mientras esto recorre la colección (ver
+    // `fillMissingPhoneNormalized`).
+    const all = await db.listDocs('candidates', ['phone', 'phoneNormalized']);
+    let fixed = 0;
+    for (const c of all) {
+      if (!c?.id || c.phoneNormalized || !c.phone) continue;
+      if (await db.fillMissingPhoneNormalized(c.id)) fixed++;
+    }
+    await db.setDocData('settings', 'dedupe', { phoneKeysBackfilledAt: new Date(), phoneKeysFixed: fixed });
+    console.log(`[apply] teléfono canónico rellenado en ${fixed} perfil(es) de ${all.length}`);
+  } catch (e) {
+    // Que falle no puede tumbar la postulación. Y no se reintenta en la siguiente: si
+    // falla por permisos (modo sin credenciales de admin), recorrer la colección en cada
+    // postulación costaría una fortuna en lecturas. Se vuelve a intentar al reiniciar.
+    console.error('[apply] no se pudo rellenar el teléfono canónico de los perfiles viejos:', e);
+  }
+}
+
 async function startServer() {
   const app = express();
   // Cloud Run injects PORT (defaults to 8080); fall back to 3000 for local dev.
@@ -2369,6 +2471,10 @@ async function startServer() {
       // Identity: derive the candidate id from the VERIFIED anonymous ID token, never
       // from the request body. This stops a leaked capability URL (which exposes a
       // victim's candidateId) from being used to overwrite that victim's profile.
+      //
+      // Más abajo, una postulación puede acabar colgada de un perfil que YA existía
+      // (isSameApplicant), pero nunca por un id suministrado: solo si coinciden teléfono,
+      // correo y nombre. Un id filtrado no abre esa puerta.
       let candidateId = body.candidateId;
       if (db.canEnforceAuth) {
         const header = req.headers.authorization || '';
@@ -2378,14 +2484,55 @@ async function startServer() {
         candidateId = uid;
       }
       if (!candidateId || candidateId.includes('/') || candidateId.length > 200) return res.status(400).json({ error: 'Sesión inválida' });
+      // La sesión que envía, antes de que `candidateId` pueda pasar a otro perfil (una
+      // unificación o un reconocimiento por contacto). Queda en la postulación para
+      // distinguir "vuelvo a enviar yo" de "otra sesión dice ser esta persona".
+      const sessionUid = candidateId;
+
+      // Sin `.catch(() => null)`: un fallo de lectura que devolviera null haría pasar a
+      // una sesión que SÍ tiene perfil por nueva — reescribiendo su createdAt y
+      // habilitando el reuso de otro perfil. Mejor que la postulación falle y se
+      // reintente (el handler responde 500) que escribir con la identidad equivocada.
+      const readCandidate = (id: string) => db.getDocData('candidates', id);
 
       // El navegador conserva su sesión anónima, así que quien ya fue unificado vuelve
       // con el MISMO uid. Sin seguir `mergedInto`, su nueva postulación nacería colgada
-      // del perfil muerto: invisible en el perfil vivo y reencolando su CV.
-      const ownProfile = await db.getDocData('candidates', candidateId).catch(() => null);
-      if (typeof ownProfile?.mergedInto === 'string' && ownProfile.mergedInto) {
-        const live = await db.getDocData('candidates', ownProfile.mergedInto).catch(() => null);
-        if (live && !live.mergedInto) candidateId = ownProfile.mergedInto;
+      // del perfil muerto: invisible en el perfil vivo y reencolando su CV. Se sigue la
+      // CADENA completa (A→B→C es normal: unificar dos veces está permitido).
+      let profile = await readCandidate(candidateId);
+      // Lo que hay que reparar en este perfil si la petición llega a buen puerto: ver
+      // abajo, cuando el rastro de una unificación no acaba en ningún perfil vivo.
+      let pendingRevive: Record<string, any> | null = null;
+      if (profile?.mergedInto) {
+        // `strict`: aquí se va a ESCRIBIR. Un fallo pasajero de lectura que hiciera
+        // pasar por vivo a este perfil muerto colgaría de él la postulación y el CV
+        // —invisibles en el perfil vivo, y sin que nadie se entere—. Mejor un 500 y que
+        // la persona reintente. (En los alias de OTROS perfiles, más abajo, no: ahí un
+        // fallo solo degrada a crear un duplicado, que se ve y se arregla en dos clics.)
+        const liveId = await followMergedInto(readCandidate, candidateId, { strict: true });
+        const live = liveId && liveId !== candidateId ? await readCandidate(liveId) : null;
+        if (live && !live.mergedInto) {
+          candidateId = liveId!;
+          profile = live;
+        } else {
+          // El rastro no acaba en ningún perfil vivo: el que recibió la unificación se
+          // BORRÓ (borrar un candidato no limpia los `mergedInto` que apuntan a él), o la
+          // cadena es más larga que el límite de saltos. Las dos salidas obvias son malas:
+          // escribir aquí deja la postulación y el CV en un perfil que las pantallas
+          // esconden —invisible, y nadie se entera—, y fallar deja a esta persona sin
+          // poder aplicar NUNCA desde este navegador, porque su uid no cambia.
+          // Así que se revive este perfil: su contenido sigue aquí y el destino al que
+          // apuntaba ya no existe. En el peor caso reaparece un duplicado, que se ve y se
+          // arregla en dos clics; perder una postulación no se ve nunca.
+          //
+          // La reparación se ESCRIBE cuando la petición llega a una conclusión sobre esta
+          // persona (se crea su postulación, o se le dice que ya tiene una), no aquí: si
+          // la vacante ya no existe o algo falla después, la petición no deja nada escrito
+          // —un perfil que reaparece sin motivo visible solo confunde—.
+          pendingRevive = { mergedInto: null, revivedAt: new Date() };
+          profile = { ...profile, mergedInto: null };
+          console.warn(`[apply] el perfil ${candidateId} apuntaba a ${liveId || 'nada'} y ahí no hay perfil vivo: se reactiva para no esconder su postulación`);
+        }
       }
 
       const vacancy = await db.getDocData('vacancies', vacancyId);
@@ -2394,42 +2541,223 @@ async function startServer() {
       const phoneNormalized = normalizePhone(phone);
 
       // Duplicate = a candidate with THIS phone/email already applied to THIS vacancy.
-      // We do NOT merge into that candidate's record (that could corrupt a different
-      // person who shares a phone/email); we only block a repeat application here.
       //
       // Checked by the application's vacancyId FIELD, not by its "<candidate>_<vacancy>"
       // id: recruiters can move an application to another vacancy, which keeps its id
       // (so the links already sent keep working) but changes the vacancy it belongs to.
       const hasApplicationFor = async (candId: string) => {
-        const ids = await db.getApplicationIdsByCandidate(candId);
-        const apps = await Promise.all(ids.map(id => db.getDocData('applications', id)));
-        return apps.some(a => a?.vacancyId === vacancyId);
+        const apps = await db.listDocsByField('applications', 'candidateId', candId, 300);
+        // `blocksNewApplication`: una postulación que nació de una sesión NO verificada
+        // (enlazada solo por teléfono+correo+nombre) no puede cerrarle la puerta a nadie
+        // más, o quien conociera esos datos aplicaría primero en nombre de otra persona
+        // y su postulación de verdad no llegaría nunca — y nadie lo vería.
+        return apps.some(a => a?.vacancyId === vacancyId && blocksNewApplication(a, sessionUid));
       };
-      const existingId = await db.findCandidateIdByPhoneOrEmail(phoneNormalized, email);
-      if (existingId && existingId !== candidateId && await hasApplicationFor(existingId)) {
-        return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+      // Antes de buscar: que todos los perfiles tengan su teléfono en forma canónica.
+      // Reconocer a alguien exige que su teléfono coincida, y la consulta que lo
+      // encuentra siempre es la de `phoneNormalized`; un perfil viejo que guardara
+      // "(809) 555-1234" sin ese campo no aparecería —las variantes que se prueban
+      // salen de lo que la persona ESCRIBE ahora, no de lo que hay guardado— y se
+      // duplicaría igual. Una sola vez en la vida de la base (ver la función).
+      await backfillCandidatePhoneKeys();
+
+      // TODOS los perfiles con este teléfono o correo, no uno arbitrario: cuando una
+      // familia comparte el celular, el que devolvía un `limit(1)` podía ser el del
+      // hermano, y entonces el perfil que SÍ era de esta persona no se miraba nunca y se
+      // duplicaba otra vez.
+      //
+      // Un perfil ya unificado no recibe nada, pero sus contactos SIGUEN siendo de esa
+      // persona, y el teléfono por el que nació el duplicado puede estar guardado solo
+      // ahí: una unificación A→B y luego B→C no arrastraba los alternativos de A hasta C
+      // (ya arreglado, pero las bases que lo vivieron siguen así). Descartarlo haría que
+      // la postulación que llega por ese número naciera como un tercer duplicado. Así que
+      // la identidad se comprueba con los datos del perfil MUERTO —es donde está el
+      // contacto por el que llegó— y la postulación se cuelga del VIVO.
+      const found = await db.listCandidatesByPhoneOrEmail(phone, email, 10);
+      const matches: Array<{ test: any; live: any }> = [];
+      for (const c of found) {
+        if (!c?.id) continue;
+        if (!c.mergedInto) { matches.push({ test: c, live: c }); continue; }
+        const liveId = await followMergedInto(readCandidate, c.id);
+        if (!liveId || liveId === c.id) continue;
+        const live = await readCandidate(liveId);
+        if (!live || live.mergedInto) continue;
+        // `mergedInto: undefined` SOLO para la comprobación: `isSameApplicant` rechaza de
+        // plano un perfil unificado —no puede recibir nada—, y aquí la pregunta es de
+        // QUIÉN son esos contactos, no quién recibe la postulación.
+        matches.push({ test: { ...c, mergedInto: undefined }, live: { ...live, id: liveId } });
+      }
+
+      // ¿Cuáles de esos perfiles SON esta persona? Se decide una sola vez y sirve para
+      // las dos cosas que vienen: reconocerla y bloquear su postulación repetida.
+      //
+      // Se comprueban TODOS los alias y solo después se deduplica, por los vivos que
+      // pasaron. Deduplicar antes perdía el caso que motivó todo esto: el perfil vivo
+      // puede aparecer por su teléfono y fallar la comprobación —cambió de correo, o el
+      // equipo le corrigió el nombre— mientras el perfil muerto que apunta a él sí tiene
+      // los tres datos de entonces. Descartado ese alias por "ya lo vimos", la persona
+      // volvía a duplicarse justo en la situación que el salto al perfil vivo resuelve.
+      const sameApplicant: any[] = [];
+      const taken = new Set<string>([candidateId]);
+      for (const m of matches) {
+        if (taken.has(m.live.id)) continue;
+        const match = isSameApplicant(m.test, { name, phoneNormalized, email });
+        if (match.same) { taken.add(m.live.id); sameApplicant.push(m.live); }
+        else console.log(`[apply] perfil ${m.test.id} comparte contacto pero NO es esta persona (${match.reason}): queda para "Revisar duplicados"`);
+      }
+
+      // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así
+      // que la misma persona aplicando otro día o en otro teléfono nacía como un perfil
+      // nuevo (de ahí los duplicados con un test en cada perfil). Si uno de esos perfiles
+      // es esta persona, la postulación se cuelga de ÉL. No es una regla nueva: con la
+      // misma sesión ya pasaba — el perfil se actualizaba con los datos y el CV nuevos.
+      //
+      // Solo cuando esta sesión no tiene perfil propio todavía. Si lo tiene (ya aplicó
+      // desde aquí), juntar los dos perfiles existentes es una unificación de verdad:
+      // la hace una persona desde "Revisar duplicados", viendo antes qué va a pasar.
+      // Reconocido por sus datos, NO por su sesión: quien aplica no ha demostrado que ese
+      // perfil sea suyo (ver abajo, en la escritura, qué se le permite tocar).
+      let recognizedByContact = false;
+      if (!profile && sameApplicant.length > 0) {
+        [profile] = sameApplicant;
+        candidateId = profile.id;
+        recognizedByContact = true;
+        console.log(`[apply] perfil reutilizado ${candidateId}; esta sesión no crea un duplicado`);
+      }
+
+      // ¿Otro perfil de ESTA MISMA persona ya aplicó a esta vacante? Solo los que pasan
+      // la prueba de identidad bloquean: compartir el celular en una familia es normal,
+      // y bloquear por eso dejaría a la hermana sin poder aplicar a un trabajo — un daño
+      // real e invisible (la postulación no llega nunca). Que entren dos postulaciones
+      // del mismo teléfono se ve, se descarta en un clic y lo agrupa "Revisar duplicados".
+      // Decirle "ya existe una postulación" es una conclusión sobre esta persona, así que
+      // la reparación pendiente se escribe aquí también. Y es justo donde más falta hace:
+      // si su postulación está colgada de este perfil escondido, sin reparar nadie la
+      // vería nunca y a ella se le seguiría diciendo que ya aplicó.
+      const commitRevive = async () => {
+        if (!pendingRevive) return;
+        await db.setDocData('candidates', candidateId, pendingRevive)
+          .catch(e => console.error(`[apply] no se pudo reactivar el perfil ${candidateId}:`, e));
+      };
+      for (const candidate of sameApplicant) {
+        if (candidate.id === candidateId) continue;
+        if (await hasApplicationFor(candidate.id)) {
+          await commitRevive();
+          return res.json({ duplicate: true, message: 'Ya existe una postulación con este teléfono o correo para esta vacante. Te contactaremos si tu perfil avanza.' });
+        }
       }
       if (await hasApplicationFor(candidateId)) {
+        await commitRevive();
         return res.json({ duplicate: true, message: 'Ya tienes una postulación registrada para esta vacante. Te contactaremos si tu perfil avanza.' });
       }
       let applicationId = `${candidateId}_${vacancyId}`;
-      // The conventional id can be held by an application that was MOVED to another
-      // vacancy: never overwrite it — take a unique id instead.
-      if (await db.getDocData('applications', applicationId)) {
+      if (recognizedByContact) {
+        // Una postulación enlazada solo por contacto NO es la del dueño del perfil, y
+        // ahora dos sesiones distintas pueden estar enviando a la vez (ninguna bloquea a
+        // la otra). Con el id convencional las dos escribirían el MISMO documento y una
+        // pisaría a la otra en silencio — justo la postulación perdida que el cambio
+        // venía a evitar, porque las dos reciben confirmación. Comprobar si existe no
+        // sirve: entre la comprobación y la escritura cabe la otra. Id propio y ya.
+        applicationId = `${applicationId}_${crypto.randomUUID().slice(0, 8)}`;
+      } else if (await db.getDocData('applications', applicationId)) {
+        // The conventional id can be held by an application that was MOVED to another
+        // vacancy: never overwrite it — take a unique id instead.
         applicationId = `${applicationId}_${Date.now().toString(36)}`;
       }
 
       const now = new Date();
+
+      // En un perfil que ya existía (el suyo de antes, o el que se acaba de reconocer)
+      // esto COMPLETA, no destruye: lo mismo que hace la unificación manual.
+      //  - el nombre más completo se conserva (una corrección del equipo no se pierde
+      //    porque la persona escribiera solo "Ana" al volver a aplicar);
+      //  - la ciudad solo se rellena si falta;
+      //  - el teléfono/correo que deja de ser el principal se guarda como alternativo:
+      //    es el número por el que el equipo quizá lleve semanas escribiéndole, y de él
+      //    depende que un WhatsApp entrante siga enlazándose con esta persona;
+      //  - el CV y su análisis sí se renuevan: es el currículum que acaba de presentar,
+      //    y sin eso su postulación nueva se quedaría sin puntuación de CV.
+      // Teléfono, correo y nombre coinciden con lo que ya había (es la condición para
+      // haber llegado aquí), así que escribirlos no cambia nada de nadie. El CV y su
+      // análisis son otra cosa: son lo que el equipo juzga.
+      //
+      // En un perfil reconocido por sus DATOS no se tocan. Quien llena el formulario no
+      // ha demostrado que ese perfil sea suyo: conocer el teléfono, el correo y el nombre
+      // completo de alguien —un ex, un rival, un familiar— bastaría para reemplazar su
+      // currículum y, con él, su análisis de IA y la nota de sus postulaciones sin
+      // puntuar. Sería sabotaje silencioso contra un candidato: ni él ni el equipo lo
+      // verían. Su postulación nueva sí lleva su propio CV (el Kanban y el perfil abren
+      // el de cada postulación), y "Analizar IA" lo analiza cuando el equipo quiera.
+      //
+      // En el perfil de la PROPIA sesión sí se renueva, como siempre: ese uid creó el
+      // perfil, así que es suyo. Y si el perfil reconocido no tenía CV, se le pone: eso
+      // completa, no destruye.
+      const keepCv = recognizedByContact && !!profile?.cvUrl;
+      const candidateData: Record<string, any> = {
+        // El teléfono y el correo PRINCIPALES tampoco se tocan en un perfil reconocido
+        // por sus datos, por lo mismo que el CV. Para ser reconocido basta coincidir con
+        // un contacto ALTERNATIVO (ahí está justo el número por el que nació un
+        // duplicado), así que escribirlo como principal asciende un dato viejo: el equipo
+        // lleva semanas escribiéndole por WhatsApp al número que está en `phone`, y la
+        // siguiente respuesta saldría hacia otro. En el perfil de la propia sesión sí se
+        // actualiza, como siempre: ahí el contacto nuevo es una corrección suya.
+        ...(recognizedByContact ? {} : { email, phone, phoneNormalized }),
+        ...(keepCv ? {} : { cvUrl, cvFileType: cvFileType.slice(0, 120), aiStatus: 'pending' }),
+        // El nombre, como el CV y el contacto: en un perfil reconocido por sus datos no se
+        // toca. `namesCompatible` acepta un nombre que CONTENGA al guardado, así que
+        // quien conociera el teléfono y el correo de Ana Pérez podría reescribirla como
+        // "Ana María Pérez Gómez" —con apellidos inventados— y ese nombre es el que ve el
+        // equipo y el que va en los mensajes que se le envían. El perfil reconocido ya
+        // tiene un nombre usable: es la condición para haberlo reconocido.
+        // `|| profile.name`: los perfiles viejos guardan el nombre ahí, y la interfaz lee
+        // `fullName || name`. Sin eso, una re-postulación escondía detrás de un nombre
+        // corto el que el equipo mantenía.
+        ...(recognizedByContact ? {} : { fullName: preferredName(profile?.fullName || profile?.name, name) }),
+        // `createdAt` es cuándo conocimos a esta persona. Se escribe solo si falta, no
+        // "si el perfil es nuevo": un perfil viejo sin el campo nunca lo tendría.
+        ...(profile?.createdAt ? {} : { createdAt: now }),
+        // La reparación del rastro de unificación roto, si había que hacerla: va en el
+        // mismo lote que la postulación, así que o se escriben las dos o ninguna.
+        ...(pendingRevive || {}),
+      };
+      if (!profile?.city) candidateData.city = city.slice(0, 120);
+      // Degradar el contacto anterior a alternativo solo tiene sentido cuando el nuevo
+      // pasa a principal: en un perfil reconocido no cambia nada, y el contacto con el
+      // que llegó ya está guardado (es la condición para haberlo reconocido).
+      if (profile && !recognizedByContact) {
+        const keepPhones = [profile.phoneNormalized, profile.phone]
+          .filter(p => p && normalizePhone(String(p)) !== phoneNormalized);
+        const keepEmails = [profile.email]
+          .filter(e => e && String(e).trim().toLowerCase() !== email.trim().toLowerCase());
+        const union = (existing: unknown, add: string[]) =>
+          Array.from(new Set([...(Array.isArray(existing) ? existing : []), ...add].filter(Boolean)));
+        if (keepPhones.length) candidateData.alternatePhones = union(profile.alternatePhones, keepPhones);
+        if (keepEmails.length) candidateData.alternateEmails = union(profile.alternateEmails, keepEmails);
+      }
+
       await db.applyBatch(
-        { id: candidateId, data: {
-          fullName: name, email, phone, phoneNormalized,
-          city: city.slice(0, 120), cvUrl, cvFileType: cvFileType.slice(0, 120),
-          aiStatus: 'pending', createdAt: now,
-        } },
+        { id: candidateId, data: candidateData },
         { id: applicationId, data: {
           candidateId, vacancyId, candidateName: name,
           stage: 'Nuevo', cvUrl, cvFileType: cvFileType.slice(0, 120),
           submittedAt: now, lastStageUpdate: now,
+          // De qué sesión salió, y si el perfil se reconoció solo por sus datos de
+          // contacto: con eso `blocksNewApplication` sabe a quién puede bloquear.
+          submittedByUid: sessionUid,
+          ...(recognizedByContact ? { linkedByContact: true } : {}),
+          // Cuando el CV del perfil no se toca (perfil reconocido), su `aiStatus` se
+          // queda como estaba: si era 'completed', el worker —que solo mira los
+          // 'pending'— no vuelve a pasar y esta postulación se quedaría SIN NOTA para
+          // siempre, fuera del Ranking. Hereda la del análisis vigente de esa persona,
+          // que es lo que el equipo ya revisó, marcada como `scoreSource: 'perfil'`: por
+          // eso el perfil ofrece "Analizar CV de esta postulación" para leer el que de
+          // verdad envió aquí (ver `src/lib/applicationCv.ts`).
+          ...(keepCv && typeof profile?.aiExtraction?.initial_score_1_to_5 === 'number'
+            ? { scoreSummary: profile.aiExtraction.initial_score_1_to_5, scoreSource: 'perfil' }
+            : {}),
+          ...(keepCv && profile?.aiExtraction?.recommendation
+            ? { recommendation: profile.aiExtraction.recommendation }
+            : {}),
         } },
       );
 
@@ -3159,6 +3487,10 @@ async function startServer() {
       const duplicateName = duplicate.fullName || duplicate.name || '';
       const origin = { candidateId: duplicateId, fullName: duplicateName, at, by };
 
+      // Avisos de lo que quedó a medias: la unificación no se aborta por ellos, pero
+      // tampoco se dan por buenos (se devuelven y la pantalla los muestra).
+      const warnings: string[] = [];
+
       // Una postulación archivada que ya no existe: el participante de la sesión de
       // entrevista tiene que apuntar a la que sobrevive, o la agenda queda huérfana.
       // Se siembra con lo que absorbieron unificaciones ANTERIORES: así un reintento tras
@@ -3189,7 +3521,27 @@ async function startServer() {
         const source = duplicateApps.find((a: any) => a.id === combine.fromAppId) || {};
         const snapshot = { ...source };
         delete (snapshot as any).mergedEvidence; // lo suyo ya viaja en su propia entrada
+
+        // Si no cabe dentro de la postulación que sobrevive, NO se pierde: se guarda
+        // completa en su propia colección. Antes se guardaba solo "era muy grande" y
+        // acto seguido se borraba el original — esa evidencia quedaba irrecuperable, y
+        // la pantalla remitía a una postulación que ya no existía.
         const tooBig = JSON.stringify(snapshot).length > 200_000;
+        let archivedApart = false;
+        if (tooBig) {
+          try {
+            await db.setDocData('merged_applications', combine.fromAppId, {
+              ...snapshot,
+              mergedIntoApplicationId: combine.intoAppId,
+              mergedFromCandidateId: duplicateId,
+              mergedAt: at,
+              mergedBy: by,
+            });
+            archivedApart = true;
+          } catch (e) {
+            console.error('[merge] no se pudo archivar aparte la postulación absorbida:', e);
+          }
+        }
         const archive = [
           ...(archiveByApp.get(combine.intoAppId)
             || (Array.isArray(target?.mergedEvidence) ? target.mergedEvidence : [])),
@@ -3197,7 +3549,9 @@ async function startServer() {
             ...origin,
             fromApplicationId: combine.fromAppId,
             groups: combine.archived,
-            ...(tooBig ? { omitted: true } : { data: snapshot }),
+            ...(tooBig
+              ? { omitted: true, ...(archivedApart ? { archivedIn: `merged_applications/${combine.fromAppId}` } : {}) }
+              : { data: snapshot }),
           },
           // Lo que la postulación absorbida ya traía archivado de otra unificación.
           ...(Array.isArray(source.mergedEvidence) ? source.mergedEvidence : []),
@@ -3207,7 +3561,14 @@ async function startServer() {
         if (combine.intoAppId !== undefined) {
           await db.setDocData('applications', combine.intoAppId, fields);
           reassignedApp.set(combine.fromAppId, combine.intoAppId);
-          await db.deleteDocData('applications', combine.fromAppId);
+          // Solo se borra el original cuando su contenido quedó guardado en algún sitio:
+          // dentro de la postulación que sobrevive, o aparte. Si el archivo aparte falló,
+          // se queda donde está — un duplicado visible molesta; perder un test, no.
+          if (!tooBig || archivedApart) {
+            await db.deleteDocData('applications', combine.fromAppId);
+          } else {
+            warnings.push(`La postulación absorbida de ${combine.vacancyTitle} no se pudo archivar, así que NO se borró: revísala a mano.`);
+          }
         }
       }
 
@@ -3228,7 +3589,6 @@ async function startServer() {
       //    WhatsApp), la unificación NO se aborta: lo importante —las postulaciones— ya
       //    está hecho. Se devuelve el aviso para que la pantalla lo diga en vez de dar
       //    todo por bueno.
-      const warnings: string[] = [];
       const moveAll = async (label: string, collectionName: string, docs: any[], fields: (d: any) => Record<string, any>) => {
         let failed = 0;
         for (const d of docs) {

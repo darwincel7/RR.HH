@@ -81,6 +81,61 @@ export function attendanceOf(app: any, participantStatus?: unknown): AttendanceS
 }
 
 /**
+ * Lo que el botón acaba de guardar, con la postulación a la que pertenece y lo que la
+ * pantalla mostraba ANTES de guardarlo.
+ */
+export interface OptimisticAttendance {
+  appId: string;
+  status: AttendanceStatus | null;
+  /** El valor que traían los datos al guardar: mientras siga ahí, nadie más ha escrito. */
+  was: AttendanceStatus | null;
+}
+
+/**
+ * Qué asistencia se muestra: la guardada hace un instante o la que traen los datos.
+ *
+ * La marca propia hace falta porque la pantalla puede venir de una lectura única: al
+ * QUITAR una marca, los datos seguirían mostrando la vieja y el clic parecería no haber
+ * servido. Pero no puede valer para siempre: si otra persona —o la página Entrevistas—
+ * cambia esa misma asistencia, lo que llega es más nuevo que lo nuestro, y seguir
+ * mostrando lo viejo haría que el siguiente clic borrara o reemplazara su marca
+ * partiendo de un valor obsoleto.
+ *
+ * Por eso la marca vale solo mientras los datos sigan diciendo lo que decían al
+ * guardarla (`was`): en cuanto cambian —porque llegó nuestra propia escritura o la de
+ * alguien más— manda lo que llega.
+ *
+ * Y vale solo UNA vez: en cuanto los datos la confirman, el componente la tira
+ * (`keepOptimistic`). Si se quedara guardada, alguien que más tarde devolviera la
+ * asistencia a su valor de antes la resucitaría — se volvería a ver lo que se pulsó hace
+ * rato, y el clic siguiente partiría otra vez de un valor obsoleto.
+ */
+export function effectiveAttendance(
+  backing: AttendanceStatus | null,
+  mark: OptimisticAttendance | null,
+  appId: string | undefined,
+): AttendanceStatus | null {
+  if (!mark || !appId || mark.appId !== appId) return backing;
+  return backing === mark.was ? mark.status : backing;
+}
+
+/**
+ * La marca que hay que CONSERVAR tras un cambio en los datos, o null si ya sobra.
+ *
+ * Se tira en cuanto los datos la confirman (ya no aporta nada, y guardada resucitaría
+ * más tarde) y al cambiar de postulación en el perfil, donde el componente no se
+ * desmonta y la marca no es de la nueva.
+ */
+export function keepOptimistic(
+  mark: OptimisticAttendance | null,
+  backing: AttendanceStatus | null,
+  appId: string | undefined,
+): OptimisticAttendance | null {
+  if (!mark || !appId || mark.appId !== appId) return null;
+  return backing === mark.status ? null : mark;
+}
+
+/**
  * ¿Se le convocó a entrevista alguna vez? El sello es la respuesta fiable; la etapa
  * actual y la marca de asistencia cubren lo que ya existía antes del sello.
  */

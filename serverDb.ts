@@ -39,6 +39,39 @@ export interface ServerDb {
   applyBatch(candidate: { id: string; data: Record<string, any> }, application: { id: string; data: Record<string, any> }): Promise<void>;
   /** First candidate id whose normalized phone OR email matches (for dedup). */
   findCandidateIdByPhoneOrEmail(phoneNormalized: string, email: string): Promise<string | null>;
+  /**
+   * TODOS los candidatos cuyo teléfono o correo coincide (principal o alternativo), como
+   * [{id, ...datos}]. `findCandidateIdByPhoneOrEmail` devuelve uno ARBITRARIO (limit 1),
+   * y eso no sirve para decidir identidad: si una familia comparte el celular, el que
+   * vuelve puede no ser el que devuelve la consulta. Quien decide necesita verlos todos.
+   *
+   * `phone` entra TAL CUAL lo escribió la persona: aquí se prueban sus variantes
+   * (canónica, cruda y sin el 1 del país), porque los perfiles viejos y los de subida
+   * masiva pueden no tener `phoneNormalized`. Del correo se prueban la forma escrita y
+   * la minúscula; Firestore no sabe comparar sin distinguir mayúsculas, así que un
+   * tercer uso de mayúsculas distinto se escapa y lo recoge "Revisar duplicados".
+   */
+  listCandidatesByPhoneOrEmail(phone: string, email: string, max: number): Promise<any[]>;
+  /**
+   * Escribe en un candidato SOLO si su `cvUrl` sigue siendo el que se leyó; devuelve
+   * false si cambió entre medias. Leer un CV tarda decenas de segundos y la persona
+   * puede volver a aplicar con otro en ese rato: comparar y escribir por separado deja
+   * una ventana en la que esta lectura pisa la cola del CV nuevo, que ya no se leería
+   * nunca. En modo admin es una transacción; en modo cliente, una transacción del SDK.
+   */
+  writeCandidateIfCvUnchanged(id: string, expectedCvUrl: string | null | undefined, data: Record<string, any>): Promise<boolean>;
+  /**
+   * Rellena el teléfono canónico de un candidato si le falta, DERIVÁNDOLO del teléfono
+   * que el documento tiene en ese instante, dentro de una transacción. Devuelve si lo
+   * escribió.
+   *
+   * Lo que se leyó en un recorrido de la colección puede estar viejo: si el equipo le
+   * cambió el teléfono entre medias, escribir la forma canónica del anterior dejaría el
+   * perfil diciendo dos cosas distintas — y de `phoneNormalized` depende a quién se
+   * enlaza un WhatsApp entrante. Así que el recorrido solo sirve para elegir a quién
+   * mirar; el valor sale del documento vivo.
+   */
+  fillMissingPhoneNormalized(id: string): Promise<boolean>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -130,6 +163,83 @@ function resolveRoles(email: string | null, roleIds: string[]): { isRecruiter: b
 }
 
 /**
+ * Las consultas con las que se busca a una persona por su contacto, en orden: primero
+ * las que más rinden (el campo canónico), luego las variantes que cubren los perfiles
+ * viejos y los de subida masiva, que pueden no tener `phoneNormalized` y guardan el
+ * teléfono como lo escribió alguien.
+ *
+ * Es exactamente lo que `isSameApplicant` normaliza al comparar: si la búsqueda no
+ * encuentra el perfil, esa comparación nunca llega a hacerse y la persona se duplica.
+ */
+export function contactLookupAttempts(phone: unknown, email: unknown): Array<[string, string, string]> {
+  const norm = normalizePhone(String(phone || ''));
+  const raw = String(phone || '').trim();
+  const phones = Array.from(new Set([norm, raw, norm.startsWith('1') ? norm.slice(1) : norm].filter(Boolean)));
+  const written = String(email || '').trim();
+  const emails = Array.from(new Set([written, written.toLowerCase()].filter(Boolean)));
+
+  const attempts: Array<[string, string, string]> = [];
+  phones.forEach(p => attempts.push(['phoneNormalized', '==', p]));
+  emails.forEach(e => attempts.push(['email', '==', e]));
+  phones.forEach(p => attempts.push(['phone', '==', p], ['alternatePhones', 'array-contains', p]));
+  emails.forEach(e => attempts.push(['alternateEmails', 'array-contains', e]));
+  return attempts;
+}
+
+/**
+ * La consulta que de verdad IDENTIFICA: teléfono y correo a la vez, que es lo que exige
+ * `isSameApplicant`.
+ *
+ * Las consultas por un solo campo tienen que llevar tope —si no, un número de negocio
+ * compartido haría leer la base entera en cada postulación, y eso lo puede provocar
+ * cualquiera desde el formulario público— y un tope siempre deja fuera al perfil número
+ * once. Buscando los dos datos juntos eso deja de importar: devuelve a quien coincide en
+ * ambos, por muchos que compartan uno de los dos. Firestore resuelve varias igualdades
+ * con sus índices de un solo campo, sin índice compuesto.
+ *
+ * El correo se prueba escrito y en minúsculas porque Firestore compara exacto; el
+ * teléfono, en su forma canónica, que es la que todos los caminos de escritura guardan
+ * (y la que el relleno pone en los perfiles viejos).
+ */
+/**
+ * Cuántos perfiles se traen de la consulta precisa (teléfono Y correo iguales).
+ *
+ * Alguna cota tiene que haber: `/api/apply` es público, y sin tope quien quisiera podría
+ * sembrar perfiles con un mismo contacto y convertir cada postulación en un recorrido de
+ * todos ellos. Así que el número no es "el correcto", es el que cubre de sobra lo que
+ * pasa de verdad —una familia o un cibercafé rellenando por varias personas con el mismo
+ * correo y el mismo teléfono— sin dejar la puerta abierta.
+ *
+ * Lo que pasa si se superara: la comparación de nombre se hace igual sobre los que SÍ
+ * vuelven, así que nunca se confunde a una persona con otra; a lo sumo no se reconoce a
+ * la que estaba fuera y nace un duplicado, visible y agrupado en "Revisar duplicados".
+ */
+const EXACT_CONTACT_MAX = 25;
+
+export function exactContactLookups(phone: unknown, email: unknown): Array<Array<[string, string, string]>> {
+  const norm = normalizePhone(String(phone || ''));
+  const written = String(email || '').trim();
+  if (!norm || !written) return [];
+  const emails = Array.from(new Set([written, written.toLowerCase()]));
+  return emails.map(e => [
+    ['phoneNormalized', '==', norm] as [string, string, string],
+    ['email', '==', e] as [string, string, string],
+  ]);
+}
+
+/**
+ * A qué dato de contacto pertenece una consulta: al teléfono o al correo.
+ *
+ * La búsqueda tiene que agotar las DOS dimensiones. Si se corta al juntar suficientes
+ * resultados y diez perfiles comparten el teléfono (un número de negocio, una familia
+ * grande), las consultas del correo no llegan a ejecutarse — y el perfil que sí es esta
+ * persona puede estar fuera de ese grupo arbitrario de diez.
+ */
+export function lookupDimension(field: string): 'phone' | 'email' {
+  return field.toLowerCase().includes('mail') ? 'email' : 'phone';
+}
+
+/**
  * Sigue el rastro de una unificación de perfiles: si el candidato encontrado fue
  * unificado en otro (`mergedInto`), devuelve el id del perfil VIVO.
  *
@@ -137,17 +247,26 @@ function resolveRoles(email: string | null, roleIds: string[]): { isRecruiter: b
  * correo: la respuesta de WhatsApp se guardaría en un perfil que nadie abre, y el
  * deduplicado de /api/apply miraría un perfil sin postulaciones. Hasta 5 saltos, por si
  * alguien unificó A→B y luego B→C; un ciclo corta en seco en vez de colgar el servidor.
+ *
+ * `strict` decide qué pasa si la lectura FALLA (un fallo pasajero de Firestore). Sin él
+ * se sigue adelante y se devuelve el id que se tenía, que es lo que conviene a quien
+ * solo quiere ENCONTRAR a alguien: enlazar un WhatsApp al perfil unificado es peor que
+ * enlazarlo bien, pero mucho mejor que perder el mensaje. Con él, el fallo se propaga,
+ * porque quien va a ESCRIBIR en el perfil que salga de aquí —el intake— no puede tratar
+ * un perfil muerto como vivo: la postulación y el CV nacerían colgados de un perfil que
+ * nadie abre, invisibles en el vivo. Ahí es mejor fallar y que la persona reintente.
  */
-async function followMergedInto(
+export async function followMergedInto(
   read: (id: string) => Promise<any | null>,
   id: string | null,
+  opts?: { strict?: boolean },
 ): Promise<string | null> {
   let current = id;
   const seen = new Set<string>();
   for (let hop = 0; current && hop < 5; hop++) {
     if (seen.has(current)) return current;
     seen.add(current);
-    const data = await read(current).catch(() => null);
+    const data = opts?.strict ? await read(current) : await read(current).catch(() => null);
     const next = data?.mergedInto;
     if (typeof next !== 'string' || !next || next === current) return current;
     current = next;
@@ -219,6 +338,58 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
         }
         return null;
+      },
+      async listCandidatesByPhoneOrEmail(phone, email, max) {
+        const byId = new Map<string, any>();
+        // Primero la consulta precisa —teléfono Y correo— porque es la que identifica y
+        // no le afecta cuántos perfiles compartan uno de los dos (ver `exactContactLookups`).
+        for (const clause of exactContactLookups(phone, email)) {
+          let q: any = adb.collection('candidates');
+          clause.forEach(([f, op, v]) => { q = q.where(f, op as any, v); });
+          const snap = await q.limit(EXACT_CONTACT_MAX).get();
+          snap.docs.forEach((d: any) => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...d.data() }); });
+        }
+        // Y después por un solo campo, que es lo que encuentra a quien tiene el dato en
+        // otro sitio (los alternativos de una unificación, un teléfono viejo sin forma
+        // canónica). El tope es POR DIMENSIÓN, no global (ver `lookupDimension`): cortar
+        // al llegar a `max` dejaba sin ejecutar las consultas del correo cuando muchos
+        // perfiles comparten el teléfono.
+        const found = new Map<string, number>();
+        for (const [field, op, value] of contactLookupAttempts(phone, email)) {
+          const dim = lookupDimension(field);
+          if ((found.get(dim) || 0) >= max) continue;
+          const snap = await adb.collection('candidates').where(field, op as any, value).limit(max).get();
+          snap.docs.forEach((d: any) => {
+            if (byId.has(d.id)) return;
+            byId.set(d.id, { id: d.id, ...d.data() });
+            found.set(dim, (found.get(dim) || 0) + 1);
+          });
+        }
+        return Array.from(byId.values());
+      },
+      async fillMissingPhoneNormalized(id) {
+        const ref = adb.collection('candidates').doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const c = snap.exists ? snap.data() : null;
+          if (!c || c.phoneNormalized) return false;
+          const norm = normalizePhone(String(c.phone || ''));
+          if (!norm) return false;
+          tx.set(ref, { phoneNormalized: norm }, { merge: true });
+          return true;
+        });
+      },
+      async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
+        const ref = adb.collection('candidates').doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const current = snap.exists ? snap.data() : null;
+          // Solo manda cuando AMBOS existen: un `cvUrl` vacío en cualquiera de los dos
+          // lados no prueba que haya cambiado nada (perfiles sin CV, lecturas sueltas).
+          if (current && expectedCvUrl && current.cvUrl && current.cvUrl !== expectedCvUrl) return false;
+          tx.set(ref, data, { merge: true });
+          return true;
+        });
       },
       async deleteDocData(collection, id) {
         await adb.collection(collection).doc(id).delete();
@@ -508,7 +679,7 @@ async function initClient(): Promise<ServerDb> {
   const { initializeApp } = await import('firebase/app');
   const {
     initializeFirestore, collection, query, where, limit, getDocs, addDoc,
-    serverTimestamp, doc, getDoc, setDoc, deleteDoc, writeBatch,
+    serverTimestamp, doc, getDoc, setDoc, deleteDoc, writeBatch, runTransaction,
   } = await import('firebase/firestore');
 
   const app = initializeApp(firebaseConfig, 'server-client-fallback');
@@ -530,6 +701,28 @@ async function initClient(): Promise<ServerDb> {
       batch.set(doc(cdb, 'applications', application.id), application.data, { merge: true });
       await batch.commit();
     },
+    async fillMissingPhoneNormalized(id) {
+      const ref = doc(cdb, 'candidates', id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        const c = snap.exists() ? (snap.data() as any) : null;
+        if (!c || c.phoneNormalized) return false;
+        const norm = normalizePhone(String(c.phone || ''));
+        if (!norm) return false;
+        tx.set(ref, { phoneNormalized: norm }, { merge: true });
+        return true;
+      });
+    },
+    async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
+      const ref = doc(cdb, 'candidates', id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        const current = snap.exists() ? (snap.data() as any) : null;
+        if (current && expectedCvUrl && current.cvUrl && current.cvUrl !== expectedCvUrl) return false;
+        tx.set(ref, data, { merge: true });
+        return true;
+      });
+    },
     async findCandidateIdByPhoneOrEmail(phoneNormalized, email) {
       const readCandidate = async (id: string) => {
         const snap = await getDoc(doc(cdb, 'candidates', id));
@@ -548,6 +741,30 @@ async function initClient(): Promise<ServerDb> {
         if (!s.empty) return followMergedInto(readCandidate, s.docs[0].id);
       }
       return null;
+    },
+    async listCandidatesByPhoneOrEmail(phone, email, max) {
+      const byId = new Map<string, any>();
+      // La consulta precisa primero, igual que en modo admin (ver `exactContactLookups`).
+      for (const clause of exactContactLookups(phone, email)) {
+        const q = query(collection(cdb, 'candidates'), ...clause.map(([f, op, v]) => where(f, op as any, v)), limit(EXACT_CONTACT_MAX));
+        const snap = await getDocs(q);
+        snap.docs.forEach(d => { if (!byId.has(d.id)) byId.set(d.id, { id: d.id, ...(d.data() as any) }); });
+      }
+      // Tope por dimensión en las de un solo campo (ver `lookupDimension`).
+      const found = new Map<string, number>();
+      for (const [field, op, value] of contactLookupAttempts(phone, email)) {
+        const dim = lookupDimension(field);
+        if ((found.get(dim) || 0) >= max) continue;
+        const snap = await getDocs(query(collection(cdb, 'candidates'), where(field, op as any, value), limit(max)));
+        snap.docs.forEach(d => {
+          if (byId.has(d.id)) return;
+          byId.set(d.id, { id: d.id, ...(d.data() as any) });
+          found.set(dim, (found.get(dim) || 0) + 1);
+        });
+      }
+      // Sin recorte global: dejaría fuera lo que encontró la segunda dimensión cuando la
+      // primera ya llenó el cupo, que es justo lo que el tope por dimensión evita.
+      return Array.from(byId.values());
     },
     async deleteDocData(c, id) {
       await deleteDoc(doc(cdb, c, id));

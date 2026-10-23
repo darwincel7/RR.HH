@@ -21,26 +21,38 @@ export interface DuplicateGroup {
   reasons: DuplicateReason[];
 }
 
-/** La clave de teléfono de un candidato, en su forma canónica. */
-const phoneKeyOf = (c: any): string => {
-  const raw = c?.phoneNormalized || c?.phone;
-  const norm = raw ? normalizePhone(String(raw)) : '';
-  return norm ? `phone:${norm}` : '';
+/**
+ * TODAS las claves de teléfono de un candidato, en forma canónica: la principal y las
+ * alternativas que dejó una unificación. Sin las alternativas, un tercer perfil que use
+ * como número principal el que quedó guardado como alternativo en otro no se agruparía
+ * nunca — y es justo el número por el que nació el duplicado.
+ */
+const phoneKeysOf = (c: any): string[] => {
+  const raw = [c?.phoneNormalized, c?.phone, ...(Array.isArray(c?.alternatePhones) ? c.alternatePhones : [])];
+  return raw
+    .filter(Boolean)
+    .map(p => normalizePhone(String(p)))
+    .filter(Boolean)
+    .map(p => `phone:${p}`);
 };
 
-const emailKeyOf = (c: any): string => {
-  const email = String(c?.email || '').trim().toLowerCase();
-  return email ? `email:${email}` : '';
+const emailKeysOf = (c: any): string[] => {
+  const raw = [c?.email, ...(Array.isArray(c?.alternateEmails) ? c.alternateEmails : [])];
+  return raw
+    .filter(Boolean)
+    .map(e => String(e).trim().toLowerCase())
+    .filter(Boolean)
+    .map(e => `email:${e}`);
 };
 
 /**
  * El nombre solo agrupa si está completo (nombre y apellido): con "Ana" o "José" se
  * juntarían personas distintas, y una unificación equivocada no se deshace con un botón.
  */
-const nameKeyOf = (c: any): string => {
+const nameKeysOf = (c: any): string[] => {
   const name = normalizeName(c?.fullName || c?.name);
-  if (name.length < 6 || !name.includes(' ')) return '';
-  return `name:${name}`;
+  if (name.length < 6 || !name.includes(' ')) return [];
+  return [`name:${name}`];
 };
 
 /** Cuánta información tiene un perfil: el más completo es el mejor candidato a principal. */
@@ -83,17 +95,17 @@ export function groupDuplicates(candidates: any[]): DuplicateGroup[] {
   // Cada clave compartida une a sus dueños, y se recuerda QUÉ clave los unió.
   const byKey = new Map<string, number[]>();
   pool.forEach((c, i) => {
-    [phoneKeyOf(c), emailKeyOf(c), nameKeyOf(c)].forEach(key => {
-      if (!key) return;
+    [...phoneKeysOf(c), ...emailKeysOf(c), ...nameKeysOf(c)].forEach(key => {
       const list = byKey.get(key) || [];
-      list.push(i);
+      // Un mismo perfil puede aportar la misma clave dos veces (phone y phoneNormalized).
+      if (list[list.length - 1] !== i) list.push(i);
       byKey.set(key, list);
     });
   });
 
   const reasonsByRoot = new Map<number, Set<DuplicateReason>>();
   byKey.forEach((indexes, key) => {
-    if (indexes.length < 2) return;
+    if (new Set(indexes).size < 2) return;
     for (let i = 1; i < indexes.length; i++) union(indexes[0], indexes[i]);
     const reason = key.split(':')[0] as DuplicateReason;
     const root = find(indexes[0]);

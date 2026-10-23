@@ -7,8 +7,10 @@
  * left exactly as typed (McDonald, DeLeón): someone chose that casing.
  */
 
-// Lowercase connectors inside Spanish (and a few foreign) surnames.
-const PARTICLES = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e', 'da', 'das', 'do', 'dos', 'van', 'von', 'di']);
+// Lowercase connectors inside Spanish (and a few foreign) surnames. Exportadas porque
+// comparar dos nombres (¿es la misma persona?) tiene que ignorarlas igual que el
+// formateo: "Ana de la Cruz" y "Ana Cruz" se escriben distinto y son la misma.
+export const PARTICLES = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e', 'da', 'das', 'do', 'dos', 'van', 'von', 'di']);
 
 export function prettifyName(raw: string): string {
   const s = String(raw ?? '').replace(/\s+/g, ' ').trim();
