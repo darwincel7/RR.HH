@@ -60,6 +60,18 @@ export interface ServerDb {
    * nunca. En modo admin es una transacción; en modo cliente, una transacción del SDK.
    */
   writeCandidateIfCvUnchanged(id: string, expectedCvUrl: string | null | undefined, data: Record<string, any>): Promise<boolean>;
+  /**
+   * Rellena el teléfono canónico de un candidato si le falta, DERIVÁNDOLO del teléfono
+   * que el documento tiene en ese instante, dentro de una transacción. Devuelve si lo
+   * escribió.
+   *
+   * Lo que se leyó en un recorrido de la colección puede estar viejo: si el equipo le
+   * cambió el teléfono entre medias, escribir la forma canónica del anterior dejaría el
+   * perfil diciendo dos cosas distintas — y de `phoneNormalized` depende a quién se
+   * enlaza un WhatsApp entrante. Así que el recorrido solo sirve para elegir a quién
+   * mirar; el valor sale del documento vivo.
+   */
+  fillMissingPhoneNormalized(id: string): Promise<boolean>;
   deleteDocData(collection: string, id: string): Promise<void>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
@@ -303,6 +315,18 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
           });
         }
         return Array.from(byId.values());
+      },
+      async fillMissingPhoneNormalized(id) {
+        const ref = adb.collection('candidates').doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const c = snap.exists ? snap.data() : null;
+          if (!c || c.phoneNormalized) return false;
+          const norm = normalizePhone(String(c.phone || ''));
+          if (!norm) return false;
+          tx.set(ref, { phoneNormalized: norm }, { merge: true });
+          return true;
+        });
       },
       async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
         const ref = adb.collection('candidates').doc(id);
@@ -625,6 +649,18 @@ async function initClient(): Promise<ServerDb> {
       batch.set(doc(cdb, 'candidates', candidate.id), candidate.data, { merge: true });
       batch.set(doc(cdb, 'applications', application.id), application.data, { merge: true });
       await batch.commit();
+    },
+    async fillMissingPhoneNormalized(id) {
+      const ref = doc(cdb, 'candidates', id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        const c = snap.exists() ? (snap.data() as any) : null;
+        if (!c || c.phoneNormalized) return false;
+        const norm = normalizePhone(String(c.phone || ''));
+        if (!norm) return false;
+        tx.set(ref, { phoneNormalized: norm }, { merge: true });
+        return true;
+      });
     },
     async writeCandidateIfCvUnchanged(id, expectedCvUrl, data) {
       const ref = doc(cdb, 'candidates', id);

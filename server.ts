@@ -2104,15 +2104,15 @@ async function runContactKeysBackfill(): Promise<void> {
     const done = await db.getDocData('settings', 'dedupe');
     if (done?.phoneKeysBackfilledAt) return;
     // Firestore no sabe buscar "a los que les falta un campo": se recorre la colección
-    // pidiendo solo esos dos campos.
+    // pidiendo solo esos dos campos. Lo leído aquí solo sirve para elegir a quién mirar:
+    // el valor que se escribe sale del documento vivo, en una transacción, porque el
+    // equipo puede haberle cambiado el teléfono mientras esto recorre la colección (ver
+    // `fillMissingPhoneNormalized`).
     const all = await db.listDocs('candidates', ['phone', 'phoneNormalized']);
     let fixed = 0;
     for (const c of all) {
       if (!c?.id || c.phoneNormalized || !c.phone) continue;
-      const norm = normalizePhone(String(c.phone));
-      if (!norm) continue;
-      await db.setDocData('candidates', c.id, { phoneNormalized: norm });
-      fixed++;
+      if (await db.fillMissingPhoneNormalized(c.id)) fixed++;
     }
     await db.setDocData('settings', 'dedupe', { phoneKeysBackfilledAt: new Date(), phoneKeysFixed: fixed });
     console.log(`[apply] teléfono canónico rellenado en ${fixed} perfil(es) de ${all.length}`);
