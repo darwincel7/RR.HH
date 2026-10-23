@@ -47,7 +47,7 @@ export interface EvidenceGroup {
 
 export const EVIDENCE_GROUPS: EvidenceGroup[] = [
   { key: 'stage2', label: 'Formulario de etapa 2', fields: ['stage2Answers', 'stage2Scoring', 'stage2SubmittedAt'] },
-  { key: 'test', label: 'Test situacional', fields: ['testAnswers', 'testResults', 'testSubmittedAt'] },
+  { key: 'test', label: 'Test situacional', fields: ['testAnswers', 'testResults', 'testSubmittedAt', 'testIntegrity'] },
   { key: 'interview', label: 'Entrevista (scorecard, notas y análisis IA)', fields: ['interviewScorecard', 'interviewObservation', 'interviewAiEvaluation'] },
   { key: 'personality', label: 'Test de personalidad', fields: ['personalityTest'] },
   { key: 'attendance', label: 'Asistencia a la entrevista', fields: ['interviewAttendance', 'interviewAttendanceLog', 'interviewInvitedAt', 'interviewLastInvitedAt', 'interviewInviteCount'] },

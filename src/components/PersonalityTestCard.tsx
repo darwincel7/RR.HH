@@ -4,7 +4,7 @@ import { AlertTriangle, BrainCircuit, CheckCircle, Copy, ExternalLink, Fingerpri
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
-import Modal from './ui/Modal';
+import LinkQrModal from './LinkQrModal';
 import {
   resolvePersonalityTemplate, snapshotForApplication, templateIssues, newItemId, dimensionReading, answerLabel,
   LEVEL_LABEL, type PersonalityDimension, type PersonalityQuestion, type DimensionResult,
@@ -41,7 +41,6 @@ export default function PersonalityTestCard({ application, candidateName, comple
   const { user } = useAuth();
   const [busy, setBusy] = useState<'' | 'start' | 'cancel' | 'delete'>('');
   const [error, setError] = useState('');
-  const [qr, setQr] = useState<string | null>(null);
   const [showQr, setShowQr] = useState(false);
   const [copied, setCopied] = useState(false);
   const [interpreting, setInterpreting] = useState(false);
@@ -105,18 +104,6 @@ export default function PersonalityTestCard({ application, candidateName, comple
       window.setTimeout(() => setCopied(false), 2500);
     } catch {
       window.prompt('Copia este link manualmente:', url);
-    }
-  };
-
-  const openQr = async () => {
-    setShowQr(true);
-    if (qr) return;
-    try {
-      const QRCode = (await import('qrcode')).default;
-      setQr(await QRCode.toDataURL(url, { width: 280, margin: 1 }));
-    } catch (e) {
-      console.error('No se pudo generar el QR:', e);
-      setQr('');
     }
   };
 
@@ -214,7 +201,7 @@ export default function PersonalityTestCard({ application, candidateName, comple
               <ExternalLink className="w-4 h-4 mr-2" /> Abrir en esta pantalla
             </a>
             <button
-              onClick={openQr}
+              onClick={() => setShowQr(true)}
               className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
             >
               <QrCode className="w-4 h-4 mr-2" /> QR para su teléfono
@@ -377,24 +364,14 @@ export default function PersonalityTestCard({ application, candidateName, comple
         </div>
       )}
 
-      <Modal isOpen={showQr} onClose={() => setShowQr(false)} closeOnBackdrop>
-        <div className="bg-white rounded-2xl shadow-xl p-6 w-full max-w-sm text-center" role="dialog" aria-modal="true" aria-label="QR del test de personalidad">
-          <h3 className="text-lg font-bold text-slate-900 mb-1">Escanea para responder</h3>
-          <p className="text-xs text-slate-500 mb-4">El candidato abre la cámara de su teléfono y apunta a este código.</p>
-          <div className="flex items-center justify-center min-h-[280px]">
-            {qr === null ? <Loader2 className="w-8 h-8 animate-spin text-fuchsia-600" />
-              : qr ? <img src={qr} alt="Código QR del test de personalidad" className="w-[280px] h-[280px]" />
-              : <p className="text-xs text-rose-700">No se pudo generar el QR. Usa "Copiar link".</p>}
-          </div>
-          <p className="mt-3 text-[11px] text-slate-400 break-all">{url}</p>
-          <button
-            onClick={() => setShowQr(false)}
-            className="mt-4 w-full py-2.5 bg-slate-900 text-white text-sm font-bold rounded-xl hover:bg-slate-800"
-          >
-            Cerrar
-          </button>
-        </div>
-      </Modal>
+      <LinkQrModal
+        isOpen={showQr}
+        onClose={() => setShowQr(false)}
+        url={url}
+        title="Escanea para responder"
+        hint="El candidato abre la cámara de su teléfono y apunta a este código."
+        label="QR del test de personalidad"
+      />
     </div>
   );
 }

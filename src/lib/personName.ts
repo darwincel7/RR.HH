@@ -39,3 +39,22 @@ export function firstNameOf(raw: string): string {
   if (isPlaceholderName(raw)) return '';
   return prettifyName(raw).split(' ')[0] || '';
 }
+
+/**
+ * "JUAN CARLOS PÉREZ RODRÍGUEZ" → "Juan C. P. R.": the first name plus the initials of
+ * the rest. Enough for a person to recognize themselves (and to tell two Juans apart) on
+ * a page anyone with the link can open, without publishing their surname there. Empty
+ * when there is no usable name ("⚠️ Error de lectura…" and the like are not names).
+ */
+export function shortNameOf(raw: string): string {
+  if (isPlaceholderName(raw)) return '';
+  const [first, ...rest] = prettifyName(raw).split(' ');
+  if (!first || !/^\p{L}/u.test(first)) return '';
+  const initials = rest
+    .filter(w => !PARTICLES.has(w.toLowerCase()))
+    .map(w => w.match(/\p{L}/u)?.[0]?.toUpperCase())
+    .filter(Boolean)
+    .slice(0, 3)
+    .map(c => `${c}.`);
+  return [first, ...initials].join(' ');
+}

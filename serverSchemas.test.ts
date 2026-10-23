@@ -102,6 +102,28 @@ describe('answers de candidatos (score-stage2 / evaluate-test)', () => {
     const r = scoreStage2Schema.safeParse({ ...base, force: true });
     if (r.success) expect(r.data.force).toBe(true);
   });
+
+  it('keeps the test integrity counters, clamped and rounded', () => {
+    const r = evaluateTestSchema.safeParse({
+      ...base,
+      integrity: { exits: 2.6, awayMs: 9e12, pasteBlocked: 0, durationMs: 600_000, extra: 'x' },
+    });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.integrity).toEqual({ exits: 3, awayMs: 24 * 60 * 60 * 1000, pasteBlocked: 0, durationMs: 600_000 });
+    }
+  });
+
+  it('drops a malformed integrity block instead of rejecting the answers', () => {
+    // It comes from the candidate's browser: junk there must never cost them their test.
+    for (const junk of [{ exits: -1, awayMs: 0, pasteBlocked: 0, durationMs: 0 }, { exits: 'muchas' }, 'x', null]) {
+      const r = evaluateTestSchema.safeParse({ ...base, integrity: junk });
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.integrity).toBeUndefined();
+    }
+    const none = evaluateTestSchema.safeParse(base);
+    if (none.success) expect(none.data.integrity).toBeUndefined();
+  });
 });
 
 describe('endpoints de reclutador', () => {

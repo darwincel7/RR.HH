@@ -67,6 +67,19 @@ export const applyConfirmationSchema = z.object({
 const answersField = z.record(z.string(), z.unknown(), { error: 'Respuestas inválidas' })
   .refine(v => !Array.isArray(v), { error: 'Respuestas inválidas' });
 
+/** The counters the test page keeps while it is answered (src/lib/testIntegrity.ts).
+ * They come from the candidate's browser — a signal, not proof — so a malformed block is
+ * dropped (undefined) rather than rejecting the answers, and every counter is clamped. */
+const DAY_MS = 24 * 60 * 60 * 1000;
+const integrityCounter = (max: number) =>
+  z.number().finite().min(0).transform(n => Math.min(Math.round(n), max));
+const integrityField = () => z.object({
+  exits: integrityCounter(10_000),
+  awayMs: integrityCounter(DAY_MS),
+  pasteBlocked: integrityCounter(10_000),
+  durationMs: integrityCounter(DAY_MS),
+}).optional().catch(undefined);
+
 /** POST /api/score-stage2 */
 export const scoreStage2Schema = z.object({
   applicationId: docIdField('applicationId inválido'),
@@ -81,6 +94,7 @@ export const evaluateTestSchema = z.object({
   answers: answersField,
   questions: z.unknown().optional(),
   force: z.boolean().catch(false).default(false),
+  integrity: integrityField(),
 });
 
 /** POST /api/public/personality/submit — the answers are checked against the copy of the

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { prettifyName, firstNameOf, isPlaceholderName } from './personName';
+import { prettifyName, firstNameOf, isPlaceholderName, shortNameOf } from './personName';
 
 describe('prettifyName', () => {
   it('fixes names shouted in ALL CAPS, keeping surname particles lowercase', () => {
@@ -33,5 +33,23 @@ describe('firstNameOf', () => {
     expect(isPlaceholderName('Procesando: cv_juan.pdf')).toBe(true);
     expect(firstNameOf('Procesando: cv_juan.pdf')).toBe('');
     expect(firstNameOf('')).toBe('');
+  });
+});
+
+describe('shortNameOf', () => {
+  it('keeps the first name and only the initials of the rest', () => {
+    expect(shortNameOf('JUAN CARLOS PÉREZ RODRÍGUEZ')).toBe('Juan C. P. R.');
+    expect(shortNameOf('Ana')).toBe('Ana');
+  });
+
+  it('skips surname particles and stops at three initials', () => {
+    expect(shortNameOf('maría de los ángeles pérez')).toBe('María Á. P.');
+    expect(shortNameOf('Luis Ángel José Martínez Gómez')).toBe('Luis Á. J. M.');
+  });
+
+  it('has no name for placeholders or text that is not a name', () => {
+    expect(shortNameOf('Procesando: cv_juan.pdf')).toBe('');
+    expect(shortNameOf('⚠️ Error de lectura: Juan')).toBe('');
+    expect(shortNameOf('')).toBe('');
   });
 });
