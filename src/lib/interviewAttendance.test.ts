@@ -14,6 +14,8 @@ vi.mock('firebase/firestore', () => ({
 import {
   attendanceOf, wasInvitedToInterview, canMarkAttendance, interviewInviteStamp, interviewAppointmentStamp, attendanceFields,
   computeInterviewFunnel, groupInterviewFunnel, invitedWithinDays, pct, isInterviewStage,
+  effectiveAttendance,
+  keepOptimistic,
 } from './interviewAttendance';
 
 const app = (fields: Record<string, any> = {}) => ({ id: 'a1', stage: 'Nuevo', ...fields });
@@ -246,5 +248,70 @@ describe('el filtro por período', () => {
     const rows = [{ id: 'sinFecha', stage: 'Convocado a entrevista' }];
     expect(invitedWithinDays(rows, 30)).toEqual(rows);
     expect(invitedWithinDays(rows, 0)).toEqual(rows); // 0 = todo el histórico
+  });
+});
+
+describe('la marca optimista del botón de asistencia', () => {
+  const mark = (status: any, was: any) => ({ appId: 'a1', status, was });
+
+  it('mientras los datos no cambian, se ve lo que se acaba de pulsar', () => {
+    // El caso que la justifica: quitar una marca que venía de una lectura única de la
+    // agenda. Los datos siguen diciendo "asistió" y el clic parecería no haber servido.
+    expect(effectiveAttendance('attended', mark(null, 'attended'), 'a1')).toBe(null);
+    expect(effectiveAttendance(null, mark('no_show', null), 'a1')).toBe('no_show');
+  });
+
+  it('cuando los datos confirman la marca, ya manda el documento', () => {
+    expect(effectiveAttendance('no_show', mark('no_show', null), 'a1')).toBe('no_show');
+  });
+
+  it('si otra persona la cambió, gana lo que llega (no lo nuestro)', () => {
+    // Dos reclutadores a la vez, o la página Entrevistas: lo que llega es más nuevo.
+    // Seguir mostrando lo viejo haría que el siguiente clic borrara SU marca.
+    expect(effectiveAttendance('attended', mark('no_show', null), 'a1')).toBe('attended');
+    expect(effectiveAttendance(null, mark('attended', 'no_show'), 'a1')).toBe(null);
+  });
+
+  it('la marca de una postulación no se le aplica a otra', () => {
+    // El componente no se desmonta al cambiar de postulación en el perfil: sin el id,
+    // mostraría el resultado de una entrevista en otra y borraría la suya al pulsar.
+    expect(effectiveAttendance(null, mark('attended', null), 'a2')).toBe(null);
+    expect(effectiveAttendance('no_show', mark('attended', null), undefined)).toBe('no_show');
+  });
+
+  it('sin marca propia se ve siempre lo que traen los datos', () => {
+    expect(effectiveAttendance('attended', null, 'a1')).toBe('attended');
+    expect(effectiveAttendance(null, null, 'a1')).toBe(null);
+  });
+});
+
+describe('cuándo se tira la marca optimista', () => {
+  const mark = { appId: 'a1', status: 'attended' as const, was: null };
+
+  it('se conserva mientras los datos no la han confirmado', () => {
+    expect(keepOptimistic(mark, null, 'a1')).toBe(mark);
+  });
+
+  it('se tira en cuanto los datos la confirman', () => {
+    expect(keepOptimistic(mark, 'attended', 'a1')).toBe(null);
+  });
+
+  it('guardada resucitaría: esta es la secuencia que lo prueba', () => {
+    // Marco "asistió" partiendo de nada → los datos lo confirman → la marca se tira.
+    const tras = keepOptimistic(mark, 'attended', 'a1');
+    expect(tras).toBe(null);
+    // Otra persona lo borra desde Entrevistas: sin tirarla, `backing === was` (null) y
+    // se volvería a ver "asistió" — y el clic siguiente partiría de ese valor viejo.
+    expect(effectiveAttendance(null, tras, 'a1')).toBe(null);
+    expect(effectiveAttendance(null, mark, 'a1')).toBe('attended'); // lo que pasaba antes
+  });
+
+  it('se tira al cambiar de postulación en el perfil', () => {
+    expect(keepOptimistic(mark, null, 'a2')).toBe(null);
+    expect(keepOptimistic(mark, null, undefined)).toBe(null);
+  });
+
+  it('sin marca no hay nada que conservar', () => {
+    expect(keepOptimistic(null, 'attended', 'a1')).toBe(null);
   });
 });

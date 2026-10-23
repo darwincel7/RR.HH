@@ -39,8 +39,12 @@ export default function MergeCandidatesModal({
   isOpen, onClose, primaryId, primary, primaryApps, preselectedDuplicateId, onMerged,
 }: Props) {
   const [allCandidates, setAllCandidates] = useState<any[]>([]);
-  // Las del principal: las que llegan por props, o leídas aquí si no vinieron.
+  // Las del principal: las que llegan por props, o leídas aquí si no vinieron (la
+  // pantalla de duplicados no tiene un perfil abierto). Hasta que se sepan, la vista
+  // previa no puede afirmar nada: sin ellas no aparecerían las postulaciones que se
+  // COMBINAN, y confirmar algo irreversible viendo media verdad no es una opción.
   const [ownApps, setOwnApps] = useState<any[]>([]);
+  const [ownAppsReady, setOwnAppsReady] = useState(false);
   const [loading, setLoading] = useState(false);
   const [term, setTerm] = useState('');
   const [selectedId, setSelectedId] = useState('');
@@ -77,13 +81,18 @@ export default function MergeCandidatesModal({
 
   useEffect(() => {
     if (!isOpen) return;
-    if (primaryApps) { setOwnApps(primaryApps); return; }
+    if (primaryApps) { setOwnApps(primaryApps); setOwnAppsReady(true); return; }
     let alive = true;
+    setOwnAppsReady(false);
     getDocs(query(collection(db, 'applications'), where('candidateId', '==', primaryId)))
-      .then(snap => { if (alive) setOwnApps(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) }))); })
+      .then(snap => {
+        if (!alive) return;
+        setOwnApps(snap.docs.map(d => ({ id: d.id, ...(d.data() as any) })));
+        setOwnAppsReady(true);
+      })
       .catch(e => {
         console.error('No se pudieron cargar las postulaciones del perfil principal:', e);
-        if (alive) setError('No se pudieron leer las postulaciones del perfil principal.');
+        if (alive) setError('No se pudieron leer las postulaciones de este perfil, así que la vista previa estaría incompleta. Cierra y vuelve a abrir.');
       });
     return () => { alive = false; };
   }, [isOpen, primaryId, primaryApps]);
@@ -99,6 +108,7 @@ export default function MergeCandidatesModal({
   useEffect(() => {
     if (!isOpen) {
       setTerm(''); setSelectedId(''); setSelectedApps([]); setDone(null); setError('');
+      setOwnApps([]); setOwnAppsReady(false);
     }
   }, [isOpen]);
 
@@ -327,7 +337,7 @@ export default function MergeCandidatesModal({
                     <span className="truncate max-w-[40%]">{nameOf(primary)}</span>
                   </div>
 
-                  {loadingApps ? (
+                  {loadingApps || !ownAppsReady ? (
                     <div className="flex items-center gap-2 text-xs text-slate-400 py-3">
                       <Loader2 className="w-3.5 h-3.5 animate-spin" /> Revisando sus postulaciones…
                     </div>
@@ -401,7 +411,7 @@ export default function MergeCandidatesModal({
               </button>
               <button
                 onClick={runMerge}
-                disabled={!selectedId || merging || loadingApps}
+                disabled={!selectedId || merging || loadingApps || !ownAppsReady}
                 className="px-5 py-2 bg-violet-600 text-white text-sm font-bold rounded-xl hover:bg-violet-700 disabled:opacity-50 flex items-center gap-2"
               >
                 {merging ? <Loader2 className="w-4 h-4 animate-spin" /> : <Merge className="w-4 h-4" />}

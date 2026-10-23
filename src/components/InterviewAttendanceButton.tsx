@@ -1,11 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { doc, updateDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { latestByApplication } from '../lib/participantStatus';
 import { Loader2, UserCheck } from 'lucide-react';
 import {
-  ATTENDANCE_OPTIONS, attendanceFields, attendanceOf, canMarkAttendance,
-  type AttendanceStatus,
+  ATTENDANCE_OPTIONS, attendanceFields, attendanceOf, canMarkAttendance, effectiveAttendance,
+  keepOptimistic, type AttendanceStatus, type OptimisticAttendance,
 } from '../lib/interviewAttendance';
 
 interface Props {
@@ -32,10 +32,27 @@ interface Props {
 export default function InterviewAttendanceButton({ app, participantStatus, compact, onMarked }: Props) {
   const [saving, setSaving] = useState<AttendanceStatus | null>(null);
   const [error, setError] = useState('');
+  // Lo que se acaba de guardar, con la postulación a la que pertenece y lo que se veía
+  // antes. `effectiveAttendance` decide cuándo deja de valer (ver `interviewAttendance.ts`):
+  // hace falta porque `participantStatus` viene de una lectura única —al QUITAR una marca
+  // de ahí, el botón se quedaría marcado como si el clic no hubiera servido— y deja de
+  // valer en cuanto los datos cambian, sea por nuestra propia escritura o porque otra
+  // persona marcó esa misma asistencia desde la página Entrevistas.
+  const [justSaved, setJustSaved] = useState<OptimisticAttendance | null>(null);
+
+  const backing = attendanceOf(app, participantStatus);
+  // En cuanto los datos confirman la marca, se tira: guardada, un cambio posterior que
+  // devolviera la asistencia a su valor de antes la resucitaría (ver `keepOptimistic`).
+  useEffect(() => {
+    setJustSaved(prev => keepOptimistic(prev, backing, app?.id));
+  }, [backing, app?.id]);
 
   if (!app?.id || !canMarkAttendance(app, participantStatus)) return null;
 
-  const current = attendanceOf(app, participantStatus);
+  const current = effectiveAttendance(backing, justSaved, app.id);
+  // ¿Lo que se ve viene de nuestra marca o ya lo confirmaron los datos? Solo para el
+  // texto de "quién lo marcó y cuándo", que sale del documento.
+  const showingOwnMark = current !== backing;
 
   const mark = async (status: AttendanceStatus) => {
     // La misma opción otra vez = corregir: se borra la marca.
@@ -57,6 +74,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
         console.warn('No se pudo sincronizar la sesión de entrevista:', e);
       }
 
+      setJustSaved({ appId: app.id, status: next, was: backing });
       onMarked?.(next);
     } catch (e) {
       console.error('No se pudo guardar la asistencia:', e);
@@ -66,7 +84,7 @@ export default function InterviewAttendanceButton({ app, participantStatus, comp
     }
   };
 
-  const marked = app?.interviewAttendance;
+  const marked = showingOwnMark && current === null ? null : app?.interviewAttendance;
   const markedWhen = marked?.markedAt?.toDate ? marked.markedAt.toDate().toLocaleString('es-DO', {
     day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit', hour12: true,
   }) : '';
