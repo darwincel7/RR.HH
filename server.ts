@@ -2534,18 +2534,44 @@ async function startServer() {
       // TODOS los perfiles con este teléfono o correo, no uno arbitrario: cuando una
       // familia comparte el celular, el que devolvía un `limit(1)` podía ser el del
       // hermano, y entonces el perfil que SÍ era de esta persona no se miraba nunca y se
-      // duplicaba otra vez. Los ya unificados se descartan: su contenido vive en el vivo
-      // (que aparece en esta misma búsqueda, porque conserva sus contactos alternativos).
-      const matches = (await db.listCandidatesByPhoneOrEmail(phone, email, 10))
-        .filter((c: any) => c?.id && !c.mergedInto && c.id !== candidateId);
+      // duplicaba otra vez.
+      //
+      // Un perfil ya unificado no recibe nada, pero sus contactos SIGUEN siendo de esa
+      // persona, y el teléfono por el que nació el duplicado puede estar guardado solo
+      // ahí: una unificación A→B y luego B→C no arrastraba los alternativos de A hasta C
+      // (ya arreglado, pero las bases que lo vivieron siguen así). Descartarlo haría que
+      // la postulación que llega por ese número naciera como un tercer duplicado. Así que
+      // la identidad se comprueba con los datos del perfil MUERTO —es donde está el
+      // contacto por el que llegó— y la postulación se cuelga del VIVO.
+      const found = await db.listCandidatesByPhoneOrEmail(phone, email, 10);
+      const matches: Array<{ test: any; live: any }> = [];
+      const seen = new Set<string>([candidateId]);
+      for (const c of found) {
+        if (!c?.id) continue;
+        if (!c.mergedInto) {
+          if (seen.has(c.id)) continue;
+          seen.add(c.id);
+          matches.push({ test: c, live: c });
+          continue;
+        }
+        const liveId = await followMergedInto(readCandidate, c.id);
+        if (!liveId || seen.has(liveId)) continue;
+        const live = await readCandidate(liveId);
+        if (!live || live.mergedInto) continue;
+        seen.add(liveId);
+        // `mergedInto: undefined` SOLO para la comprobación: `isSameApplicant` rechaza de
+        // plano un perfil unificado —no puede recibir nada—, y aquí la pregunta es de
+        // QUIÉN son esos contactos, no quién recibe la postulación.
+        matches.push({ test: { ...c, mergedInto: undefined }, live: { ...live, id: liveId } });
+      }
 
       // ¿Cuáles de esos perfiles SON esta persona? Se decide una sola vez y sirve para
       // las dos cosas que vienen: reconocerla y bloquear su postulación repetida.
       const sameApplicant: any[] = [];
-      for (const candidate of matches) {
-        const match = isSameApplicant(candidate, { name, phoneNormalized, email });
-        if (match.same) sameApplicant.push(candidate);
-        else console.log(`[apply] perfil ${candidate.id} comparte contacto pero NO es esta persona (${match.reason}): queda para "Revisar duplicados"`);
+      for (const m of matches) {
+        const match = isSameApplicant(m.test, { name, phoneNormalized, email });
+        if (match.same) sameApplicant.push(m.live);
+        else console.log(`[apply] perfil ${m.test.id} comparte contacto pero NO es esta persona (${match.reason}): queda para "Revisar duplicados"`);
       }
 
       // El navegador NO es la identidad de nadie: el candidato nace del uid anónimo, así
@@ -2625,7 +2651,14 @@ async function startServer() {
       // completa, no destruye.
       const keepCv = recognizedByContact && !!profile?.cvUrl;
       const candidateData: Record<string, any> = {
-        email, phone, phoneNormalized,
+        // El teléfono y el correo PRINCIPALES tampoco se tocan en un perfil reconocido
+        // por sus datos, por lo mismo que el CV. Para ser reconocido basta coincidir con
+        // un contacto ALTERNATIVO (ahí está justo el número por el que nació un
+        // duplicado), así que escribirlo como principal asciende un dato viejo: el equipo
+        // lleva semanas escribiéndole por WhatsApp al número que está en `phone`, y la
+        // siguiente respuesta saldría hacia otro. En el perfil de la propia sesión sí se
+        // actualiza, como siempre: ahí el contacto nuevo es una corrección suya.
+        ...(recognizedByContact ? {} : { email, phone, phoneNormalized }),
         ...(keepCv ? {} : { cvUrl, cvFileType: cvFileType.slice(0, 120), aiStatus: 'pending' }),
         // `|| profile.name`: los perfiles viejos guardan el nombre ahí, y la interfaz lee
         // `fullName || name`. Sin eso, una re-postulación escondía detrás de un nombre
@@ -2636,7 +2669,10 @@ async function startServer() {
         ...(profile?.createdAt ? {} : { createdAt: now }),
       };
       if (!profile?.city) candidateData.city = city.slice(0, 120);
-      if (profile) {
+      // Degradar el contacto anterior a alternativo solo tiene sentido cuando el nuevo
+      // pasa a principal: en un perfil reconocido no cambia nada, y el contacto con el
+      // que llegó ya está guardado (es la condición para haberlo reconocido).
+      if (profile && !recognizedByContact) {
         const keepPhones = [profile.phoneNormalized, profile.phone]
           .filter(p => p && normalizePhone(String(p)) !== phoneNormalized);
         const keepEmails = [profile.email]

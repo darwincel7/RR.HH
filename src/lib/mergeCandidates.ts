@@ -208,11 +208,16 @@ export function planCandidateMerge(args: {
 
   // Un teléfono o correo distinto es casi siempre la RAZÓN del duplicado: se conserva
   // para que la próxima búsqueda por ese número encuentre a la persona.
-  const alternatePhones = [duplicate?.phone, duplicate?.phoneNormalized]
+  //
+  // Incluidos los que el duplicado ya tenía guardados como alternativos: si no, unificar
+  // dos veces (A→B y luego B→C) perdía el contacto de A, y la persona volvía a duplicarse
+  // al aplicar con el número por el que nació el primer duplicado.
+  const list = (v: unknown) => (Array.isArray(v) ? v : []);
+  const alternatePhones = [duplicate?.phone, duplicate?.phoneNormalized, ...list(duplicate?.alternatePhones)]
     .filter(p => !isEmptyValue(p))
     .map(p => String(p).trim())
     .filter(p => p !== String(primary?.phone || '').trim() && p !== String(primary?.phoneNormalized || '').trim());
-  const alternateEmails = [duplicate?.email]
+  const alternateEmails = [duplicate?.email, ...list(duplicate?.alternateEmails)]
     .filter(e => !isEmptyValue(e))
     .map(e => String(e).trim())
     .filter(e => e.toLowerCase() !== String(primary?.email || '').trim().toLowerCase());

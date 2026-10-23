@@ -1,5 +1,7 @@
-import React from 'react';
-import { Archive } from 'lucide-react';
+import React, { useState } from 'react';
+import { doc, getDoc } from 'firebase/firestore';
+import { Archive, Loader2 } from 'lucide-react';
+import { db } from '../lib/firebase';
 import { EVIDENCE_GROUPS } from '../lib/mergeCandidates';
 
 /**
@@ -54,6 +56,94 @@ function conflictingOnly(entry: any): any {
   return out;
 }
 
+/** Los números y las respuestas de una evidencia archivada. */
+const EvidenceDetail: React.FC<{ data: any }> = ({ data }) => {
+  const chips = scoreChips(data);
+  const blocks = answerBlocks(data);
+  if (chips.length === 0 && blocks.length === 0) {
+    return <p className="mt-2 text-[11px] text-slate-500">No quedó ninguna respuesta que mostrar.</p>;
+  }
+  return (
+    <>
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {chips.map(c => (
+            <span key={c.label} className="text-[10px] font-bold bg-white border border-amber-200 text-slate-700 px-2 py-0.5 rounded-md">
+              {c.label}: {c.value}
+            </span>
+          ))}
+        </div>
+      )}
+      {blocks.map(b => (
+        <details key={b.title} className="mt-2">
+          <summary className="text-[11px] font-bold text-amber-800 cursor-pointer">{b.title}</summary>
+          <div className="mt-2 space-y-1.5 max-h-56 overflow-y-auto pr-1">
+            {Object.entries(b.answers).map(([q, a]: any, idx) => (
+              <div key={idx} className="bg-white border border-amber-100 rounded-lg p-2">
+                <p className="text-[9px] font-bold text-slate-400 mb-0.5">{q}</p>
+                <p className="text-[11px] text-slate-700 whitespace-pre-wrap">
+                  {Array.isArray(a) ? a.join(', ') : String(a ?? '')}
+                </p>
+              </div>
+            ))}
+          </div>
+        </details>
+      ))}
+    </>
+  );
+};
+
+/**
+ * Lo que no cupo dentro de la postulación y se guardó en `merged_applications`.
+ *
+ * Se trae solo cuando el reclutador lo pide: decir "se guardó completo aparte" y dejar
+ * ahí la ruta del documento era prometer una consulta que la pantalla no hacía — el test
+ * de la persona existía y nadie podía leerlo. Se lee al pulsar y no antes, porque es
+ * justo el caso en que el contenido es grande.
+ */
+const ArchivedApart: React.FC<{ entry: any }> = ({ entry }) => {
+  const [state, setState] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [data, setData] = useState<any>(null);
+  const id = String(entry?.archivedIn || '').split('/').pop() || '';
+
+  const load = async () => {
+    setState('loading');
+    try {
+      const snap = await getDoc(doc(db, 'merged_applications', id));
+      if (!snap.exists()) throw new Error('no existe');
+      setData(conflictingOnly({ groups: entry?.groups, data: snap.data() }));
+      setState('idle');
+    } catch (e) {
+      console.error('No se pudo leer la evidencia archivada:', e);
+      setState('error');
+    }
+  };
+
+  if (data) return <EvidenceDetail data={data} />;
+
+  return (
+    <div className="mt-2">
+      <p className="text-[11px] text-amber-800">
+        Su contenido era demasiado grande para guardarlo dentro de la postulación, así que se guardó completo aparte.
+      </p>
+      <button
+        type="button"
+        onClick={load}
+        disabled={state === 'loading' || !id}
+        className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] font-bold text-amber-900 bg-white border border-amber-300 rounded-lg px-2.5 py-1 hover:bg-amber-100 transition-colors disabled:opacity-60"
+      >
+        {state === 'loading' && <Loader2 className="w-3 h-3 animate-spin" />}
+        {state === 'loading' ? 'Buscándolo...' : 'Ver lo que se archivó'}
+      </button>
+      {state === 'error' && (
+        <p className="mt-1 text-[10px] font-bold text-rose-600">
+          No se pudo leer. Está guardado en <code className="font-mono">{entry.archivedIn}</code>.
+        </p>
+      )}
+    </div>
+  );
+};
+
 export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
   if (!Array.isArray(entries) || entries.length === 0) return null;
 
@@ -70,8 +160,6 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
       <div className="space-y-4">
         {entries.map((entry: any, i: number) => {
           const conflicting = conflictingOnly(entry);
-          const chips = scoreChips(conflicting);
-          const blocks = answerBlocks(conflicting);
           return (
             <div key={i} className="bg-amber-50/50 border border-amber-100 rounded-xl p-3 lg:p-4">
               <p className="text-xs font-bold text-slate-700">
@@ -86,39 +174,16 @@ export default function MergedEvidenceCard({ entries }: { entries: any[] }) {
               </p>
 
               {entry?.omitted ? (
-                <p className="mt-2 text-[11px] text-amber-800">
-                  Su contenido era demasiado grande para guardarlo aquí.{' '}
-                  {entry.archivedIn
-                    ? <>Se guardó completo aparte, en <code className="font-mono">{entry.archivedIn}</code>.</>
-                    : <>No se pudo archivar: la postulación original ({entry.fromApplicationId}) se dejó sin borrar.</>}
-                </p>
+                entry.archivedIn
+                  ? <ArchivedApart entry={entry} />
+                  : (
+                    <p className="mt-2 text-[11px] text-amber-800">
+                      Su contenido era demasiado grande y no se pudo archivar: la postulación original
+                      ({entry.fromApplicationId}) se dejó sin borrar.
+                    </p>
+                  )
               ) : (
-                <>
-                  {chips.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5 mt-2">
-                      {chips.map(c => (
-                        <span key={c.label} className="text-[10px] font-bold bg-white border border-amber-200 text-slate-700 px-2 py-0.5 rounded-md">
-                          {c.label}: {c.value}
-                        </span>
-                      ))}
-                    </div>
-                  )}
-                  {blocks.map(b => (
-                    <details key={b.title} className="mt-2">
-                      <summary className="text-[11px] font-bold text-amber-800 cursor-pointer">{b.title}</summary>
-                      <div className="mt-2 space-y-1.5 max-h-56 overflow-y-auto pr-1">
-                        {Object.entries(b.answers).map(([q, a]: any, idx) => (
-                          <div key={idx} className="bg-white border border-amber-100 rounded-lg p-2">
-                            <p className="text-[9px] font-bold text-slate-400 mb-0.5">{q}</p>
-                            <p className="text-[11px] text-slate-700 whitespace-pre-wrap">
-                              {Array.isArray(a) ? a.join(', ') : String(a ?? '')}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    </details>
-                  ))}
-                </>
+                <EvidenceDetail data={conflicting} />
               )}
             </div>
           );

@@ -163,6 +163,22 @@ describe('el plan completo de unificación', () => {
     expect(plan.alternateEmails).toEqual(['ana@mail.com']);
   });
 
+  it('arrastra los alternativos que el duplicado ya traía de otra unificación', () => {
+    // A→B y luego B→C: el teléfono de A vive en los alternativos de B. Si no pasa a C,
+    // la persona vuelve a duplicarse al aplicar con el número por el que nació el
+    // primer duplicado — y nadie entiende por qué sigue duplicándose.
+    const plan = planCandidateMerge({
+      primary: { id: 'C', phone: '8091111111', phoneNormalized: '18091111111', email: 'c@mail.com' },
+      duplicate: {
+        id: 'B', phone: '8092222222', phoneNormalized: '18092222222', email: 'b@mail.com',
+        alternatePhones: ['809-333-3333'], alternateEmails: ['a@mail.com'],
+      },
+      primaryApps: [], duplicateApps: [],
+    });
+    expect(plan.alternatePhones).toEqual(expect.arrayContaining(['8092222222', '809-333-3333']));
+    expect(plan.alternateEmails).toEqual(expect.arrayContaining(['b@mail.com', 'a@mail.com']));
+  });
+
   it('no inventa alternativos cuando el contacto es el mismo', () => {
     const plan = planCandidateMerge({
       primary: { id: 'A', phone: '8095551234', phoneNormalized: '18095551234', email: 'a@b.c' },

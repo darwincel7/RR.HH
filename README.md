@@ -195,7 +195,10 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   misma evidencia (un test cada uno) **no se mezcla nada**: se conserva la del principal
   entera y la otra se archiva, porque juntar la puntuación de una con las respuestas de la
   otra dejaría una postulación que se contradice. La postulación absorbida se guarda
-  **completa** en `mergedEvidence` y se muestra en el perfil ("De un perfil unificado"),
+  **completa** en `mergedEvidence` y se muestra en el perfil ("De un perfil unificado");
+  si no cabe ahí (más de 200 KB) va a `merged_applications`, y la misma tarjeta la trae
+  con un botón — decir "se guardó aparte" sin poder abrirla era prometer una consulta que
+  no existía,
   pero su documento desaparece: el link de test/formulario enviado *desde ese perfil* deja
   de funcionar (la pantalla lo advierte antes de confirmar).
   El perfil duplicado **no se borra**: queda con `mergedInto`, deja de recibir
@@ -203,10 +206,13 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   de candidato del servidor siguen ese rastro hasta el perfil vivo, y `/api/apply` lo
   sigue también para la sesión del propio postulante: su navegador conserva el UID
   anónimo, así que sin eso su siguiente postulación nacería colgada del perfil muerto. El
-  otro teléfono/correo se guarda como `alternatePhones`/`alternateEmails`: entra en el
-  buscador, vuelve a enlazar un WhatsApp entrante con la persona y **el deduplicado de
-  `/api/apply` también lo mira**, que es lo que evita el tercer duplicado cuando vuelve a
-  aplicar con ese número.
+  otro teléfono/correo se guarda como `alternatePhones`/`alternateEmails` —incluidos los
+  que el duplicado ya traía de una unificación anterior, para que unificar dos veces
+  (A→B→C) no pierda el contacto de A—: entran en el buscador, vuelven a enlazar un
+  WhatsApp entrante con la persona y **el deduplicado de `/api/apply` también los mira**,
+  que es lo que evita el tercer duplicado cuando vuelve a aplicar con ese número. Y si el
+  contacto solo quedó guardado en el perfil muerto, el reconocimiento salta de ahí al
+  perfil vivo en vez de descartarlo.
   **Revisar duplicados** (*Candidatos* → botón en la cabecera) hace la pregunta con la
   que se limpia de verdad: cuántos duplicados hay en la base y cuáles. Agrupa **toda** la
   base por teléfono, correo y nombre completo, de forma transitiva (si A y B comparten el
@@ -247,6 +253,12 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   unificación): se conserva el nombre más completo, la ciudad solo se rellena si falta, y
   el teléfono/correo que deja de ser el principal se guarda como alternativo — de él
   depende que un WhatsApp entrante siga enlazándose con esa persona.
+  En un perfil reconocido por sus datos, el teléfono y el correo **principales tampoco se
+  tocan**: para ser reconocido basta coincidir con un contacto *alternativo* (ahí está
+  justo el número por el que nació un duplicado), así que escribirlo como principal
+  ascendería un dato viejo y la siguiente respuesta de WhatsApp saldría hacia otro número.
+  En el perfil de la propia sesión sí se actualiza: ahí el contacto nuevo es una
+  corrección suya.
   El **CV y su análisis no se tocan** en un perfil reconocido por sus datos: quien llena
   el formulario no ha demostrado que ese perfil sea suyo, y conocer el teléfono, el correo
   y el nombre completo de alguien —un ex, un rival, un familiar— bastaría para reemplazar
