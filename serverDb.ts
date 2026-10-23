@@ -73,6 +73,15 @@ export interface ServerDb {
    */
   fillMissingPhoneNormalized(id: string): Promise<boolean>;
   deleteDocData(collection: string, id: string): Promise<void>;
+  /**
+   * Lee un documento y escribe (merge) lo que `decide` devuelva a partir de lo leído, en
+   * una transacción: si otro escribió entre medias, se vuelve a decidir con lo nuevo.
+   * `decide` devuelve null para no escribir nada. Devuelve si escribió.
+   */
+  updateDocIf(collection: string, id: string, decide: (current: any | null) => Record<string, any> | null): Promise<boolean>;
+  /** Lee y BORRA un documento en una transacción (un código de un solo uso): de dos
+   * que lo pidan a la vez, solo uno lo recibe. null si no existía. */
+  takeDocData(collection: string, id: string): Promise<any | null>;
   deleteCollection(collection: string): Promise<void>;
   findCandidateIdByPhone(phone: string): Promise<string | null>;
   /** Adds a whatsapp_messages doc, stamping `sentAt` with the server time. */
@@ -393,6 +402,25 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
       },
       async deleteDocData(collection, id) {
         await adb.collection(collection).doc(id).delete();
+      },
+      async updateDocIf(collection, id, decide) {
+        const ref = adb.collection(collection).doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          const update = decide(snap.exists ? snap.data() : null);
+          if (!update) return false;
+          tx.set(ref, update, { merge: true });
+          return true;
+        });
+      },
+      async takeDocData(collection, id) {
+        const ref = adb.collection(collection).doc(id);
+        return adb.runTransaction(async (tx: any) => {
+          const snap = await tx.get(ref);
+          if (!snap.exists) return null;
+          tx.delete(ref);
+          return snap.data();
+        });
       },
       async deleteCollection(collection) {
         const snap = await adb.collection(collection).get();
@@ -768,6 +796,25 @@ async function initClient(): Promise<ServerDb> {
     },
     async deleteDocData(c, id) {
       await deleteDoc(doc(cdb, c, id));
+    },
+    async updateDocIf(c, id, decide) {
+      const ref = doc(cdb, c, id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        const update = decide(snap.exists() ? snap.data() : null);
+        if (!update) return false;
+        tx.set(ref, update, { merge: true });
+        return true;
+      });
+    },
+    async takeDocData(c, id) {
+      const ref = doc(cdb, c, id);
+      return runTransaction(cdb, async tx => {
+        const snap = await tx.get(ref);
+        if (!snap.exists()) return null;
+        tx.delete(ref);
+        return snap.data();
+      });
     },
     async deleteCollection(c) {
       const snap = await getDocs(collection(cdb, c));

@@ -3,6 +3,7 @@ import {
   applySchema, applyConfirmationSchema, scoreStage2Schema, evaluateTestSchema,
   emailSendSchema, whatsappSendSchema, stageChangeSchema, parseCvSchema, evaluateInterviewSchema,
   mergeCandidatesSchema, personalitySubmitSchema, personalityInterpretSchema, decodeImageDataUrl, firstIssueMessage,
+  stationPairSchema, stationPollSchema, stationProgressSchema, stationReleaseSchema,
 } from './serverSchemas';
 
 /** The exact message a body would produce, or null if it validates. */
@@ -230,5 +231,43 @@ describe('decodeImageDataUrl', () => {
     expect(decodeImageDataUrl(42)).toEqual({ ok: false, error: 'Falta la imagen (dataUrl).' });
     expect(decodeImageDataUrl('data:text/html;base64,AAAA')).toEqual({ ok: false, error: 'Formato de imagen inválido. Debe ser una imagen.' });
     expect(decodeImageDataUrl('no-es-data-url')).toEqual({ ok: false, error: 'Formato de imagen inválido. Debe ser una imagen.' });
+  });
+});
+
+describe('modo estación (teléfonos de la empresa)', () => {
+  it('vincular pide 6 dígitos y un nombre limpio', () => {
+    const r = stationPairSchema.safeParse({ code: '004213', name: '  Teléfono   2 ' });
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data).toEqual({ code: '004213', name: 'Teléfono 2' });
+    expect(errorOf(stationPairSchema, { code: '4213', name: 'T1' })).toBe('Escribe los 6 dígitos del código.');
+    expect(errorOf(stationPairSchema, { code: 482913, name: 'T1' })).toBe('Escribe los 6 dígitos del código.');
+    expect(errorOf(stationPairSchema, { code: '482913', name: '   ' })).toBe('Ponle un nombre al teléfono.');
+    expect(errorOf(stationPairSchema, { code: '482913', name: 'x'.repeat(41) })).toMatch(/40 caracteres/);
+  });
+
+  it('el teléfono se identifica con un id que no es una ruta', () => {
+    expect(stationPollSchema.safeParse({ stationId: 'abcDEF123_-' }).success).toBe(true);
+    expect(errorOf(stationPollSchema, { stationId: 'a/b' })).toBe('Este teléfono no está vinculado.');
+    expect(errorOf(stationPollSchema, {})).toBe('Este teléfono no está vinculado.');
+    expect(errorOf(stationReleaseSchema, { stationId: 's1' })).toBe('applicationId inválido');
+  });
+
+  it('el avance son enteros con límites', () => {
+    const ok = { stationId: 's1', applicationId: 'app1', index: -1, total: 20, exits: 0 };
+    expect(stationProgressSchema.safeParse(ok).success).toBe(true);
+    for (const bad of [{ index: -2 }, { index: 1.5 }, { total: '20' }, { exits: -1 }]) {
+      expect(errorOf(stationProgressSchema, { ...ok, ...bad })).toBe('Avance inválido');
+    }
+  });
+
+  it('el envío del test acepta el teléfono, y descarta uno que no es un id', () => {
+    const base = { applicationId: 'app1', answers: { q: 'a' } };
+    const ok = evaluateTestSchema.safeParse({ ...base, stationId: 's1' });
+    if (ok.success) expect(ok.data.stationId).toBe('s1');
+    for (const junk of ['a/b', 42, undefined]) {
+      const r = evaluateTestSchema.safeParse({ ...base, stationId: junk });
+      expect(r.success).toBe(true);
+      if (r.success) expect(r.data.stationId).toBe('');
+    }
   });
 });

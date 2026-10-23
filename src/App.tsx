@@ -23,6 +23,8 @@ const Interviews = lazy(() => import("./pages/Interviews"));
 const Ranking = lazy(() => import("./pages/Ranking"));
 const CandidateTest = lazy(() => import("./pages/CandidateTest"));
 const PersonalityTest = lazy(() => import("./pages/PersonalityTest"));
+const Station = lazy(() => import("./pages/Station"));
+const Phones = lazy(() => import("./pages/Phones"));
 const FormsSettings = lazy(() => import("./pages/FormsSettings"));
 const CandidatesList = lazy(() => import("./pages/CandidatesList"));
 const Careers = lazy(() => import("./pages/Careers"));
@@ -47,6 +49,7 @@ export default function App() {
             <Route path="/eval/:applicationId" element={<Stage2Form />} />
             <Route path="/test/:applicationId" element={<CandidateTest />} />
             <Route path="/personalidad/:applicationId" element={<PersonalityTest />} />
+            <Route path="/estacion" element={<Station />} />
             <Route path="/" element={<DashboardLayout />}>
               <Route index element={<Dashboard />} />
               <Route path="vacancies" element={<Vacancies />} />
@@ -63,6 +66,7 @@ export default function App() {
               <Route path="candidates" element={<CandidatesList />} />
               <Route path="settings" element={<WhatsAppSettings />} />
               <Route path="forms" element={<FormsSettings />} />
+              <Route path="phones" element={<Phones />} />
             </Route>
           </Routes>
         </Suspense>
