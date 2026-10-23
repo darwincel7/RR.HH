@@ -118,6 +118,11 @@ export default function DashboardLayout() {
     );
   }
 
+  // The Kanban needs every pixel of height for its columns: it brings its own one-row
+  // header (arrows + title + its search), so here it gets no TopBar, tight padding,
+  // the full width, and exactly the screen's height (each column scrolls on its own).
+  const isBoard = /^\/vacancies\/[^/]+\/kanban\/?$/.test(location.pathname);
+
   const navigation = [
     { name: 'Dashboard', href: '/', icon: LayoutDashboard },
     { name: 'Vacantes', href: '/vacancies', icon: Briefcase },
@@ -253,14 +258,14 @@ export default function DashboardLayout() {
         flex-1 transition-all duration-300 ease-in-out flex flex-col
         ${isCollapsed ? 'lg:ml-28' : 'lg:ml-80'}
         ${waPanelOpen ? 'lg:mr-[316px]' : 'lg:mr-[72px]'}
-        min-h-screen
+        ${isBoard ? 'h-dvh min-w-0' : 'min-h-screen'}
       `}>
         <CVWorker />
-        <div className="p-4 md:p-8 pt-20 lg:pt-8 flex-1 flex flex-col">
+        <div className={`${isBoard ? 'px-3 pb-2 pt-[4.5rem] lg:px-4 lg:pt-3 min-h-0' : 'p-4 md:p-8 pt-20 lg:pt-8'} flex-1 flex flex-col`}>
           <WhatsAppStatusBanner />
           <AiStatusBanner />
-          <TopBar />
-          <div className="max-w-7xl mx-auto animate-fade-in w-full flex-1">
+          {!isBoard && <TopBar />}
+          <div className={`${isBoard ? 'min-h-0 flex flex-col' : 'max-w-7xl mx-auto'} animate-fade-in w-full flex-1`}>
             <Outlet />
           </div>
         </div>

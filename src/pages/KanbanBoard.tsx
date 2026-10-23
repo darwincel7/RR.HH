@@ -5,7 +5,8 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { DragDropContext, Droppable, Draggable, DropResult } from '@hello-pangea/dnd';
 import { db, storage, auth } from '../lib/firebase';
 import { PIPELINE_STAGES, STAGE_INFO } from '../constants/stages';
-import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, Upload, FileText, Calendar, MapPin, AlertTriangle, CheckCircle, ArrowRightLeft } from 'lucide-react';
+import { Loader2, User, Star, Clock, Sparkles, X, Check, UploadCloud, FileText, Calendar, AlertTriangle, CheckCircle, ArrowRightLeft, Search } from 'lucide-react';
+import { HistoryNavButtons } from '../components/layout/TopBar';
 
 import { sendWhatsAppAutomation, stageMayAutoSend, stageNeedsScheduling, sleep, SEND_SPACING_MS } from '../lib/whatsapp';
 import { useBulkNotifyConfirm, type BulkNotifyChoice } from '../components/BulkNotifyConfirm';
@@ -34,6 +35,7 @@ export default function KanbanBoard() {
   const [candidates, setCandidates] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
+  const searchRef = React.useRef<HTMLInputElement>(null);
   // Notes are searchable from the board too (loaded once; optional).
   const [notesByCandidate, setNotesByCandidate] = useState<Map<string, CandidateNote[]>>(new Map());
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
@@ -97,6 +99,7 @@ export default function KanbanBoard() {
   };
   const fmtFecha = (dt: Date) => dt.toLocaleDateString('es-DO', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
   const fmtHora = (dt: Date) => dt.toLocaleTimeString('es-DO', { hour: 'numeric', minute: '2-digit', hour12: true });
+  const fmtFechaCorta = (dt: Date) => dt.toLocaleDateString('es-DO', { weekday: 'short', day: 'numeric', month: 'short' });
   const todayStr = new Date().toISOString().split('T')[0];
 
   useEffect(() => {
@@ -178,6 +181,20 @@ export default function KanbanBoard() {
     }
     return () => unsubs.forEach(u => u());
   }, [candidateIdsKey]);
+
+  // "/" focuses this board's search, like the global one it replaces on this page.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement;
+      const typing = el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable);
+      if (e.key === '/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        searchRef.current?.focus();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, []);
 
   // Changing the search clears the selection: otherwise cards selected under a
   // previous search stay silently selected while INVISIBLE, and a bulk move would
@@ -547,7 +564,7 @@ export default function KanbanBoard() {
     return Math.floor(diffTime / (1000 * 60 * 60 * 24));
   };
 
-  if (loading) return <div className="flex h-full items-center justify-center"><Loader2 className="w-10 h-10 animate-spin text-violet-600" /></div>;
+  if (loading) return <div className="flex flex-1 items-center justify-center"><Loader2 className="w-10 h-10 animate-spin text-violet-600" /></div>;
 
   // Filter applications based on search term
   // Same smart search as the candidate list: accents, phone formats, notes, multi-word.
@@ -581,105 +598,127 @@ export default function KanbanBoard() {
   })); // ALL stages render (even empty) — hiding empty columns made it impossible to drag a card into them
 
   return (
-    <div className="h-[calc(100vh-9rem)] lg:h-[calc(100vh-11rem)] flex flex-col animate-fade-in relative">
-      <div className="mb-4 lg:mb-8 flex flex-col md:flex-row md:items-center justify-between gap-3">
-        <div>
-          <h1 className="text-xl lg:text-3xl font-display font-bold text-slate-900 tracking-tight flex items-center">
-            <Sparkles className="w-5 h-5 lg:w-6 lg:h-6 text-violet-500 mr-2" />
-            Embudo: {vacancy?.title}
-          </h1>
-          <p className="text-slate-500 text-xs lg:text-sm mt-0.5 font-medium">Arrastra tarjetas o usa la selección múltiple para mover.</p>
-        </div>
-        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+    <div className="@container flex-1 min-h-0 flex flex-col animate-fade-in relative">
+      {/* One row: arrows, title, actions. The layout hides its own top bar on this page
+          so the columns below get the height. Sizes follow the board's own width (@…),
+          not the screen's: the sidebar and the WhatsApp panel can each take 300px. */}
+      <div className="mb-2 flex flex-wrap @xl:flex-nowrap items-center gap-2">
+        <HistoryNavButtons compact />
+        <h1
+          className="min-w-0 flex-1 flex items-center text-base lg:text-xl font-display font-bold text-slate-900 tracking-tight"
+          title="Arrastra las tarjetas o usa la selección múltiple para moverlas de etapa."
+        >
+          <Sparkles className="w-4 h-4 lg:w-5 lg:h-5 text-violet-500 mr-1.5 shrink-0" />
+          <span className="truncate">Embudo: {vacancy?.title}</span>
+        </h1>
+        <div className="flex items-center gap-2 w-full @xl:w-auto @xl:shrink-0">
           <button
             onClick={() => setIsBulkUploadModalOpen(true)}
-            className="flex items-center justify-center px-4 py-2 bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs lg:text-sm font-bold rounded-xl hover:bg-indigo-100 transition-colors shadow-sm"
+            title="Subir CVs a esta vacante"
+            className="h-9 shrink-0 flex items-center justify-center px-3 bg-indigo-50 border border-indigo-100 text-indigo-700 text-xs font-bold rounded-xl hover:bg-indigo-100 transition-colors shadow-sm"
           >
-            <UploadCloud className="w-4 h-4 mr-2" />
-            Subir CVs
+            <UploadCloud className="w-4 h-4" />
+            <span className="hidden @5xl:inline ml-1.5">Subir CVs</span>
           </button>
-          <div className="relative flex-1 sm:flex-none">
+          <div className="relative flex-1 @xl:flex-none">
+            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
             <input
+              ref={searchRef}
               type="text"
-              placeholder="Nombre, teléfono, lugar, notas…"
+              placeholder="Buscar: nombre, teléfono, notas…"
+              aria-label="Buscar en este embudo por nombre, teléfono, lugar o notas"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full sm:w-48 lg:w-64 pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-violet-500 outline-none transition-all shadow-sm"
+              className="h-9 w-full @xl:w-40 @4xl:w-52 @6xl:w-64 pl-9 pr-8 bg-white border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-violet-500 outline-none transition-all shadow-sm"
             />
-            <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+            {searchTerm ? (
+              <button type="button" onClick={() => { setSearchTerm(''); searchRef.current?.focus(); }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-700" aria-label="Limpiar búsqueda">
+                <X className="w-4 h-4" />
+              </button>
+            ) : (
+              <kbd className="hidden md:block absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold text-slate-400 border border-slate-200 rounded px-1.5 py-0.5">/</kbd>
+            )}
           </div>
           <Link
             to={`/vacancies/${vacancyId}/ranking`}
-            className="px-4 py-2 bg-slate-900 text-white text-xs lg:text-sm font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg shadow-slate-900/20 hover:-translate-y-0.5 whitespace-nowrap text-center"
+            title="Ver el ranking final de esta vacante"
+            className="h-9 shrink-0 flex items-center px-3 bg-slate-900 text-white text-xs font-bold rounded-xl hover:bg-slate-800 transition-colors shadow-sm whitespace-nowrap"
           >
-            Ver Ranking Final
+            Ranking final
           </Link>
         </div>
       </div>
 
-      {/* Interview schedule for this vacancy — the invitation sent when convoking a
-          candidate uses this date/time/place, and a past date blocks the move. */}
+      {/* Interview schedule for this vacancy, in one slim row — the invitation sent when
+          convoking a candidate uses this date/time/place, and a past date blocks the move. */}
       {(() => {
         const st = scheduleStatus();
+        const saved = vacancy?.interviewSchedule || {};
+        const dirty = (saved.date || '') !== schedDate || (saved.time || '') !== schedTime || (saved.location || '') !== schedLocation;
+        const field = 'h-8 px-2 bg-white border rounded-lg text-xs lg:text-sm focus:ring-2 focus:ring-violet-500 outline-none';
         return (
-          <div className="mb-4 bg-white rounded-2xl border border-slate-200 p-3 lg:p-4 shadow-sm">
-            <div className="flex items-center gap-2 mb-2.5">
-              <Calendar className="w-4 h-4 text-violet-600" />
-              <h3 className="text-xs lg:text-sm font-bold text-slate-700">Agenda de entrevista para esta vacante</h3>
-              <span className="text-[10px] text-slate-400 hidden sm:inline">— se usa al convocar candidatos a entrevista</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5">
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Fecha</label>
-                <input type="date" min={todayStr} value={schedDate} onChange={(e) => setSchedDate(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
-              </div>
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Hora</label>
-                <input type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
-              </div>
-              <div>
-                <label className="block text-[10px] font-bold text-slate-400 uppercase mb-1">Lugar / Modalidad</label>
-                <input type="text" value={schedLocation} onChange={(e) => setSchedLocation(e.target.value)}
-                  placeholder="Ej: Tienda Baní, o Google Meet"
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-violet-500 outline-none" />
-              </div>
-              <div className="flex items-end">
-                <button onClick={saveSchedule} disabled={savingSchedule}
-                  className="w-full px-4 py-2 bg-violet-600 text-white text-sm font-bold rounded-lg hover:bg-violet-700 transition-colors disabled:opacity-50">
-                  {savingSchedule ? 'Guardando…' : 'Guardar agenda'}
-                </button>
-              </div>
-            </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1.5 bg-white rounded-xl border border-slate-200 px-2.5 py-1.5 shadow-sm">
+            <span
+              className="flex items-center text-xs font-bold text-slate-600 whitespace-nowrap cursor-help"
+              title="Agenda de entrevista de esta vacante: se usa en la invitación al convocar candidatos a entrevista."
+            >
+              <Calendar className="w-3.5 h-3.5 text-violet-600 mr-1.5" /> Entrevista
+            </span>
+            <input type="date" min={todayStr} value={schedDate} onChange={(e) => setSchedDate(e.target.value)}
+              aria-label="Fecha de la entrevista" title="Fecha de la entrevista"
+              className={`${field} w-[8.75rem] ${st.isPast ? 'border-rose-300 text-rose-700' : 'border-slate-200'}`} />
+            <input type="time" value={schedTime} onChange={(e) => setSchedTime(e.target.value)}
+              aria-label="Hora de la entrevista" title="Hora de la entrevista"
+              className={`${field} w-[7.25rem] ${st.isPast ? 'border-rose-300 text-rose-700' : 'border-slate-200'}`} />
+            <input type="text" value={schedLocation} onChange={(e) => setSchedLocation(e.target.value)}
+              aria-label="Lugar o modalidad de la entrevista" title="Lugar o modalidad de la entrevista"
+              placeholder="Lugar: Tienda Baní, o Google Meet"
+              className={`${field} flex-1 min-w-[9rem] border-slate-200`} />
+            {/* Only when there is something to save. */}
+            {(dirty || savingSchedule) && (
+              <button onClick={saveSchedule} disabled={savingSchedule}
+                className="h-8 px-3 bg-violet-600 text-white text-xs font-bold rounded-lg hover:bg-violet-700 transition-colors disabled:opacity-50 whitespace-nowrap">
+                {savingSchedule ? 'Guardando…' : 'Guardar'}
+              </button>
+            )}
             {st.isSet && (
               st.isPast ? (
-                <p className="mt-2.5 text-xs font-bold text-rose-600 flex items-center">
-                  <AlertTriangle className="w-3.5 h-3.5 mr-1.5" /> Esta fecha y hora YA PASARON. Ponla a futuro — no podrás convocar candidatos con una fecha vencida.
-                </p>
+                <span className="text-xs font-bold text-rose-600 flex items-center" title="No podrás convocar candidatos con una fecha vencida.">
+                  <AlertTriangle className="w-3.5 h-3.5 mr-1 shrink-0" /> Ya pasó: ponla a futuro
+                </span>
               ) : (
-                <p className="mt-2.5 text-xs font-medium text-emerald-600 flex items-center flex-wrap">
-                  <CheckCircle className="w-3.5 h-3.5 mr-1.5" /> Entrevista: {st.dt && fmtFecha(st.dt)} · {st.dt && fmtHora(st.dt)}
-                  {schedLocation && <span className="flex items-center ml-1"><MapPin className="w-3 h-3 mx-1" /> {schedLocation}</span>}
-                </p>
+                <span className="text-xs font-medium text-emerald-600 flex items-center whitespace-nowrap"
+                  title={`Entrevista: ${st.dt && fmtFecha(st.dt)} · ${st.dt && fmtHora(st.dt)}${schedLocation ? ` · ${schedLocation}` : ''}`}>
+                  <CheckCircle className="w-3.5 h-3.5 mr-1 shrink-0" /> {st.dt && `${fmtFechaCorta(st.dt)} · ${fmtHora(st.dt)}`}
+                </span>
               )
             )}
           </div>
         );
       })()}
 
-      {/* Columns grow with their content and the PAGE scrolls vertically — no tiny
-          per-column scrollbar. Sibling columns still stretch to the tallest one so
-          the drop zone keeps covering the whole column. */}
-      <div className="flex-1 overflow-x-auto overflow-y-hidden pb-2">
+      {/* The global search isn't on this page: when nobody here matches, offer it. */}
+      {searchTerm.trim() && filteredApplications.length === 0 && (
+        <p className="mb-2 px-1 text-xs text-slate-500">
+          Nadie en este embudo coincide con «{searchTerm.trim()}».{' '}
+          <Link to={`/candidates?q=${encodeURIComponent(searchTerm.trim())}`} className="font-bold text-violet-600 hover:underline">
+            Buscar en todos los candidatos →
+          </Link>
+        </p>
+      )}
+
+      {/* The board takes exactly the height left under the header; each column scrolls
+          on its own, and its drop zone still covers the whole column. */}
+      <div className="flex-1 min-h-0 overflow-x-auto overflow-y-hidden pb-2">
         <DragDropContext onDragEnd={onDragEnd}>
-          <div className="flex h-full space-x-4 lg:space-x-6 min-w-max px-1">
+          <div className="flex h-full space-x-3 min-w-max px-1">
             {columns.map(column => (
-              <div key={column.id} className="flex-shrink-0 w-72 lg:w-80 flex flex-col h-full">
-                <div className="mb-1.5 flex justify-between items-center px-1">
-                  <h3 className="font-display font-bold text-slate-700 text-[10px] lg:text-xs uppercase tracking-widest">{column.title}</h3>
-                  <div className="flex items-center gap-2">
-                    <button
+              <div key={column.id} className="flex-shrink-0 w-64 lg:w-72 flex flex-col h-full">
+                <div className="mb-1 flex justify-between items-center gap-2 px-1">
+                  <h3 className="min-w-0 truncate font-display font-bold text-slate-700 text-[10px] lg:text-xs uppercase tracking-widest" title={`${column.title}: ${STAGE_INFO[column.id] || ''}`}>{column.title}</h3>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {column.items.length > 0 && <button
                       onClick={() => {
                         const allSelected = column.items.every(item => selectedApps.has(item.id));
                         if(allSelected) {
@@ -699,36 +738,35 @@ export default function KanbanBoard() {
                       className="text-[9px] text-violet-600 bg-violet-50 hover:bg-violet-100 font-bold px-2 py-0.5 rounded-full transition-colors"
                     >
                       {column.items.every(item => selectedApps.has(item.id)) ? 'Desmarcar' : 'Seleccionar'}
-                    </button>
+                    </button>}
                     <span className="bg-white border border-slate-200 text-slate-600 py-0.5 px-2 rounded-full text-[10px] font-bold shadow-sm">
                       {column.items.length}
                     </span>
                   </div>
                 </div>
 
-                {/* Subtle one-liner: what this stage means and why it exists. */}
-                <p className="mb-2.5 px-1 text-[9px] lg:text-[10px] text-slate-400 leading-snug" title={STAGE_INFO[column.id]}>
-                  {STAGE_INFO[column.id]}
-                </p>
-
-                {/* One click: does moving someone here notify them (WhatsApp + email)? */}
-                {stageNotify.hasMessage(column.id) && (
-                  <div className="mb-2.5 px-1">
+                {/* One slim line: the notify switch (does moving someone here notify them,
+                    WhatsApp + email?) and what this stage means — full text on hover. */}
+                <div className="mb-1.5 px-1 flex items-start gap-1.5 min-w-0">
+                  {stageNotify.hasMessage(column.id) && (
                     <StageNotifyToggle
                       stage={column.id}
                       muted={stageNotify.isMuted(column.id)}
                       saving={stageNotify.saving === column.id}
                       onToggle={stageNotify.toggle}
                     />
-                  </div>
-                )}
+                  )}
+                  <p className="min-w-0 truncate py-0.5 text-[9px] lg:text-[10px] text-slate-400 leading-snug" title={STAGE_INFO[column.id]}>
+                    {STAGE_INFO[column.id]}
+                  </p>
+                </div>
 
                 <Droppable droppableId={column.id}>
                   {(provided, snapshot) => (
                     <div
                       ref={provided.innerRef}
                       {...provided.droppableProps}
-                      className={`flex-1 overflow-y-auto p-2 lg:p-3 min-h-[150px] rounded-2xl lg:rounded-3xl transition-all duration-300 ${
+                      className={`flex-1 overflow-y-auto p-1.5 lg:p-2 min-h-[120px] rounded-2xl transition-all duration-300 ${
                         snapshot.isDraggingOver ? 'bg-violet-50/50 border-2 border-dashed border-violet-300' : 'bg-slate-100/50 border-2 border-transparent'
                       }`}
                     >
@@ -746,12 +784,12 @@ export default function KanbanBoard() {
                                 {...provided.draggableProps}
                                 {...provided.dragHandleProps}
                                 onClick={() => navigate(`/candidates/${item.candidateId}`)}
-                                className={`relative glass-card p-3 lg:p-5 rounded-xl lg:rounded-2xl mb-3 transition-all duration-300 cursor-pointer hover:ring-2 hover:ring-violet-300 ${
+                                className={`relative glass-card p-2.5 lg:p-3 rounded-xl mb-2 transition-all duration-300 cursor-pointer hover:ring-2 hover:ring-violet-300 ${
                                   snapshot.isDragging ? 'shadow-2xl ring-2 ring-violet-500 scale-105 rotate-2' : ''
                                 } ${isStale ? 'border-l-4 border-l-orange-500' : ''} ${isSelected ? 'ring-2 ring-violet-500 bg-violet-50/30' : ''}`}
                               >
                                 
-                                {/* Selection checkbox: generous hit area (~48px) with a clear
+                                {/* Selection checkbox: generous hit area (~44px) with a clear
                                     hover highlight so "select" is visually distinct from
                                     "open profile". mousedown is stopped so aiming at the
                                     checkbox never starts a card drag. */}
@@ -763,7 +801,7 @@ export default function KanbanBoard() {
                                   onMouseDown={(e) => e.stopPropagation()}
                                   onTouchStart={(e) => e.stopPropagation()}
                                   title={isSelected ? 'Quitar selección' : 'Seleccionar candidato'}
-                                  className="absolute top-0 right-0 z-10 p-3 cursor-pointer rounded-tr-xl rounded-bl-2xl hover:bg-violet-100/80 transition-colors group/check"
+                                  className="absolute top-0 right-0 z-10 p-2.5 cursor-pointer rounded-tr-xl rounded-bl-2xl hover:bg-violet-100/80 transition-colors group/check"
                                 >
                                   <div className={`w-6 h-6 rounded-md border-2 flex items-center justify-center transition-all shadow-sm ${
                                     isSelected
@@ -774,15 +812,15 @@ export default function KanbanBoard() {
                                   </div>
                                 </div>
 
-                                <div className="flex justify-between items-start gap-2 mb-2 pr-10">
-                                  <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="flex justify-between items-start gap-2 pr-9">
+                                  <div className="flex items-center gap-2 min-w-0">
                                     <CandidateAvatar
                                       photoUrl={candidates[item.candidateId]?.photoUrl}
                                       name={item.candidateName}
-                                      size={40}
+                                      size={36}
                                       className="ring-2 ring-white shadow-sm"
                                     />
-                                    <h4 className="text-sm lg:text-base font-display font-bold text-slate-900 line-clamp-2 leading-tight">{item.candidateName}</h4>
+                                    <h4 className="text-sm font-display font-bold text-slate-900 line-clamp-2 leading-tight">{item.candidateName}</h4>
                                   </div>
                                   {item.scoreSummary && (
                                     <span className="flex items-center text-[10px] font-black text-white bg-gradient-ai px-1.5 py-0.5 rounded-md shadow-sm">
@@ -792,7 +830,7 @@ export default function KanbanBoard() {
                                   )}
                                 </div>
                                 
-                                <div className="flex items-center justify-between mt-3 pt-3 border-t border-slate-100">
+                                <div className="flex items-center justify-between mt-2 pt-2 border-t border-slate-100">
                                   <div className="flex space-x-1.5 items-center">
                                     {item.recommendation === 'advance' && <span className="w-2 h-2 rounded-full bg-emerald-500" title="Recomendado"></span>}
                                     {item.recommendation === 'review' && <span className="w-2 h-2 rounded-full bg-amber-500" title="Revisar"></span>}
@@ -866,7 +904,7 @@ export default function KanbanBoard() {
                                       }}
                                       disabled={!cvUrl}
                                       title={cvUrl ? 'Ver el currículum en una ventana' : 'CV aún no disponible'}
-                                      className={`mt-3 w-full flex items-center justify-center gap-1.5 text-xs font-bold py-2 rounded-lg transition-colors ${
+                                      className={`mt-2 w-full flex items-center justify-center gap-1.5 text-xs font-bold py-1.5 rounded-lg transition-colors ${
                                         cvUrl
                                           ? 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
                                           : 'bg-slate-100 text-slate-400 cursor-not-allowed'
