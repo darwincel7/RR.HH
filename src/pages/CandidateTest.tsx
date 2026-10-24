@@ -7,6 +7,7 @@ import SubmitOverlay from '../components/SubmitOverlay';
 import { masterTestQuestions, Question } from '../data/testQuestions';
 import { shortNameOf } from '../lib/personName';
 import { isPastedInsert } from '../lib/testIntegrity';
+import type { StationEmbed } from '../lib/stations';
 
 // The test is graded on spelling too: the field must not fix it for the candidate. These
 // switch off the browser's checker and, on most phone keyboards, autocorrect and
@@ -23,20 +24,6 @@ interface IntegrityState {
   startedAt: number;
   /** When the screen stopped being visible (0 = it is visible). */
   hiddenAt: number;
-}
-
-/**
- * On a company phone (station mode, src/pages/Station.tsx) the test is embedded: its
- * application comes from the phone's assignment instead of the URL — the candidate never
- * sees a link — and it reports how it goes so the panel can follow it live.
- */
-export interface StationEmbed {
-  stationId: string;
-  name: string;
-  /** The question on screen (-1 = the cover) and the exits so far, whenever they change. */
-  onProgress: (p: { index: number; total: number; exits: number }) => void;
-  /** Sent now, or found already answered when it opened. */
-  onDone: (info: { firstName: string; alreadyAnswered: boolean }) => void;
 }
 
 export default function CandidateTest({ applicationId: embeddedId, station }: { applicationId?: string; station?: StationEmbed } = {}) {

@@ -111,6 +111,8 @@ export const personalitySubmitSchema = z.object({
   applicationId: docIdField('applicationId inválido'),
   answers: answersField,
   attemptId: lenientString(),
+  // Answered on a company phone (station mode): the server checks it was assigned there.
+  stationId: optionalDocId(),
 });
 
 // ---------------------------------------------------------------------------
@@ -118,6 +120,9 @@ export const personalitySubmitSchema = z.object({
 // ---------------------------------------------------------------------------
 
 const stationIdField = () => docIdField('Este teléfono no está vinculado.');
+/** Which test the phone is on. Phones running the page from before there were two
+ * kinds send none: theirs is the situational test. */
+const stationKindField = () => z.enum(['test', 'personality']).catch('test').default('test');
 const intIn = (min: number, max: number, msg: string) =>
   z.number({ error: msg }).int({ error: msg }).min(min, { error: msg }).max(max, { error: msg });
 
@@ -135,6 +140,7 @@ export const stationPollSchema = z.object({ stationId: stationIdField() });
 export const stationProgressSchema = z.object({
   stationId: stationIdField(),
   applicationId: docIdField('applicationId inválido'),
+  kind: stationKindField(),
   index: intIn(-1, 1000, 'Avance inválido'),
   total: intIn(0, 1000, 'Avance inválido'),
   exits: intIn(0, 10_000, 'Avance inválido'),
@@ -144,6 +150,7 @@ export const stationProgressSchema = z.object({
 export const stationReleaseSchema = z.object({
   stationId: stationIdField(),
   applicationId: docIdField('applicationId inválido'),
+  kind: stationKindField(),
 });
 
 // ---------------------------------------------------------------------------

@@ -260,6 +260,23 @@ describe('modo estación (teléfonos de la empresa)', () => {
     }
   });
 
+  it('el tipo de test: situacional si no lo dicen (teléfonos con la página anterior)', () => {
+    const base = { stationId: 's1', applicationId: 'app1', index: 0, total: 20, exits: 0 };
+    for (const [kind, expected] of [[undefined, 'test'], ['personality', 'personality'], ['otro', 'test']] as const) {
+      const r = stationProgressSchema.safeParse({ ...base, kind });
+      if (r.success) expect(r.data.kind).toBe(expected);
+      const rel = stationReleaseSchema.safeParse({ stationId: 's1', applicationId: 'app1', kind });
+      if (rel.success) expect(rel.data.kind).toBe(expected);
+    }
+  });
+
+  it('el test de personalidad también acepta el teléfono', () => {
+    const r = personalitySubmitSchema.safeParse({ applicationId: 'app1', answers: { q: 3 }, stationId: 's1' });
+    if (r.success) expect(r.data.stationId).toBe('s1');
+    const none = personalitySubmitSchema.safeParse({ applicationId: 'app1', answers: { q: 3 } });
+    if (none.success) expect(none.data.stationId).toBe('');
+  });
+
   it('el envío del test acepta el teléfono, y descarta uno que no es un id', () => {
     const base = { applicationId: 'app1', answers: { q: 'a' } };
     const ok = evaluateTestSchema.safeParse({ ...base, stationId: 's1' });

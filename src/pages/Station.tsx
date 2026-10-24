@@ -1,13 +1,15 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { Building2, CheckCircle, Link2, Loader2, Smartphone, WifiOff, AlertTriangle } from 'lucide-react';
 import CandidateTest from './CandidateTest';
-import { STATION_POLL_MS, isPairingCode } from '../lib/stations';
+import PersonalityTest from './PersonalityTest';
+import { STATION_POLL_MS, isPairingCode, type StationEmbed, type StationKind } from '../lib/stations';
 
 /**
  * Modo estación, en el teléfono de la empresa (src/lib/stations.ts).
  *
  * Se vincula una vez con el código del panel y desde entonces espera: cada pocos segundos
- * le pregunta al servidor si tiene un test asignado y, en cuanto lo tiene, lo abre solo
+ * le pregunta al servidor si tiene un test asignado —el situacional o el de personalidad—
+ * y, en cuanto lo tiene, lo abre solo
  * (el candidato nunca ve un link). Al terminar despide al candidato y vuelve a esperar.
  * Su llave —el id secreto de su documento— vive en este navegador.
  */
@@ -16,7 +18,9 @@ const STORAGE_KEY = 'aura_station';
 const DONE_SCREEN_MS = 8000;
 
 interface Linked { stationId: string; name: string }
-interface Assignment { applicationId: string; assignedAt: number }
+interface Assignment { applicationId: string; kind: StationKind; assignedAt: number }
+/** Una misma postulación puede tener los dos tests: el tipo es parte de la identidad. */
+const keyOf = (a: Assignment | null) => (a ? `${a.kind}:${a.applicationId}` : '');
 interface Company { name: string; logoUrl: string }
 
 function readLinked(): Linked | null {
@@ -245,7 +249,7 @@ function StationRunner({ linked, onUnlinked }: { linked: Linked; onUnlinked: () 
   const [online, setOnline] = useState(true);
   const [notice, setNotice] = useState('');
   const [done, setDone] = useState<{ firstName: string; until: number } | null>(null);
-  // Assignments that already ended here (application → assignedAt): if the server still
+  // Assignments that already ended here (kind:application → assignedAt): if the server still
   // lists one for a moment, it is not opened again — the server frees the phone when the
   // answers arrive. A re-send of the same test is a new assignment (new assignedAt).
   const finished = useRef(new Map<string, number>());
@@ -265,19 +269,23 @@ function StationRunner({ linked, onUnlinked }: { linked: Linked; onUnlinked: () 
       if (data.name) setName(data.name);
       if (data.company) setCompany({ name: data.company.name || '', logoUrl: data.company.logoUrl || '' });
       const listed: Assignment | null = data.assignment?.applicationId
-        ? { applicationId: data.assignment.applicationId, assignedAt: Number(data.assignment.assignedAt) || 0 }
+        ? {
+          applicationId: data.assignment.applicationId,
+          kind: data.assignment.kind === 'personality' ? 'personality' : 'test',
+          assignedAt: Number(data.assignment.assignedAt) || 0,
+        }
         : null;
       // Forget finished ones the server no longer lists.
-      for (const [id, at] of finished.current) {
-        if (listed?.applicationId !== id || listed.assignedAt !== at) finished.current.delete(id);
+      for (const [key, at] of finished.current) {
+        if (keyOf(listed) !== key || listed?.assignedAt !== at) finished.current.delete(key);
       }
-      const next = listed && finished.current.get(listed.applicationId) !== listed.assignedAt ? listed : null;
+      const next = listed && finished.current.get(keyOf(listed)) !== listed.assignedAt ? listed : null;
       const prev = current.current;
-      if (prev && (!next || next.applicationId !== prev.applicationId)) {
+      if (prev && keyOf(next) !== keyOf(prev)) {
         setNotice('El test de ese candidato se canceló o se pasó a otro teléfono.');
       }
-      if (next && (!prev || next.applicationId !== prev.applicationId)) setNotice('');
-      if (next?.applicationId !== prev?.applicationId || next?.assignedAt !== prev?.assignedAt) {
+      if (next && keyOf(next) !== keyOf(prev)) setNotice('');
+      if (keyOf(next) !== keyOf(prev) || next?.assignedAt !== prev?.assignedAt) {
         current.current = next;
         setAssignment(next);
       }
@@ -303,33 +311,33 @@ function StationRunner({ linked, onUnlinked }: { linked: Linked; onUnlinked: () 
   if (done) return <DoneScreen name={name} company={company} firstName={done.firstName} until={done.until} />;
 
   if (assignment) {
-    const applicationId = assignment.applicationId;
+    const { applicationId, kind } = assignment;
+    const embed: StationEmbed = {
+      stationId: linked.stationId,
+      name,
+      onProgress: p => {
+        const key = `${keyOf(assignment)}:${p.index}:${p.total}:${p.exits}`;
+        if (key === lastProgress.current) return;
+        lastProgress.current = key;
+        postJson('/api/public/station/progress', { stationId: linked.stationId, applicationId, kind, ...p }).catch(() => { /* el próximo avance lo repone */ });
+      },
+      onDone: ({ firstName, alreadyAnswered }) => {
+        finished.current.set(keyOf(assignment), assignment.assignedAt);
+        current.current = null;
+        setAssignment(null);
+        setNotice('');
+        setDone({ firstName, until: Date.now() + DONE_SCREEN_MS });
+        if (alreadyAnswered) {
+          postJson('/api/public/station/release', { stationId: linked.stationId, applicationId, kind }).catch(() => { /* lo libera el panel */ });
+        }
+      },
+    };
     // A new assignment (even of the same test, re-sent) starts the page from scratch.
     return (
-      <Fragment key={`${applicationId}:${assignment.assignedAt}`}>
-      <CandidateTest
-        applicationId={applicationId}
-        station={{
-          stationId: linked.stationId,
-          name,
-          onProgress: p => {
-            const key = `${applicationId}:${p.index}:${p.total}:${p.exits}`;
-            if (key === lastProgress.current) return;
-            lastProgress.current = key;
-            postJson('/api/public/station/progress', { stationId: linked.stationId, applicationId, ...p }).catch(() => { /* el próximo avance lo repone */ });
-          },
-          onDone: ({ firstName, alreadyAnswered }) => {
-            finished.current.set(applicationId, assignment.assignedAt);
-            current.current = null;
-            setAssignment(null);
-            setNotice('');
-            setDone({ firstName, until: Date.now() + DONE_SCREEN_MS });
-            if (alreadyAnswered) {
-              postJson('/api/public/station/release', { stationId: linked.stationId, applicationId }).catch(() => { /* lo libera el panel */ });
-            }
-          },
-        }}
-      />
+      <Fragment key={`${keyOf(assignment)}:${assignment.assignedAt}`}>
+        {kind === 'personality'
+          ? <PersonalityTest applicationId={applicationId} station={embed} />
+          : <CandidateTest applicationId={applicationId} station={embed} />}
       </Fragment>
     );
   }

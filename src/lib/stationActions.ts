@@ -1,10 +1,10 @@
 import {
-  collection, deleteDoc, doc, onSnapshot, runTransaction, serverTimestamp, setDoc,
+  collection, deleteDoc, doc, getDocs, onSnapshot, query, runTransaction, serverTimestamp, setDoc, where,
 } from 'firebase/firestore';
 import { db } from './firebase';
 import {
-  STATIONS, STATION_CODES, PAIRING_CODE_TTL_MS, assignProblem, assignedApplicationId, newPairingCode,
-  type Station,
+  STATIONS, STATION_CODES, PAIRING_CODE_TTL_MS, assignProblem, holds, newPairingCode,
+  type Station, type StationKind,
 } from './stations';
 
 /**
@@ -26,14 +26,16 @@ export function watchStations(onChange: (stations: Station[]) => void, onError?:
 }
 
 /**
- * Manda el test de una postulación a un teléfono. Si ya estaba en otro (`fromStationId`),
- * se lo quita en la misma transacción: "pasar a otro teléfono". Un teléfono ocupado con
- * otra persona lo rechaza, aunque la lista de la pantalla estuviera vieja.
+ * Manda un test de una postulación (situacional o de personalidad) a un teléfono. Si ya
+ * estaba en otro (`fromStationId`), se lo quita en la misma transacción: "pasar a otro
+ * teléfono". Un teléfono ocupado con otra cosa lo rechaza, aunque la lista de la pantalla
+ * estuviera vieja. Reenviarlo al mismo teléfono lo vuelve a abrir desde cero allí.
  */
 export async function sendTestToStation(opts: {
   stationId: string;
   fromStationId?: string;
   applicationId: string;
+  kind: StationKind;
   candidateId: string;
   candidateName: string;
   by: string;
@@ -43,9 +45,9 @@ export async function sendTestToStation(opts: {
   await runTransaction(db, async tx => {
     const snap = await tx.get(target);
     const fromSnap = from ? await tx.get(from) : null;
-    const problem = assignProblem(snap.exists() ? (snap.data() as any) : null, opts.applicationId);
+    const problem = assignProblem(snap.exists() ? (snap.data() as any) : null, opts.applicationId, opts.kind);
     if (problem) throw new Error(problem);
-    if (from && fromSnap?.exists() && assignedApplicationId(fromSnap.data() as any) === opts.applicationId) {
+    if (from && fromSnap?.exists() && holds(fromSnap.data() as any, opts.applicationId, opts.kind)) {
       tx.update(from, { assignment: null });
     }
     tx.update(target, {
@@ -53,7 +55,7 @@ export async function sendTestToStation(opts: {
         applicationId: opts.applicationId,
         candidateId: opts.candidateId,
         candidateName: opts.candidateName,
-        kind: 'test',
+        kind: opts.kind,
         assignedAt: serverTimestamp(),
         assignedBy: opts.by,
       },
@@ -61,16 +63,30 @@ export async function sendTestToStation(opts: {
   });
 }
 
-/** Deja libre el teléfono. Con `applicationId`, solo si sigue teniendo ESE test (no se
- * cancela el del candidato siguiente por una pantalla vieja). */
-export async function clearStation(stationId: string, applicationId?: string): Promise<void> {
+/** Deja libre el teléfono. Con `only`, solo si sigue teniendo ESE test (no se cancela el
+ * del candidato siguiente por una pantalla vieja). */
+export async function clearStation(stationId: string, only?: { applicationId: string; kind: StationKind }): Promise<void> {
   const ref = doc(db, STATIONS, stationId);
   await runTransaction(db, async tx => {
     const snap = await tx.get(ref);
     if (!snap.exists()) return;
-    if (applicationId && assignedApplicationId(snap.data() as any) !== applicationId) return;
+    if (only && !holds(snap.data() as any, only.applicationId, only.kind)) return;
     tx.update(ref, { assignment: null });
   });
+}
+
+/**
+ * El test cambió fuera del teléfono (la entrevistadora lo reinició o lo canceló desde el
+ * perfil): el teléfono que lo tenga lo vuelve a abrir desde cero (`resend`) o queda libre
+ * (`clear`). Sin teléfono, no hace nada.
+ */
+export async function syncStationsFor(applicationId: string, kind: StationKind, mode: 'resend' | 'clear'): Promise<void> {
+  const snap = await getDocs(query(collection(db, STATIONS), where('assignment.applicationId', '==', applicationId)));
+  await Promise.all(snap.docs.map(d => runTransaction(db, async tx => {
+    const cur = await tx.get(d.ref);
+    if (!cur.exists() || !holds(cur.data() as any, applicationId, kind)) return;
+    tx.update(d.ref, mode === 'clear' ? { assignment: null } : { 'assignment.assignedAt': serverTimestamp(), 'assignment.progress': null });
+  })));
 }
 
 /** El teléfono deja de estar vinculado: su próxima consulta lo devuelve a "Vincular". */

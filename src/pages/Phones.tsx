@@ -6,7 +6,8 @@ import {
 import { useAuth } from '../contexts/AuthContext';
 import { watchStations, clearStation, unlinkStation, createPairingCode, discardPairingCode } from '../lib/stationActions';
 import {
-  stationState, assignedApplicationId, progressLabel, doneTodayOf, formatPairingCode, toMs, type Station,
+  stationState, assignedApplicationId, assignmentKind, progressLabel, doneTodayOf, formatPairingCode, toMs,
+  KIND_LABEL, type Station,
 } from '../lib/stations';
 
 /**
@@ -148,7 +149,7 @@ function StationCard({ station, now }: { station: Station; now: number }) {
             {a?.candidateId
               ? <Link to={`/candidates/${a.candidateId}`} className="font-bold text-violet-700 hover:underline">{a.candidateName || 'Candidato'}</Link>
               : <span className="font-bold">{a?.candidateName || 'Candidato'}</span>}
-            {' · Test situacional'}{progress ? ` · ${progress}` : ' · aún no lo empieza'}
+            {` · ${KIND_LABEL[assignmentKind(station)]}`}{progress ? ` · ${progress}` : ' · aún no lo empieza'}
             {exits > 0 && <span className="text-amber-700"> · salió {exits} {exits === 1 ? 'vez' : 'veces'}</span>}
           </p>
         ) : (
@@ -197,7 +198,7 @@ export default function Phones() {
           <Smartphone className="w-7 h-7 mr-2 text-violet-600" /> Teléfonos de la empresa
         </h1>
         <p className="text-sm text-slate-500 mt-1">
-          Los teléfonos donde los candidatos responden el test situacional. Desde el perfil del candidato, <b>Enviar a un teléfono</b> se lo abre solo, sin pasarle ningún link.
+          Los teléfonos donde los candidatos responden el test situacional y el de personalidad. Desde el perfil del candidato, <b>Enviar a un teléfono</b> se lo abre solo, sin pasarle ningún link.
         </p>
       </div>
 

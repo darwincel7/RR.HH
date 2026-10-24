@@ -7,8 +7,9 @@
  * documento de `stations` cuyo id es secreto: es la llave del teléfono, la guarda su
  * navegador y solo el equipo la ve. El teléfono nunca toca Firestore: cada pocos
  * segundos le pregunta al servidor si tiene un test asignado y le informa por dónde va.
- * Desde el perfil, la reclutadora le asigna el test de un candidato (`assignment`); el
- * teléfono lo abre solo, sin link a la vista, y al enviarlo el servidor lo deja libre.
+ * Desde el perfil, la reclutadora le asigna el test de un candidato (`assignment`): el
+ * situacional o el de personalidad (`kind`). El teléfono lo abre solo, sin link a la
+ * vista, y al enviarlo el servidor lo deja libre.
  *
  * Aquí viven las reglas que comparten el servidor, el teléfono y el panel; las que
  * deciden una escritura son funciones puras (se prueban sin base de datos).
@@ -26,6 +27,12 @@ export const STATION_SEEN_EVERY_MS = 30_000;
 export const STATION_OFFLINE_AFTER_MS = 2 * 60_000;
 export const STATION_NAME_MAX = 40;
 
+/** Qué test lleva el teléfono. Un teléfono con una asignación anterior a que existieran
+ * los dos tipos (sin `kind`) lleva el situacional. */
+export type StationKind = 'test' | 'personality';
+export const STATION_KINDS: readonly StationKind[] = ['test', 'personality'];
+export const KIND_LABEL: Record<StationKind, string> = { test: 'Test situacional', personality: 'Test de personalidad' };
+
 export interface StationProgress {
   /** Pregunta en pantalla (0 = la primera); -1 mientras está en la portada. */
   index: number;
@@ -41,7 +48,7 @@ export interface StationAssignment {
   /** Para el panel (el teléfono no los recibe: el test pide su propio nombre corto). */
   candidateId?: string;
   candidateName: string;
-  kind: 'test';
+  kind: StationKind;
   assignedAt: unknown;
   assignedBy: string;
   progress?: StationProgress;
@@ -59,6 +66,20 @@ export interface Station {
   doneToday?: number;
 }
 
+/**
+ * En el teléfono, el test va embebido (src/pages/Station.tsx): su postulación viene de la
+ * asignación y no de la URL —el candidato nunca ve un link— y avisa cómo va para que el
+ * panel lo siga en vivo.
+ */
+export interface StationEmbed {
+  stationId: string;
+  name: string;
+  /** La pregunta en pantalla (-1 = la portada) y las salidas hasta ahora, cada vez que cambian. */
+  onProgress: (p: { index: number; total: number; exits: number }) => void;
+  /** Enviado ahora, o ya estaba respondido al abrirlo. */
+  onDone: (info: { firstName: string; alreadyAnswered: boolean }) => void;
+}
+
 /** Firestore Timestamp, Date, número o ISO → milisegundos (0 si no hay). */
 export function toMs(t: unknown): number {
   if (!t) return 0;
@@ -74,6 +95,17 @@ export function toMs(t: unknown): number {
 export function assignedApplicationId(station: Partial<Station> | null | undefined): string {
   const id = station?.assignment?.applicationId;
   return typeof id === 'string' ? id : '';
+}
+
+/** El tipo de test que tiene asignado (el situacional si la asignación no lo dice). */
+export function assignmentKind(station: Partial<Station> | null | undefined): StationKind {
+  return station?.assignment?.kind === 'personality' ? 'personality' : 'test';
+}
+
+/** ¿Tiene asignado justo ESTE test (postulación y tipo)? Una misma postulación puede tener
+ * el situacional en un teléfono y el de personalidad en otro. */
+export function holds(station: Partial<Station> | null | undefined, applicationId: string, kind: StationKind): boolean {
+  return !!applicationId && assignedApplicationId(station) === applicationId && assignmentKind(station) === kind;
 }
 
 export type StationState = 'busy' | 'free' | 'offline';
@@ -126,7 +158,9 @@ export function pollView(station: Partial<Station>) {
   const applicationId = assignedApplicationId(station);
   return {
     name: normalizeStationName(station.name),
-    assignment: applicationId ? { applicationId, assignedAt: toMs(station.assignment?.assignedAt) } : null,
+    assignment: applicationId
+      ? { applicationId, kind: assignmentKind(station), assignedAt: toMs(station.assignment?.assignedAt) }
+      : null,
   };
 }
 
@@ -139,8 +173,8 @@ export interface ProgressReport { index: number; total: number; exits: number }
 
 /** El avance que informa el teléfono, solo si sigue siendo el test que tiene asignado
  * (si la reclutadora lo canceló o lo pasó a otro teléfono, ya no le toca escribir). */
-export function decideProgress(station: Partial<Station> | null, applicationId: string, p: ProgressReport, now: Date) {
-  if (!station || assignedApplicationId(station) !== applicationId) return null;
+export function decideProgress(station: Partial<Station> | null, applicationId: string, kind: StationKind, p: ProgressReport, now: Date) {
+  if (!station || !holds(station, applicationId, kind)) return null;
   const confirmed = p.index >= 0 && !station.assignment?.progress?.confirmedAt;
   return {
     lastSeenAt: now,
@@ -151,8 +185,8 @@ export function decideProgress(station: Partial<Station> | null, applicationId: 
 }
 
 /** Test enviado (o ya respondido): el teléfono queda libre y se cuenta en el día. */
-export function decideFinish(station: Partial<Station> | null, applicationId: string, now: Date) {
-  if (!station || assignedApplicationId(station) !== applicationId) return null;
+export function decideFinish(station: Partial<Station> | null, applicationId: string, kind: StationKind, now: Date) {
+  if (!station || !holds(station, applicationId, kind)) return null;
   const today = dayKey(now.getTime());
   return {
     assignment: null,
@@ -167,12 +201,13 @@ export function decideFinish(station: Partial<Station> | null, applicationId: st
 // Panel
 // ---------------------------------------------------------------------------
 
-/** ¿Se puede mandar el test de esta postulación a este teléfono? El motivo si no. */
-export function assignProblem(target: Partial<Station> | null, applicationId: string): string | null {
+/** ¿Se puede mandar este test a este teléfono? El motivo si no. */
+export function assignProblem(target: Partial<Station> | null, applicationId: string, kind: StationKind): string | null {
   if (!target) return 'Ese teléfono ya no está vinculado.';
-  const current = assignedApplicationId(target);
-  if (current && current !== applicationId) return 'Ese teléfono está ocupado con otro candidato.';
-  return null;
+  if (!assignedApplicationId(target) || holds(target, applicationId, kind)) return null;
+  return assignedApplicationId(target) === applicationId
+    ? `Ese teléfono está ocupado con el ${KIND_LABEL[assignmentKind(target)].toLowerCase()} de este candidato.`
+    : 'Ese teléfono está ocupado con otro candidato.';
 }
 
 /** "Pregunta 7 de 20", "En la portada (confirmando su nombre)", o '' sin avance aún. */

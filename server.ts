@@ -56,7 +56,7 @@ import { resolvePersonalityTemplate, publicQuestions, checkAnswers, scorePersona
 import { firstNameOf, shortNameOf } from './src/lib/personName';
 import {
   STATIONS, STATION_CODES, pairingCodeProblem, pollView, needsSeenWrite, decideProgress, decideFinish,
-  assignedApplicationId, normalizeStationName,
+  holds, normalizeStationName, type StationKind,
 } from './src/lib/stations';
 import { buildPersonalityEvidence, buildPersonalityPrompt, normalizePersonalityInterpretation } from './serverPersonalityEval';
 import {
@@ -2410,6 +2410,18 @@ async function startServer() {
   // global settings are cached; only the per-link application doc is read each time.
   let formSettingsCache: { company: any; forms: any; at: number } | null = null;
   const FORM_SETTINGS_TTL = 60_000;
+  /** The company phone (station mode) a test was answered on — only if that test really
+   * was assigned there; a stationId the candidate's page claims is not proof. */
+  const stationHolding = async (stationId: string, applicationId: string, kind: StationKind) => {
+    if (!stationId) return null;
+    const st = await db.getDocData(STATIONS, stationId).catch(() => null);
+    return st && holds(st, applicationId, kind) ? { id: stationId, name: normalizeStationName(st.name) } : null;
+  };
+  /** Test sent: the phone is free for the next candidate (it shows "¡Listo!" on its own). */
+  const releaseStation = (stationId: string, applicationId: string, kind: StationKind) =>
+    db.updateDocIf(STATIONS, stationId, cur => decideFinish(cur, applicationId, kind, new Date()))
+      .catch(e => console.warn('[station] liberar:', String(e?.message || e).slice(0, 120)));
+
   const getFormSettings = async () => {
     if (formSettingsCache && Date.now() - formSettingsCache.at < FORM_SETTINGS_TTL) return formSettingsCache;
     const [company, forms] = await Promise.all([
@@ -3737,10 +3749,7 @@ async function startServer() {
       const forceTest = body.force && isRecruiterCaller;
       if (application.testResults && !forceTest) {
         // Ya respondido: si un teléfono de la empresa lo seguía teniendo asignado, se libera.
-        if (body.stationId) {
-          await db.updateDocIf(STATIONS, body.stationId, cur => decideFinish(cur, applicationId, new Date()))
-            .catch(e => console.warn('[station] liberar:', String(e?.message || e).slice(0, 120)));
-        }
+        if (body.stationId) await releaseStation(body.stationId, applicationId, 'test');
         return res.json(isRecruiterCaller
           ? { ...application.testResults, alreadyCompleted: true }
           : { success: true, alreadyCompleted: true });
@@ -3748,13 +3757,7 @@ async function startServer() {
 
       if (!isRecruiterCaller) {
         // Answered on a company phone: recorded only if the test really was assigned there.
-        let station: { id: string; name: string } | null = null;
-        if (body.stationId) {
-          const st = await db.getDocData(STATIONS, body.stationId).catch(() => null);
-          if (st && assignedApplicationId(st) === applicationId) {
-            station = { id: body.stationId, name: normalizeStationName(st.name) };
-          }
-        }
+        const station = await stationHolding(body.stationId, applicationId, 'test');
         // Answers saved FIRST; the AI grades afterwards and can never fail the
         // candidate's submission (see /api/score-stage2).
         await db.setDocData('applications', applicationId, {
@@ -3770,11 +3773,7 @@ async function startServer() {
           testScoringStatus: 'pending',
           testScoringAttempts: 0,
         });
-        if (station) {
-          // The phone is free for the next candidate (it shows "¡Listo!" on its own).
-          await db.updateDocIf(STATIONS, station.id, cur => decideFinish(cur, applicationId, new Date()))
-            .catch(e => console.warn('[station] liberar:', String(e?.message || e).slice(0, 120)));
-        }
+        if (station) await releaseStation(station.id, applicationId, 'test');
         evaluateTestApplication(applicationId, { questions, answers })
           .catch(e => console.warn(`[test] evaluación IA pendiente para ${applicationId}:`, String(e?.message || e).slice(0, 160)));
         return res.json({ success: true });
@@ -3950,7 +3949,7 @@ async function startServer() {
       const body = validate(stationProgressSchema, req, res);
       if (!body) return;
       const wrote = await db.updateDocIf(STATIONS, body.stationId,
-        cur => decideProgress(cur, body.applicationId, body, new Date()));
+        cur => decideProgress(cur, body.applicationId, body.kind, body, new Date()));
       res.json({ ok: wrote });
     } catch (err) {
       console.error('[station] progress:', (err as any)?.message || err);
@@ -3965,9 +3964,12 @@ async function startServer() {
       const body = validate(stationReleaseSchema, req, res);
       if (!body) return;
       const application = await db.getDocData('applications', body.applicationId);
-      if (!application?.testResults) return res.status(409).json({ error: 'Este test aún no está respondido.' });
+      const answered = body.kind === 'personality'
+        ? application?.personalityTest?.status === 'completed'
+        : !!application?.testResults;
+      if (!answered) return res.status(409).json({ error: 'Este test aún no está respondido.' });
       const wrote = await db.updateDocIf(STATIONS, body.stationId,
-        cur => decideFinish(cur, body.applicationId, new Date()));
+        cur => decideFinish(cur, body.applicationId, body.kind, new Date()));
       res.json({ ok: wrote });
     } catch (err) {
       console.error('[station] release:', (err as any)?.message || err);
@@ -4032,7 +4034,11 @@ async function startServer() {
       const application = await db.getDocData('applications', body.applicationId);
       if (!application) return res.status(404).json({ error: 'Postulación no encontrada' });
       const pt = application.personalityTest;
-      if (pt?.status === 'completed') return res.json({ success: true, alreadyCompleted: true });
+      if (pt?.status === 'completed') {
+        // Already answered: a company phone still holding it is freed.
+        if (body.stationId) await releaseStation(body.stationId, body.applicationId, 'personality');
+        return res.json({ success: true, alreadyCompleted: true });
+      }
       if (pt?.status !== 'open') {
         return res.status(409).json({ error: 'Este test no está habilitado. Pide a la entrevistadora que lo active.' });
       }
@@ -4043,14 +4049,18 @@ async function startServer() {
       const check = checkAnswers(tpl.questions, body.answers);
       if ('error' in check) return res.status(400).json({ error: check.error, missing: check.missing });
       const answers = check.answers;
+      const station = await stationHolding(body.stationId, body.applicationId, 'personality');
       await db.setDocData('applications', body.applicationId, {
         personalityTest: {
           status: 'completed',
           answers,
           results: scorePersonality(tpl, answers),
           completedAt: new Date(),
+          // "Respondido en Teléfono 2" in the profile.
+          ...(station ? { station } : {}),
         },
       });
+      if (station) await releaseStation(station.id, body.applicationId, 'personality');
       return res.json({ success: true });
     } catch (err) {
       console.error('[personality] error al guardar las respuestas:', (err as any)?.message || err);
