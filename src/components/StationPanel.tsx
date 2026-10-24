@@ -3,18 +3,51 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, ArrowRightLeft, Loader2, Send, ShieldAlert, ShieldCheck, Smartphone, X } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { watchStations, sendTestToStation, clearStation } from '../lib/stationActions';
-import { assignedApplicationId, stationState, progressLabel, toMs, type Station } from '../lib/stations';
+import { assignedApplicationId, holds, stationState, progressLabel, toMs, KIND_LABEL, type Station, type StationKind } from '../lib/stations';
 
 /**
- * El test situacional en los teléfonos de la empresa, desde el perfil (modo estación):
- * "Enviar a un teléfono" lo manda al que elijas y el teléfono lo abre solo; mientras lo
- * responde se ve en vivo dónde está y por qué pregunta va, y se puede pasar a otro
- * teléfono o cancelar. Solo mientras el test está pendiente.
+ * Un test en los teléfonos de la empresa, desde el perfil (modo estación): "Enviar a un
+ * teléfono" lo manda al que elijas y el teléfono lo abre solo; mientras lo responde se ve
+ * en vivo dónde está y por qué pregunta va, y se puede pasar a otro teléfono o cancelar.
+ * Sirve para el test situacional y para el de personalidad.
  */
 interface Props {
   application: { id: string; candidateId?: string };
   candidateName: string;
+  kind: StationKind;
+  /** Antes de enviar (p. ej. aplicar el test de personalidad): false = no enviar. */
+  prepare?: () => Promise<boolean>;
+  /** El color de la tarjeta donde va (situacional: violeta; personalidad: fucsia). */
+  accent?: 'violet' | 'fuchsia';
+  /** Avisa en qué teléfono está el test (o null), para que la tarjeta oculte lo que sobra. */
+  onPlacement?: (stationName: string | null) => void;
 }
+
+// Clases completas (Tailwind solo genera las que ve escritas).
+const ACCENTS = {
+  violet: {
+    button: 'bg-violet-600 hover:bg-violet-700',
+    box: 'bg-violet-50 border-violet-100',
+    title: 'text-violet-900',
+    text: 'text-violet-800',
+    soft: 'text-violet-700',
+    track: 'bg-violet-100',
+    bar: 'bg-violet-600',
+    link: 'text-violet-700',
+    spinner: 'text-violet-500',
+  },
+  fuchsia: {
+    button: 'bg-fuchsia-600 hover:bg-fuchsia-700',
+    box: 'bg-fuchsia-50 border-fuchsia-100',
+    title: 'text-fuchsia-900',
+    text: 'text-fuchsia-800',
+    soft: 'text-fuchsia-700',
+    track: 'bg-fuchsia-100',
+    bar: 'bg-fuchsia-600',
+    link: 'text-fuchsia-700',
+    spinner: 'text-fuchsia-500',
+  },
+} as const;
 
 const STATE_PILL = {
   free: { label: 'Libre', cls: 'bg-emerald-100 text-emerald-700' },
@@ -24,7 +57,8 @@ const STATE_PILL = {
 
 const fmtTime = (ms: number) => (ms ? new Date(ms).toLocaleTimeString('es-DO', { hour: 'numeric', minute: '2-digit' }) : '');
 
-export default function TestStationPanel({ application, candidateName }: Props) {
+export default function StationPanel({ application, candidateName, kind, prepare, accent = 'violet', onPlacement }: Props) {
+  const c = ACCENTS[accent];
   const { user } = useAuth();
   const [stations, setStations] = useState<Station[] | null>(null);
   const [loadError, setLoadError] = useState('');
@@ -40,17 +74,21 @@ export default function TestStationPanel({ application, candidateName }: Props) 
     return () => window.clearInterval(t);
   }, []);
 
-  const here = stations?.find(s => assignedApplicationId(s) === application.id) || null;
+  const here = stations?.find(s => holds(s, application.id, kind)) || null;
+  const hereName = here?.name ?? null;
+  useEffect(() => { onPlacement?.(hereName); }, [hereName, onPlacement]);
   const by = user?.displayName || user?.email || '';
 
   const send = async (stationId: string) => {
     setBusy(stationId);
     setError('');
     try {
+      if (prepare && !(await prepare())) return;
       await sendTestToStation({
         stationId,
         fromStationId: here?.id,
         applicationId: application.id,
+        kind,
         candidateId: application.candidateId || '',
         candidateName,
         by,
@@ -64,11 +102,11 @@ export default function TestStationPanel({ application, candidateName }: Props) 
   };
 
   const cancel = async () => {
-    if (!here || !window.confirm(`¿Cancelar el test en ${here.name}? El teléfono vuelve a esperar candidato.`)) return;
+    if (!here || !window.confirm(`¿Quitar el ${KIND_LABEL[kind].toLowerCase()} de ${here.name}? El teléfono vuelve a esperar candidato.`)) return;
     setBusy('cancel');
     setError('');
     try {
-      await clearStation(here.id, application.id);
+      await clearStation(here.id, { applicationId: application.id, kind });
     } catch {
       setError('No se pudo cancelar. Inténtalo de nuevo.');
     } finally {
@@ -77,7 +115,7 @@ export default function TestStationPanel({ application, candidateName }: Props) 
   };
 
   if (loadError) return <p className="text-[11px] text-rose-700">{loadError}</p>;
-  if (!stations) return <Loader2 className="w-4 h-4 animate-spin text-violet-500" />;
+  if (!stations) return <Loader2 className={`w-4 h-4 animate-spin ${c.spinner}`} />;
 
   const progress = here?.assignment?.progress;
   const picker = picking && (
@@ -87,17 +125,17 @@ export default function TestStationPanel({ application, candidateName }: Props) 
       </p>
       {stations.length === 0 && (
         <p className="text-xs text-slate-500 px-2 pb-2">
-          Aún no hay teléfonos vinculados. <Link to="/phones" className="font-bold text-violet-700 hover:underline">Vincula uno en Teléfonos</Link>.
+          Aún no hay teléfonos vinculados. <Link to="/phones" className={`font-bold ${c.link} hover:underline`}>Vincula uno en Teléfonos</Link>.
         </p>
       )}
       {stations.map(s => {
         const state = stationState(s, now);
         const mine = s.id === here?.id;
-        const otherApp = assignedApplicationId(s) && !mine;
+        const otherApp = !!assignedApplicationId(s) && !mine;
         const detail = mine
           ? 'Aquí está ahora'
           : otherApp
-            ? `${s.assignment?.candidateName || 'Otro candidato'} está respondiendo`
+            ? `${s.assignment?.candidateName || 'Otro candidato'} está respondiendo${s.assignment?.kind === 'personality' ? ' el de personalidad' : ''}`
             : state === 'offline'
               ? `Sin conexión${toMs(s.lastSeenAt) ? ` desde las ${fmtTime(toMs(s.lastSeenAt))}` : ''}: lo abrirá al reconectarse`
               : 'Esperando candidato';
@@ -115,7 +153,7 @@ export default function TestStationPanel({ application, candidateName }: Props) 
               <button
                 onClick={() => send(s.id)}
                 disabled={!!busy}
-                className={`shrink-0 text-[11px] font-bold px-2.5 py-1.5 rounded-lg flex items-center disabled:opacity-50 ${state === 'free' ? 'bg-violet-600 text-white hover:bg-violet-700 shadow' : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'}`}
+                className={`shrink-0 text-[11px] font-bold px-2.5 py-1.5 rounded-lg flex items-center disabled:opacity-50 ${state === 'free' ? `${c.button} text-white shadow` : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-50'}`}
               >
                 {busy === s.id ? <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Send className="w-3.5 h-3.5 mr-1" />}
                 {here ? 'Pasar aquí' : 'Enviar'}
@@ -133,27 +171,28 @@ export default function TestStationPanel({ application, candidateName }: Props) 
     const state = stationState(here, now);
     return (
       <div className="w-full text-left">
-        <div className="bg-violet-50 border border-violet-100 rounded-2xl p-3 lg:p-4">
-          <p className="text-xs lg:text-sm font-bold text-violet-900 flex items-center">
+        <div className={`${c.box} border rounded-2xl p-3 lg:p-4`}>
+          <p className={`text-xs lg:text-sm font-bold ${c.title} flex items-center`}>
             <Loader2 className="w-4 h-4 mr-2 animate-spin shrink-0" /> En {here.name}
           </p>
-          <p className="text-[11px] lg:text-xs text-violet-800 mt-1">
+          <p className={`text-[11px] lg:text-xs ${c.text} mt-1`}>
             {confirmedAt
-              ? `Confirmó su nombre a las ${fmtTime(confirmedAt)}`
+              ? `${kind === 'test' ? 'Confirmó su nombre' : 'Empezó'} a las ${fmtTime(confirmedAt)}`
               : `Enviado a las ${fmtTime(toMs(here.assignment?.assignedAt)) || '…'}; aún no lo empieza.`}
           </p>
           {progress && progress.total > 0 && progress.index >= 0 && (
             <>
-              <p className="mt-2 text-[11px] font-bold text-violet-900">{progressLabel(progress)}</p>
-              <div className="mt-1 h-2 bg-violet-100 rounded-full overflow-hidden">
-                <div className="h-full bg-violet-600 rounded-full" style={{ width: `${Math.round(((progress.index + 1) / progress.total) * 100)}%` }} />
+              <p className={`mt-2 text-[11px] font-bold ${c.title}`}>{progressLabel(progress)}</p>
+              <div className={`mt-1 h-2 ${c.track} rounded-full overflow-hidden`}>
+                <div className={`h-full ${c.bar} rounded-full`} style={{ width: `${Math.round(((progress.index + 1) / progress.total) * 100)}%` }} />
               </div>
             </>
           )}
-          {progress && (
+          {/* Solo el situacional cuenta las salidas de la pantalla. */}
+          {progress && kind === 'test' && (
             progress.exits > 0
               ? <p className="text-[11px] text-amber-800 mt-2 flex items-center"><ShieldAlert className="w-3.5 h-3.5 mr-1" /> Salió de la pantalla {progress.exits} {progress.exits === 1 ? 'vez' : 'veces'}</p>
-              : <p className="text-[11px] text-violet-700 mt-2 flex items-center"><ShieldCheck className="w-3.5 h-3.5 mr-1" /> No ha salido de la pantalla</p>
+              : <p className={`text-[11px] ${c.soft} mt-2 flex items-center`}><ShieldCheck className="w-3.5 h-3.5 mr-1" /> No ha salido de la pantalla</p>
           )}
           {state === 'offline' && (
             <p className="text-[11px] text-amber-800 mt-2 flex items-center"><AlertTriangle className="w-3.5 h-3.5 mr-1" /> El teléfono no responde desde las {fmtTime(toMs(here.lastSeenAt))}</p>
@@ -173,7 +212,7 @@ export default function TestStationPanel({ application, candidateName }: Props) 
             disabled={!!busy}
             className="text-[10px] lg:text-[11px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 px-2.5 py-1.5 rounded-md flex items-center disabled:opacity-50"
           >
-            {busy === 'cancel' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <X className="w-3 h-3 mr-1" />} Cancelar
+            {busy === 'cancel' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <X className="w-3 h-3 mr-1" />} Quitar del teléfono
           </button>
         </div>
         {picker}
@@ -185,7 +224,7 @@ export default function TestStationPanel({ application, candidateName }: Props) 
     <div className="w-full flex flex-col items-center">
       <button
         onClick={() => setPicking(p => !p)}
-        className="flex items-center px-4 py-2 bg-violet-600 text-white text-xs lg:text-sm font-bold rounded-xl hover:bg-violet-700 transition-all shadow-md"
+        className={`flex items-center px-4 py-2 ${c.button} text-white text-xs lg:text-sm font-bold rounded-xl transition-all shadow-md`}
       >
         <Smartphone className="w-4 h-4 mr-2" /> Enviar a un teléfono
       </button>

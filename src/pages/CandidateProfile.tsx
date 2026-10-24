@@ -20,7 +20,7 @@ import MergedEvidenceCard from '../components/MergedEvidenceCard';
 import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
 import PersonalityTestCard from '../components/PersonalityTestCard';
 import LinkQrModal from '../components/LinkQrModal';
-import TestStationPanel from '../components/TestStationPanel';
+import StationPanel from '../components/StationPanel';
 import { readIntegrity } from '../lib/testIntegrity';
 import { interviewInviteStamp, canMarkAttendance } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
@@ -70,6 +70,8 @@ export default function CandidateProfile() {
   const [interviewObs, setInterviewObs] = useState({ score: 0, notes: '', redFlags: '' });
   const [savingObs, setSavingObs] = useState(false);
   const [showTestQr, setShowTestQr] = useState(false);
+  // The situational test is on a company phone (station mode): the QR and link are noise then.
+  const [testOnPhone, setTestOnPhone] = useState<string | null>(null);
   const [showCVModal, setShowCVModal] = useState(false);
   const [showEditCandidate, setShowEditCandidate] = useState(false);
   const [showMoveVacancy, setShowMoveVacancy] = useState(false);
@@ -1297,12 +1299,15 @@ export default function CandidateProfile() {
                       {/* El key reinicia su estado local (selector abierto, errores) al cambiar de postulación. */}
                       {application && (
                         <div key={application.id} className="w-full">
-                          <TestStationPanel
+                          <StationPanel
+                            kind="test"
                             application={application}
                             candidateName={candidate?.fullName || candidate?.name || application.candidateName || ''}
+                            onPlacement={setTestOnPhone}
                           />
                         </div>
                       )}
+                      {!testOnPhone && <>
                       <p className="text-[10px] lg:text-xs text-slate-400 max-w-xs">
                         O ábrelo con el QR en el teléfono de la empresa y entrégaselo ya abierto. El test empieza mostrando su nombre para que confirme que es el suyo.
                       </p>
@@ -1328,6 +1333,7 @@ export default function CandidateProfile() {
                           <Copy className="w-3 h-3 lg:w-4 lg:h-4 mr-2" /> Copiar Link
                         </button>
                       </div>
+                      </>}
                       <LinkQrModal
                         isOpen={showTestQr}
                         onClose={() => setShowTestQr(false)}

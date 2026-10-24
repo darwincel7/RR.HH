@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useParams } from 'react-router-dom';
-import { Building2, CheckCircle, Loader2, Lock, RefreshCw } from 'lucide-react';
+import { Building2, CheckCircle, Loader2, Lock, RefreshCw, Smartphone } from 'lucide-react';
 import SubmitOverlay from '../components/SubmitOverlay';
 import { LIKERT_OPTIONS, TEXT_ANSWER_MAX_LENGTH, isAnswered, type PersonalityQuestion, type PersonalityAnswer } from '../lib/personalityTest';
+import type { StationEmbed } from '../lib/stations';
 
 /**
  * Lo que responde el candidato, en persona: una pregunta por pantalla, botones grandes
@@ -21,8 +22,12 @@ type Phase = 'loading' | 'error' | 'invalid' | 'not_started' | 'completed' | 'in
 const POLL_MS = 5000;
 const ADVANCE_DELAY_MS = 280;
 
-export default function PersonalityTest() {
-  const { applicationId } = useParams();
+/** En un teléfono de la empresa (modo estación) va embebido: ver StationEmbed. */
+export default function PersonalityTest({ applicationId: embeddedId, station }: { applicationId?: string; station?: StationEmbed } = {}) {
+  const params = useParams();
+  const applicationId = embeddedId ?? params.applicationId;
+  const stationRef = useRef(station);
+  stationRef.current = station;
   const [phase, setPhase] = useState<Phase>('loading');
   const [company, setCompany] = useState({ name: '', logoUrl: '' });
   const [firstName, setFirstName] = useState('');
@@ -47,6 +52,7 @@ export default function PersonalityTest() {
       if (!data.valid) { setPhase('invalid'); return; }
       if (data.status !== 'open' || !data.test) {
         setPhase(data.status === 'completed' ? 'completed' : 'not_started');
+        if (data.status === 'completed') stationRef.current?.onDone({ firstName: '', alreadyAnswered: true });
         return;
       }
       setFirstName(data.candidateFirstName || '');
@@ -122,7 +128,7 @@ export default function PersonalityTest() {
       const res = await fetch('/api/public/personality/submit', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ applicationId, attemptId: test.attemptId, answers }),
+        body: JSON.stringify({ applicationId, attemptId: test.attemptId, answers, ...(station ? { stationId: station.stationId } : {}) }),
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) {
@@ -135,6 +141,7 @@ export default function PersonalityTest() {
       }
       try { localStorage.removeItem(draftKey); } catch { /* sin almacenamiento */ }
       setPhase('done');
+      stationRef.current?.onDone({ firstName, alreadyAnswered: !!data?.alreadyCompleted });
     } catch (e: any) {
       setSubmitError(e?.message || 'No se pudieron enviar tus respuestas. Intenta de nuevo.');
     } finally {
@@ -142,11 +149,20 @@ export default function PersonalityTest() {
     }
   };
 
+  // Modo estación: el panel sigue por qué pregunta va (-1 = la portada).
+  useEffect(() => {
+    const total = test?.questions.length || 0;
+    if (!station || !total) return;
+    const at = phase === 'intro' ? -1 : phase === 'question' ? Math.min(index, total - 1) : phase === 'review' ? total - 1 : null;
+    if (at !== null) stationRef.current?.onProgress({ index: at, total, exits: 0 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phase, index, test]);
+
   const shell = (children: ReactNode) => (
     <div className="min-h-screen bg-slate-50 py-6 sm:py-10 px-4">
       <SubmitOverlay show={submitting} title="Enviando tus respuestas…" subtitle="Un momento, no cierres esta página." />
       <div className="max-w-2xl mx-auto bg-white rounded-2xl shadow-md p-5 sm:p-8">
-        <div className="flex items-center justify-center mb-6 pb-5 border-b border-slate-100">
+        <div className={`flex items-center mb-6 pb-5 border-b border-slate-100 ${station ? 'justify-between gap-3' : 'justify-center'}`}>
           {company.logoUrl ? (
             <img src={company.logoUrl} alt={company.name} className="h-10 max-w-[160px] object-contain" />
           ) : (
@@ -154,6 +170,11 @@ export default function PersonalityTest() {
               <Building2 className="w-6 h-6 text-fuchsia-600 mr-2" />
               {company.name || 'Recursos Humanos'}
             </div>
+          )}
+          {station && (
+            <span className="shrink-0 text-xs font-bold px-2.5 py-1 rounded-full bg-fuchsia-50 text-fuchsia-700 flex items-center">
+              <Smartphone className="w-3.5 h-3.5 mr-1" /> {station.name}
+            </span>
           )}
         </div>
         {children}
@@ -173,7 +194,9 @@ export default function PersonalityTest() {
   if (phase === 'invalid' || phase === 'error') {
     return shell(
       <div className="text-center py-8 space-y-4">
-        <p className="text-slate-700">{phase === 'invalid' ? 'Este link no es válido.' : 'No pudimos cargar el test.'}</p>
+        <p className="text-slate-700">
+          {phase === 'error' ? 'No pudimos cargar el test.' : station ? 'No se encontró este test. Avisa a quien te entregó el teléfono.' : 'Este link no es válido.'}
+        </p>
         {phase === 'error' && (
           <button onClick={() => load()} className="inline-flex items-center px-4 py-2 bg-fuchsia-600 text-white rounded-xl font-bold">
             <RefreshCw className="w-4 h-4 mr-2" /> Reintentar
@@ -224,7 +247,7 @@ export default function PersonalityTest() {
           onClick={() => { setIndex(0); setPhase('question'); }}
           className="w-full py-4 rounded-xl text-lg font-bold text-white bg-fuchsia-600 hover:bg-fuchsia-700 shadow-md"
         >
-          Comenzar
+          {firstName ? `Sí, soy ${firstName}. Comenzar` : 'Comenzar'}
         </button>
       </div>,
     );

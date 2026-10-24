@@ -5,6 +5,8 @@ import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../contexts/AuthContext';
 import LinkQrModal from './LinkQrModal';
+import StationPanel from './StationPanel';
+import { syncStationsFor } from '../lib/stationActions';
 import {
   resolvePersonalityTemplate, snapshotForApplication, templateIssues, newItemId, dimensionReading, answerLabel,
   LEVEL_LABEL, type PersonalityDimension, type PersonalityQuestion, type DimensionResult,
@@ -13,10 +15,11 @@ import {
 /**
  * El Test de Personalidad en el perfil del candidato.
  *
- * La entrevistadora lo aplica cuando lo decide: "Aplicar test ahora" guarda en la
- * postulación la versión actual del test (de Formularios) y habilita el link; el
- * candidato lo responde en esta pantalla, en una tableta o en su teléfono (QR). El perfil
- * escucha la postulación en vivo, así que el resultado aparece aquí en cuanto termina.
+ * La entrevistadora lo aplica cuando lo decide. Lo más directo es "Enviar a un teléfono":
+ * en un solo paso guarda en la postulación la versión actual del test (de Formularios) y
+ * el teléfono de la empresa que elija lo abre solo (modo estación). También puede
+ * aplicarlo y abrirlo en esta pantalla, con QR o con el link. El perfil escucha la
+ * postulación en vivo, así que el resultado aparece aquí en cuanto termina.
  */
 interface Props {
   application: any;
@@ -42,6 +45,8 @@ export default function PersonalityTestCard({ application, candidateName, comple
   const [busy, setBusy] = useState<'' | 'start' | 'cancel' | 'delete'>('');
   const [error, setError] = useState('');
   const [showQr, setShowQr] = useState(false);
+  // En qué teléfono de la empresa está (modo estación): entonces sobran el QR y el link.
+  const [onPhone, setOnPhone] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [interpreting, setInterpreting] = useState(false);
   const [aiError, setAiError] = useState('');
@@ -52,9 +57,8 @@ export default function PersonalityTestCard({ application, candidateName, comple
   const ref = () => doc(db, 'applications', application.id);
 
   // Aplica la versión ACTUAL del test (leída en el momento, no la que cargó esta pantalla).
-  const start = async () => {
-    if (status === 'open' && !window.confirm('¿Reiniciar el test con la versión actual de Formularios? Si el candidato lo tiene abierto, tendrá que empezar de nuevo.')) return;
-    setBusy('start');
+  // Devuelve si quedó aplicado: "Enviar a un teléfono" solo envía si lo está.
+  const apply = async (): Promise<boolean> => {
     setError('');
     try {
       const snap = await getDoc(doc(db, 'settings', 'forms'));
@@ -62,7 +66,7 @@ export default function PersonalityTestCard({ application, candidateName, comple
       const blocking = templateIssues(tpl).filter(i => i.blocking);
       if (blocking.length > 0) {
         setError(`El test tiene errores y no se puede aplicar: ${blocking[0].message} Corrígelo en Formularios.`);
-        return;
+        return false;
       }
       await updateDoc(ref(), {
         personalityTest: {
@@ -72,9 +76,24 @@ export default function PersonalityTestCard({ application, candidateName, comple
           openedBy: user?.displayName || user?.email || '',
         },
       });
+      return true;
     } catch (e) {
       console.error('No se pudo aplicar el test de personalidad:', e);
       setError('No se pudo aplicar el test. Revisa tu conexión e inténtalo de nuevo.');
+      return false;
+    }
+  };
+
+  const start = async () => {
+    const restarting = status === 'open';
+    if (restarting && !window.confirm('¿Reiniciar el test con la versión actual de Formularios? Si el candidato lo tiene abierto, tendrá que empezar de nuevo.')) return;
+    setBusy('start');
+    try {
+      if ((await apply()) && restarting) {
+        // Si lo tiene un teléfono de la empresa, lo vuelve a abrir allí con el intento nuevo.
+        await syncStationsFor(application.id, 'personality', 'resend')
+          .catch(e => console.warn('No se pudo reabrir el test en el teléfono:', e));
+      }
     } finally {
       setBusy('');
     }
@@ -89,6 +108,11 @@ export default function PersonalityTestCard({ application, candidateName, comple
     setError('');
     try {
       await updateDoc(ref(), { personalityTest: deleteField() });
+      // Cancelado mientras lo tenía un teléfono de la empresa: el teléfono queda libre.
+      if (kind === 'cancel') {
+        await syncStationsFor(application.id, 'personality', 'clear')
+          .catch(e => console.warn('No se pudo liberar el teléfono:', e));
+      }
     } catch (e) {
       console.error('No se pudo quitar el test de personalidad:', e);
       setError('No se pudo completar la acción. Inténtalo de nuevo.');
@@ -160,83 +184,101 @@ export default function PersonalityTestCard({ application, candidateName, comple
         </p>
       )}
 
-      {status === 'none' && (
-        <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-          <p className="flex-1 text-xs lg:text-sm text-slate-500">
-            Se responde en persona, cuando tú decidas: en esta pantalla, en una tableta o en el teléfono del candidato.
-            Mide sus rasgos de personalidad y el resultado aparece aquí al terminar.
-            {completedElsewhere && (
-              <span className="block mt-1 text-[11px] font-bold text-amber-700">
-                Ya lo respondió en su postulación a {completedElsewhere} (elígela arriba para verlo).
-              </span>
-            )}
-          </p>
-          <button
-            onClick={start}
-            disabled={!!busy || !application?.id}
-            className="flex items-center justify-center px-4 py-2.5 bg-fuchsia-600 text-white text-xs lg:text-sm font-bold rounded-xl hover:bg-fuchsia-700 transition-colors disabled:opacity-50 shadow-md shrink-0"
-          >
-            {busy === 'start' ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Play className="w-4 h-4 mr-2" />}
-            Aplicar test ahora
-          </button>
-        </div>
-      )}
-
-      {status === 'open' && (
+      {/* Pendiente o aplicado: el panel de teléfonos queda en el mismo sitio en los dos
+          estados, para que al aplicar-y-enviar no se desmonte a mitad del envío. */}
+      {status !== 'completed' && (
         <div className="space-y-3">
-          <p className="text-xs font-medium text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-100 rounded-lg px-3 py-2 flex items-start">
-            <Loader2 className="w-3.5 h-3.5 mr-2 mt-0.5 animate-spin shrink-0" />
-            <span>
-              <span className="block">Habilitado{pt?.openedBy ? ` por ${pt.openedBy}` : ''}{fmtDate(pt?.openedAt) ? ` · ${fmtDate(pt.openedAt)}` : ''}</span>
-              Esperando las respuestas del candidato ({questions.length} preguntas); el resultado aparecerá aquí solo.
-            </span>
-          </p>
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <a
-              href={url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center justify-center p-2.5 bg-fuchsia-600 text-white rounded-xl font-bold hover:bg-fuchsia-700 transition-colors text-xs lg:text-sm"
-            >
-              <ExternalLink className="w-4 h-4 mr-2" /> Abrir en esta pantalla
-            </a>
-            <button
-              onClick={() => setShowQr(true)}
-              className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
-            >
-              <QrCode className="w-4 h-4 mr-2" /> QR para su teléfono
-            </button>
-            <button
-              onClick={copyLink}
-              className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
-            >
-              {copied ? <CheckCircle className="w-4 h-4 mr-2 text-emerald-600" /> : <Copy className="w-4 h-4 mr-2" />}
-              {copied ? 'Link copiado' : 'Copiar link'}
-            </button>
-          </div>
-          <div className="flex flex-wrap gap-2 justify-end">
-            <button
-              onClick={start}
-              disabled={!!busy}
-              className="text-[10px] font-bold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md flex items-center transition-colors disabled:opacity-50"
-            >
-              {busy === 'start' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <RotateCcw className="w-3 h-3 mr-1" />} Reiniciar
-            </button>
-            <button
-              onClick={() => remove('cancel')}
-              disabled={!!busy}
-              className="text-[10px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 px-2 py-1 rounded-md flex items-center transition-colors disabled:opacity-50"
-            >
-              {busy === 'cancel' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <X className="w-3 h-3 mr-1" />} Cancelar test
-            </button>
-          </div>
+          {status === 'none' ? (
+            <p className="text-xs lg:text-sm text-slate-500">
+              Se responde en persona, cuando tú decidas: en un teléfono de la empresa, en esta pantalla o con QR.
+              Mide sus rasgos de personalidad y el resultado aparece aquí al terminar.
+              {completedElsewhere && (
+                <span className="block mt-1 text-[11px] font-bold text-amber-700">
+                  Ya lo respondió en su postulación a {completedElsewhere} (elígela arriba para verlo).
+                </span>
+              )}
+            </p>
+          ) : (
+            <p className="text-xs font-medium text-fuchsia-800 bg-fuchsia-50 border border-fuchsia-100 rounded-lg px-3 py-2 flex items-start">
+              <Loader2 className="w-3.5 h-3.5 mr-2 mt-0.5 animate-spin shrink-0" />
+              <span>
+                <span className="block">Habilitado{pt?.openedBy ? ` por ${pt.openedBy}` : ''}{fmtDate(pt?.openedAt) ? ` · ${fmtDate(pt.openedAt)}` : ''}</span>
+                Esperando las respuestas del candidato ({questions.length} preguntas); el resultado aparecerá aquí solo.
+              </span>
+            </p>
+          )}
+          {application?.id && (
+            <StationPanel
+              kind="personality"
+              accent="fuchsia"
+              application={application}
+              candidateName={candidateName || application.candidateName || ''}
+              prepare={status === 'none' ? apply : undefined}
+              onPlacement={setOnPhone}
+            />
+          )}
+          {status === 'none' ? (
+            <div className="flex flex-wrap items-center justify-center gap-2 text-[11px] text-slate-400">
+              <span>O aplícalo para abrirlo en esta pantalla o con QR:</span>
+              <button
+                onClick={start}
+                disabled={!!busy || !application?.id}
+                className="flex items-center px-3 py-1.5 bg-white border border-slate-200 text-slate-700 text-[11px] font-bold rounded-lg hover:bg-slate-50 transition-colors disabled:opacity-50"
+              >
+                {busy === 'start' ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Play className="w-3.5 h-3.5 mr-1.5" />}
+                Aplicar test ahora
+              </button>
+            </div>
+          ) : (
+            <>
+              {!onPhone && <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <a
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
+                >
+                  <ExternalLink className="w-4 h-4 mr-2" /> Abrir en esta pantalla
+                </a>
+                <button
+                  onClick={() => setShowQr(true)}
+                  className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
+                >
+                  <QrCode className="w-4 h-4 mr-2" /> QR para su teléfono
+                </button>
+                <button
+                  onClick={copyLink}
+                  className="flex items-center justify-center p-2.5 bg-white border border-slate-200 text-slate-700 rounded-xl font-bold hover:bg-slate-50 transition-colors text-xs lg:text-sm"
+                >
+                  {copied ? <CheckCircle className="w-4 h-4 mr-2 text-emerald-600" /> : <Copy className="w-4 h-4 mr-2" />}
+                  {copied ? 'Link copiado' : 'Copiar link'}
+                </button>
+              </div>}
+              <div className="flex flex-wrap gap-2 justify-end">
+                <button
+                  onClick={start}
+                  disabled={!!busy}
+                  className="text-[10px] font-bold text-slate-500 hover:text-slate-700 bg-slate-100 hover:bg-slate-200 px-2 py-1 rounded-md flex items-center transition-colors disabled:opacity-50"
+                >
+                  {busy === 'start' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <RotateCcw className="w-3 h-3 mr-1" />} Reiniciar
+                </button>
+                <button
+                  onClick={() => remove('cancel')}
+                  disabled={!!busy}
+                  className="text-[10px] font-bold text-rose-700 bg-rose-50 hover:bg-rose-100 px-2 py-1 rounded-md flex items-center transition-colors disabled:opacity-50"
+                >
+                  {busy === 'cancel' ? <Loader2 className="w-3 h-3 mr-1 animate-spin" /> : <X className="w-3 h-3 mr-1" />} Cancelar test
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
       {status === 'completed' && (
         <div className="space-y-4">
           <p className="text-[11px] text-slate-500">
-            <span className="block">Respondido{fmtDate(pt?.completedAt) ? ` el ${fmtDate(pt.completedAt)}` : ''}{pt?.openedBy ? ` · aplicado por ${pt.openedBy}` : ''}</span>
+            <span className="block">Respondido{fmtDate(pt?.completedAt) ? ` el ${fmtDate(pt.completedAt)}` : ''}{pt?.station?.name ? ` en ${pt.station.name}` : ''}{pt?.openedBy ? ` · aplicado por ${pt.openedBy}` : ''}</span>
             Es un autoinforme: muestra tendencias para conversar y validar en la entrevista, no un diagnóstico.
           </p>
 

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   stationState, assignedApplicationId, normalizeStationName, isPairingCode, formatPairingCode, newPairingCode,
   dayKey, doneTodayOf, pairingCodeProblem, pollView, needsSeenWrite, decideProgress, decideFinish, assignProblem,
-  progressLabel, toMs, STATION_OFFLINE_AFTER_MS, STATION_SEEN_EVERY_MS,
+  progressLabel, toMs, holds, assignmentKind, STATION_OFFLINE_AFTER_MS, STATION_SEEN_EVERY_MS,
 } from './stations';
 
 const NOW = Date.UTC(2026, 9, 23, 15, 0, 0); // 11:00 a. m. en RD
@@ -53,7 +53,9 @@ describe('vincular', () => {
 
 describe('lo que el teléfono pregunta y cuenta', () => {
   it('solo recibe su nombre y el test asignado', () => {
-    expect(pollView(busy)).toEqual({ name: 'Teléfono 2', assignment: { applicationId: 'app1', assignedAt: NOW - 60_000 } });
+    expect(pollView(busy)).toEqual({ name: 'Teléfono 2', assignment: { applicationId: 'app1', kind: 'test', assignedAt: NOW - 60_000 } });
+    const personality = { ...busy, assignment: { ...busy.assignment, kind: 'personality' as const } };
+    expect(pollView(personality).assignment?.kind).toBe('personality');
     expect(pollView({ name: 'Teléfono 3', assignment: null })).toEqual({ name: 'Teléfono 3', assignment: null });
   });
 
@@ -65,25 +67,25 @@ describe('lo que el teléfono pregunta y cuenta', () => {
 
   it('el avance se escribe solo si sigue siendo su test, y la confirmación una vez', () => {
     const now = new Date(NOW);
-    const first = decideProgress(busy, 'app1', { index: 0, total: 20, exits: 0 }, now);
+    const first = decideProgress(busy, 'app1', 'test', { index: 0, total: 20, exits: 0 }, now);
     expect(first?.assignment.progress).toEqual({ index: 0, total: 20, exits: 0, at: now, confirmedAt: now });
     const confirmed = { ...busy, assignment: { ...busy.assignment, progress: { index: 0, total: 20, exits: 0, confirmedAt: NOW } } };
-    expect(decideProgress(confirmed, 'app1', { index: 3, total: 20, exits: 1 }, now)?.assignment.progress).not.toHaveProperty('confirmedAt');
+    expect(decideProgress(confirmed, 'app1', 'test', { index: 3, total: 20, exits: 1 }, now)?.assignment.progress).not.toHaveProperty('confirmedAt');
     // En la portada aún no ha confirmado.
-    expect(decideProgress(busy, 'app1', { index: -1, total: 20, exits: 0 }, now)?.assignment.progress).not.toHaveProperty('confirmedAt');
+    expect(decideProgress(busy, 'app1', 'test', { index: -1, total: 20, exits: 0 }, now)?.assignment.progress).not.toHaveProperty('confirmedAt');
     // Cancelado o pasado a otro teléfono: no le toca escribir.
-    expect(decideProgress(busy, 'otra', { index: 1, total: 20, exits: 0 }, now)).toBeNull();
-    expect(decideProgress(null, 'app1', { index: 1, total: 20, exits: 0 }, now)).toBeNull();
+    expect(decideProgress(busy, 'otra', 'test', { index: 1, total: 20, exits: 0 }, now)).toBeNull();
+    expect(decideProgress(null, 'app1', 'test', { index: 1, total: 20, exits: 0 }, now)).toBeNull();
   });
 
   it('al terminar queda libre y suma al día (hora de RD)', () => {
     const now = new Date(NOW);
-    expect(decideFinish(busy, 'app1', now)).toEqual({
+    expect(decideFinish(busy, 'app1', 'test', now)).toEqual({
       assignment: null, lastSeenAt: now, lastDoneAt: now, doneDay: '2026-10-23', doneToday: 1,
     });
-    expect(decideFinish({ ...busy, doneDay: '2026-10-23', doneToday: 4 }, 'app1', now)?.doneToday).toBe(5);
-    expect(decideFinish({ ...busy, doneDay: '2026-10-22', doneToday: 9 }, 'app1', now)?.doneToday).toBe(1);
-    expect(decideFinish(busy, 'otra', now)).toBeNull();
+    expect(decideFinish({ ...busy, doneDay: '2026-10-23', doneToday: 4 }, 'app1', 'test', now)?.doneToday).toBe(5);
+    expect(decideFinish({ ...busy, doneDay: '2026-10-22', doneToday: 9 }, 'app1', 'test', now)?.doneToday).toBe(1);
+    expect(decideFinish(busy, 'otra', 'test', now)).toBeNull();
   });
 
   it('el día cambia a medianoche de RD, no de UTC', () => {
@@ -92,12 +94,32 @@ describe('lo que el teléfono pregunta y cuenta', () => {
   });
 });
 
+describe('los dos tests', () => {
+  const personality = { ...busy, assignment: { ...busy.assignment, kind: 'personality' as const } };
+
+  it('una asignación sin tipo es del test situacional', () => {
+    expect(assignmentKind({ assignment: { applicationId: 'app1' } } as any)).toBe('test');
+    expect(assignmentKind(personality)).toBe('personality');
+  });
+
+  it('el avance y el final de un test no tocan el otro test del mismo candidato', () => {
+    const now = new Date(NOW);
+    expect(holds(personality, 'app1', 'personality')).toBe(true);
+    expect(holds(personality, 'app1', 'test')).toBe(false);
+    expect(decideProgress(personality, 'app1', 'test', { index: 1, total: 20, exits: 0 }, now)).toBeNull();
+    expect(decideFinish(personality, 'app1', 'test', now)).toBeNull();
+    expect(decideFinish(personality, 'app1', 'personality', now)?.assignment).toBeNull();
+  });
+});
+
 describe('panel', () => {
   it('no se le manda un test a un teléfono ocupado con otra persona', () => {
-    expect(assignProblem(busy, 'otra')).toMatch(/ocupado/);
-    expect(assignProblem(busy, 'app1')).toBeNull(); // reenviar el mismo no estorba
-    expect(assignProblem({ name: 'T3', assignment: null }, 'app1')).toBeNull();
-    expect(assignProblem(null, 'app1')).toMatch(/ya no está vinculado/);
+    expect(assignProblem(busy, 'otra', 'test')).toMatch(/otro candidato/);
+    expect(assignProblem(busy, 'app1', 'test')).toBeNull(); // reenviar el mismo no estorba
+    // El mismo candidato, pero el teléfono tiene su OTRO test.
+    expect(assignProblem(busy, 'app1', 'personality')).toMatch(/test situacional de este candidato/);
+    expect(assignProblem({ name: 'T3', assignment: null }, 'app1', 'personality')).toBeNull();
+    expect(assignProblem(null, 'app1', 'test')).toMatch(/ya no está vinculado/);
   });
 
   it('describe el avance', () => {

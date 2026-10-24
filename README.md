@@ -323,9 +323,21 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   puede ser la pantalla que se apagó sola). Lógica en
   [`src/lib/testIntegrity.ts`](src/lib/testIntegrity.ts). *Eliminar Test* lo borra con
   las respuestas y al unificar perfiles viaja con el resto del test.
-- **Modo estación: los teléfonos de la empresa** (menú *Teléfonos* y perfil → *Resultados
-  Test* → *Enviar a un teléfono*): el test situacional llega solo al teléfono que la
-  reclutadora elige, sin QR, link ni WhatsApp. Cada teléfono se **vincula una vez**: abre
+- **Modo estación: los teléfonos de la empresa** (menú *Teléfonos*; en el perfil,
+  *Enviar a un teléfono* en *Resultados Test* y en *Test de personalidad*): el test
+  situacional y el de personalidad llegan solos al teléfono que la reclutadora elige, sin
+  QR, link ni WhatsApp. La asignación lleva su tipo (`assignment.kind`: `test` o
+  `personality`; sin tipo = situacional, para teléfonos con la página anterior) y una
+  misma postulación puede tener cada test en un teléfono distinto: todo lo que escribe o
+  libera un teléfono comprueba postulación **y** tipo (`holds`). En el de personalidad,
+  *Enviar a un teléfono* lo **aplica y lo envía en un solo paso** (si el test de
+  Formularios tiene errores, no envía nada); *Reiniciar* lo vuelve a abrir desde cero en el
+  teléfono que lo tenga y *Cancelar test* libera ese teléfono. El teléfono abre la página
+  de personalidad embebida (con *Sí, soy Juan. Comenzar*), informa la pregunta en
+  pantalla y, al enviar, `/api/public/personality/submit` comprueba el teléfono, anota
+  `personalityTest.station` (*Respondido … en Teléfono 2*) y lo libera. Mientras un test
+  está en un teléfono, la tarjeta oculta el QR y el link, y el botón para sacarlo de ahí
+  es *Quitar del teléfono*. Cada teléfono se **vincula una vez**: abre
   `/estacion` (el QR de *Teléfonos* la abre), escribe un código de 6 dígitos que genera el
   panel (`station_codes/{código}`, vence en 10 minutos, un solo uso, se consume en una
   transacción) y un nombre («Teléfono 2»). El servidor crea `stations/{id}` con un id
