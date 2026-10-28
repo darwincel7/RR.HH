@@ -1,0 +1,114 @@
+name: Deploy Cloud Run
+
+# Despliega el servidor (Express + la app, construido con el Dockerfile) en Cloud Run
+# cada vez que algo llega a main: fusionar ES desplegar, como ya pasa con las reglas
+# de Firebase. También se puede lanzar a mano (Actions → Deploy Cloud Run → Run workflow).
+#
+# CONFIGURACIÓN ÚNICA (pasos en CLAUDE.md → "Despliegue"):
+#   Secreto del repositorio GCP_DEPLOY_SA = clave JSON de una cuenta de servicio con
+#   permiso para desplegar en Cloud Run. Opcionales: variables CLOUD_RUN_SERVICE y
+#   CLOUD_RUN_REGION — si el proyecto tiene un solo servicio de Cloud Run, se detecta solo.
+#   Mientras falte el secreto, el despliegue se salta con un aviso (main no se pone en rojo).
+#
+# La configuración del servicio (variables de entorno, secretos, instancias, CPU) NO
+# se toca: cada despliegue crea una revisión nueva con la misma configuración.
+
+on:
+  push:
+    branches: [main]
+    # Cambios que no tocan el servidor ni la app no despliegan.
+    paths-ignore:
+      - '**.md'
+      - 'firestore.rules'
+      - 'storage.rules'
+      - 'firebase.json'
+      - '.firebaserc'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/deploy-firebase-rules.yml'
+  workflow_dispatch: {}
+
+# Dos despliegues nunca a la vez; el más nuevo espera al anterior (no lo cancela a medias).
+concurrency:
+  group: deploy-cloud-run
+  cancel-in-progress: false
+
+env:
+  PROJECT_ID: gen-lang-client-0929279196
+
+jobs:
+  deploy:
+    name: Desplegar servidor
+    runs-on: ubuntu-latest
+    steps:
+      - name: ¿Está configurado?
+        id: cfg
+        env:
+          SA: ${{ secrets.GCP_DEPLOY_SA }}
+        run: |
+          if [ -z "$SA" ]; then
+            echo "::warning::Falta el secreto GCP_DEPLOY_SA: el servidor NO se desplegó. Pasos en CLAUDE.md → Despliegue."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.cfg.outputs.ready == 'true'
+
+      - uses: google-github-actions/auth@v2
+        if: steps.cfg.outputs.ready == 'true'
+        with:
+          credentials_json: ${{ secrets.GCP_DEPLOY_SA }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        if: steps.cfg.outputs.ready == 'true'
+
+      # Qué servicio desplegar: el de las variables, o el único que tenga el proyecto.
+      - name: Servicio y región
+        id: target
+        if: steps.cfg.outputs.ready == 'true'
+        env:
+          SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
+          REGION: ${{ vars.CLOUD_RUN_REGION }}
+        run: |
+          if [ -z "$SERVICE" ] || [ -z "$REGION" ]; then
+            gcloud run services list --project "$PROJECT_ID" --format=json > services.json
+            count=$(jq 'length' services.json)
+            if [ "$count" != "1" ]; then
+              echo "::error::El proyecto tiene $count servicios de Cloud Run: define las variables CLOUD_RUN_SERVICE y CLOUD_RUN_REGION del repositorio para saber cuál desplegar."
+              jq -r '.[] | "  - \(.metadata.name) (\(.metadata.labels["cloud.googleapis.com/location"]))"' services.json
+              exit 1
+            fi
+            SERVICE=$(jq -r '.[0].metadata.name' services.json)
+            REGION=$(jq -r '.[0].metadata.labels["cloud.googleapis.com/location"]' services.json)
+          fi
+          echo "Servicio: $SERVICE · Región: $REGION"
+          echo "service=$SERVICE" >> "$GITHUB_OUTPUT"
+          echo "region=$REGION" >> "$GITHUB_OUTPUT"
+
+      - name: Desplegar
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          gcloud run deploy "${{ steps.target.outputs.service }}" \
+            --source . \
+            --region "${{ steps.target.outputs.region }}" \
+            --project "$PROJECT_ID" \
+            --quiet
+
+      # El despliegue solo cuenta si el servidor nuevo responde.
+      - name: Comprobar que responde
+        if: steps.cfg.outputs.ready == 'true'
+        run: |
+          url=$(gcloud run services describe "${{ steps.target.outputs.service }}" \
+            --region "${{ steps.target.outputs.region }}" --project "$PROJECT_ID" \
+            --format='value(status.url)')
+          echo "URL: $url"
+          for i in 1 2 3 4 5 6; do
+            if curl -fsS --max-time 20 "$url/api/health" > /dev/null; then
+              echo "El servidor nuevo responde en $url"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::El servidor desplegado no responde en $url/api/health"
+          exit 1
