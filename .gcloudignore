@@ -1,0 +1,14 @@
+# Lo que NO se sube a Google al desplegar con `gcloud run deploy --source .`
+# (el Dockerfile instala y construye todo dentro de la imagen).
+.gcloudignore
+.git
+.github
+node_modules/
+dist/
+build/
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store

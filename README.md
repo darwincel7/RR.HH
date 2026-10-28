@@ -117,6 +117,13 @@ El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
 problemas de una vez.
 
+**Fusionar en `main` es desplegar.** [`deploy-cloud-run.yml`](.github/workflows/deploy-cloud-run.yml)
+despliega el servidor en Cloud Run con el `Dockerfile` (misma configuración del servicio,
+revisión nueva) y comprueba que `/api/health` responda; las reglas las publica
+[`deploy-firebase-rules.yml`](.github/workflows/deploy-firebase-rules.yml). La
+configuración única de Google Cloud (cuenta de servicio y secreto `GCP_DEPLOY_SA`) está en
+[`CLAUDE.md`](CLAUDE.md#despliegue).
+
 El servidor y el cliente comparten **una sola** implementación de `normalizePhone`
 ([`src/lib/phone.ts`](src/lib/phone.ts)) — cuando eran dos copias, se desincronizaron y
 las respuestas entrantes dejaron de enlazarse con su candidato.
