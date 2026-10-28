@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   describeWait, whatLabel, deliveryLabel, isForCandidate, candidateStageState, whenLabel,
+  deliveryAttention, UNCONFIRMED_AFTER_MS,
   type ActivityData, type ActivityMessage,
 } from './whatsappActivity';
 
@@ -76,5 +77,26 @@ describe('candidateStageState', () => {
   it('nothing to show without data', () => {
     expect(candidateStageState(null, { candidateId: 'c1' }, 'Oferta')).toBeNull();
     expect(candidateStageState(data({ enabled: false }), { candidateId: 'c1' }, 'Oferta')).toBeNull();
+  });
+});
+
+describe('deliveryAttention — "Esperando el mensaje"', () => {
+  const sent = (over: Partial<ActivityMessage> = {}) => msg({ status: 'sent', sentAt: new Date(NOW - 10 * 60_000).toISOString(), ...over });
+
+  it('su teléfono pidió reenviarlo y aún no lo ha leído', () => {
+    expect(deliveryAttention(sent({ retryRequests: 1 }), NOW)).toBe('retry');
+    expect(deliveryAttention(sent({ retryRequests: 1, deliveredAt: '2026-10-13T17:55:00Z' }), NOW)).toBe('retry');
+  });
+
+  it('sin acuse de entrega pasado el umbral', () => {
+    expect(deliveryAttention(sent(), NOW)).toBeNull();
+    const old = new Date(NOW - UNCONFIRMED_AFTER_MS).toISOString();
+    expect(deliveryAttention(sent({ sentAt: old }), NOW)).toBe('unconfirmed');
+    expect(deliveryAttention(sent({ sentAt: old, deliveredAt: old }), NOW)).toBeNull();
+  });
+
+  it('leído o no enviado → nada que mirar', () => {
+    expect(deliveryAttention(sent({ retryRequests: 2, readAt: '2026-10-13T17:58:00Z' }), NOW)).toBeNull();
+    expect(deliveryAttention(msg({ status: 'queued', retryRequests: 1 }), NOW)).toBeNull();
   });
 });

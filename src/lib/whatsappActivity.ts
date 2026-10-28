@@ -25,6 +25,15 @@ export interface ActivityMessage {
   readAt: string | null;
   failedAt: string | null;
   attempts: number;
+  // sent only — "Esperando el mensaje": the candidate's phone couldn't decrypt it and
+  // asked for it again; and whether someone already repaired / re-sent it.
+  retryRequests?: number;
+  lastRetryRequestAt?: string | null;
+  repairs?: number;
+  lastRepairAt?: string | null;
+  resentAt?: string | null;
+  resendOf?: string | null;
+  canRepair?: boolean;
   // pending only
   etaAt?: string | null;
   waitReason?: WaitReason;
@@ -111,6 +120,26 @@ export function deliveryLabel(m: Pick<ActivityMessage, 'readAt' | 'deliveredAt'>
   if (m.readAt) return 'Leído';
   if (m.deliveredAt) return 'Entregado';
   return 'Enviado';
+}
+
+/** Without a delivery receipt this long after going out, the panel flags the message. */
+export const UNCONFIRMED_AFTER_MS = 2 * 3_600_000;
+
+/**
+ * Should the recruiter look at this sent message? 'retry': the candidate's phone
+ * couldn't decrypt it and asked for it again (it was re-sent automatically — if they
+ * still see "Esperando el mensaje", repair it). 'unconfirmed': no delivery receipt after
+ * a while (phone off… or stuck). A read message never needs attention.
+ */
+export function deliveryAttention(
+  m: Pick<ActivityMessage, 'status' | 'sentAt' | 'deliveredAt' | 'readAt' | 'retryRequests'>,
+  nowMs: number,
+): 'retry' | 'unconfirmed' | null {
+  if (m.status !== 'sent' || m.readAt) return null;
+  if ((m.retryRequests || 0) > 0) return 'retry';
+  const sent = m.sentAt ? Date.parse(m.sentAt) : NaN;
+  if (!m.deliveredAt && Number.isFinite(sent) && nowMs - sent >= UNCONFIRMED_AFTER_MS) return 'unconfirmed';
+  return null;
 }
 
 /** Does this message belong to that candidate? By id, or by phone for older messages. */

@@ -154,8 +154,9 @@ export interface ServerDb {
   listOutboxRecentlyFailed(max: number): Promise<any[]>;
   /** One-time: gives legacy failed messages a failedAt so they sort. Returns how many. */
   backfillOutboxFailedAt(): Promise<number>;
-  /** The outbox message a WhatsApp message id belongs to (delivery/read receipts). */
-  findOutboxIdByWaMessageId(waMessageId: string): Promise<string | null>;
+  /** The outbox message (id + data) a WhatsApp message id belongs to: delivery/read
+   * receipts, and decryption-retry requests that need its content to re-send it. */
+  findOutboxByWaMessageId(waMessageId: string): Promise<any | null>;
   /** Bumped by every outbox write made through this process. Lets the side panel's
    * snapshot be served from memory while nothing changed (Firestore reads cost quota). */
   outboxVersion(): number;
@@ -646,9 +647,9 @@ async function tryInitAdmin(): Promise<ServerDb | null> {
         if (missing.length) outboxVersion++;
         return missing.length;
       },
-      async findOutboxIdByWaMessageId(waMessageId) {
+      async findOutboxByWaMessageId(waMessageId) {
         const snap = await adb.collection('whatsapp_outbox').where('waMessageId', '==', waMessageId).limit(1).get();
-        return snap.empty ? null : snap.docs[0].id;
+        return snap.empty ? null : { id: snap.docs[0].id, ...snap.docs[0].data() };
       },
       async listActiveVacancies() {
         const snap = await adb.collection('vacancies').where('active', '==', true).get();
@@ -896,7 +897,7 @@ async function initClient(): Promise<ServerDb> {
     async listOutboxRecentlySent() { return []; },
     async listOutboxRecentlyFailed() { return []; },
     async backfillOutboxFailedAt() { return 0; },
-    async findOutboxIdByWaMessageId() { return null; },
+    async findOutboxByWaMessageId() { return null; },
     outboxVersion: () => 0,
     async listActiveVacancies() {
       const snap = await getDocs(query(collection(cdb, 'vacancies'), where('active', '==', true)));

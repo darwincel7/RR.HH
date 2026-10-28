@@ -94,11 +94,12 @@ service cloud.firestore {
       // (no injecting a fake top-ranked candidate) — the interview rating and its AI
       // analysis included: both feed the Ranking score. Nor a personality test: it is
       // opened by the interviewer and scored by the server, never preset by the applicant —
-      // and neither is the test's integrity record (exits from the screen, blocked pastes).
+      // and neither is the test's integrity record (exits from the screen, blocked pastes),
+      // nor the form's send/open dates (stage2Link: written by the server).
       allow create: if isRecruiter() ||
         (isAuthenticated()
           && request.resource.data.stage == 'Nuevo'
-          && !request.resource.data.keys().hasAny(['stage2Scoring', 'testResults', 'testIntegrity', 'scoreSummary', 'recommendation', 'interviewScorecard', 'interviewObservation', 'interviewAiEvaluation', 'personalityTest']));
+          && !request.resource.data.keys().hasAny(['stage2Scoring', 'testResults', 'testIntegrity', 'scoreSummary', 'recommendation', 'interviewScorecard', 'interviewObservation', 'interviewAiEvaluation', 'personalityTest', 'stage2Link']));
       // Scores/answers are now written ONLY server-side (Admin SDK, which bypasses
       // rules) or by a recruiter. Candidates can no longer forge their own scores.
       allow update: if isRecruiter();

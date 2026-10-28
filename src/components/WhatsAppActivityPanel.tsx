@@ -2,11 +2,11 @@ import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   MessageCircle, CheckCheck, Check, Clock, AlertCircle, RotateCcw, X, ChevronRight, ChevronLeft,
-  Loader2, Hand, Zap,
+  Loader2, Hand, Zap, Wrench, Send,
 } from 'lucide-react';
 import { useWhatsAppActivity } from '../contexts/WhatsAppActivityContext';
 import {
-  describeWait, whatLabel, deliveryLabel, whenLabel, dayLabel, formatClock,
+  describeWait, whatLabel, deliveryLabel, whenLabel, dayLabel, formatClock, deliveryAttention,
   type ActivityData, type ActivityMessage,
 } from '../lib/whatsappActivity';
 
@@ -183,8 +183,10 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 /** Name (→ profile) + what, shared by every row. Click the row to read the message. */
-function RowShell({ m, icon, children, onNavigate, className = '' }: {
+function RowShell({ m, icon, children, onNavigate, className = '', expandedExtra }: {
   m: ActivityMessage; icon: React.ReactNode; children?: React.ReactNode; onNavigate?: () => void; className?: string;
+  /** Shown under the message text when the row is open. */
+  expandedExtra?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const name = m.candidateName || m.phone || 'Sin nombre';
@@ -215,24 +217,94 @@ function RowShell({ m, icon, children, onNavigate, className = '' }: {
           {m.phone && <span className="block mt-1 text-slate-400">Para: {m.phone}</span>}
         </p>
       )}
+      {expanded && expandedExtra}
     </div>
   );
 }
 
 function SentRow({ m, now, onNavigate }: { m: ActivityMessage; now: number; onNavigate?: () => void }) {
   const delivery = deliveryLabel(m);
+  const attention = deliveryAttention(m, now);
   const icon = delivery === 'Enviado'
-    ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+    ? <Check className={`w-3.5 h-3.5 ${attention ? 'text-amber-500' : 'text-emerald-500'}`} />
     : <CheckCheck className={`w-3.5 h-3.5 ${delivery === 'Leído' ? 'text-sky-500' : 'text-emerald-500'}`} />;
   const when = delivery === 'Leído' ? m.readAt : delivery === 'Entregado' ? m.deliveredAt : m.sentAt;
   return (
-    <RowShell m={m} icon={icon} onNavigate={onNavigate}>
+    <RowShell
+      m={m} icon={icon} onNavigate={onNavigate}
+      // Any message not read yet can be repaired from its open row — the candidate may
+      // call to say "me sale esperando mensaje" before any signal reaches us.
+      expandedExtra={!attention && !m.readAt ? <div className="ml-6"><StuckHelp m={m} now={now} /></div> : null}
+    >
       <p className="text-[11px] text-slate-400">
         {/* The day is the group's heading — the row only needs the time. */}
         Enviado {m.sentAt ? formatClock(Date.parse(m.sentAt)) : ''}
         {delivery !== 'Enviado' && <> · <span className={delivery === 'Leído' ? 'text-sky-600' : 'text-emerald-600'}>{delivery}</span>{when && when !== m.sentAt ? ` ${whenLabel(when, now)}` : ''}</>}
       </p>
+      {attention && <StuckHelp m={m} now={now} attention={attention} />}
     </RowShell>
+  );
+}
+
+/**
+ * "Esperando el mensaje. Esto puede tomar tiempo": the candidate's phone got a message
+ * it couldn't decrypt. Says what we know and offers the two ways out.
+ */
+function StuckHelp({ m, now, attention }: { m: ActivityMessage; now: number; attention?: 'retry' | 'unconfirmed' }) {
+  const activity = useWhatsAppActivity();
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const busy = !!activity?.busy.has(m.id);
+  const run = async (mode: 'repair' | 'resend') => {
+    if (!activity) return;
+    setError(null);
+    setDone(null);
+    const err = await activity.repair(m.id, mode);
+    if (err) setError(err);
+    else setDone(mode === 'repair' ? 'Listo: se reenvió con una sesión nueva.' : 'Copia nueva en cola: sale en un momento.');
+  };
+  return (
+    <div className="mt-1 space-y-1" onClick={(e) => e.stopPropagation()}>
+      {attention === 'retry' && (
+        <p className="text-[11px] text-amber-700">
+          Su teléfono no pudo abrirlo y pidió reenviarlo{m.lastRetryRequestAt ? ` (${whenLabel(m.lastRetryRequestAt, now)})` : ''}; se reenvió solo.
+        </p>
+      )}
+      {attention === 'unconfirmed' && (
+        <p className="text-[11px] text-amber-700">Sin confirmación de entrega: teléfono apagado o mensaje atascado.</p>
+      )}
+      {!attention && <p className="text-[11px] text-slate-500">¿Le sale «Esperando el mensaje»?</p>}
+      {m.lastRepairAt && <p className="text-[10px] text-slate-400">Reparado {whenLabel(m.lastRepairAt, now)}</p>}
+      {m.resentAt && <p className="text-[10px] text-slate-400">Copia nueva enviada {whenLabel(m.resentAt, now)}</p>}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {busy ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400" />
+        ) : (
+          <>
+            {m.canRepair && (
+              <button
+                type="button"
+                onClick={() => run('repair')}
+                title="Renueva el cifrado con su teléfono y reenvía ESTE mismo mensaje: el «Esperando el mensaje» se convierte en el texto (no le llega duplicado)."
+                className="inline-flex items-center px-2 py-1 text-[11px] font-bold rounded-lg bg-white border border-amber-200 text-amber-800 hover:bg-amber-50 transition-colors"
+              >
+                <Wrench className="w-3 h-3 mr-1" /> Reparar entrega
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => run('resend')}
+              title="Envía una copia nueva del mensaje, empezando con un cifrado nuevo."
+              className="inline-flex items-center px-2 py-1 text-[11px] font-medium rounded-lg text-slate-500 hover:text-slate-700 hover:bg-white border border-transparent hover:border-slate-200 transition-colors"
+            >
+              <Send className="w-3 h-3 mr-1" /> Enviar de nuevo
+            </button>
+          </>
+        )}
+      </div>
+      {done && <p className="text-[11px] text-emerald-700">{done}</p>}
+      {error && <p className="text-[11px] text-rose-600">{error}</p>}
+    </div>
   );
 }
 

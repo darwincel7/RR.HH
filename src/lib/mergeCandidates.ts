@@ -47,6 +47,9 @@ export interface EvidenceGroup {
 
 export const EVIDENCE_GROUPS: EvidenceGroup[] = [
   { key: 'stage2', label: 'Formulario de etapa 2', fields: ['stage2Answers', 'stage2Scoring', 'stage2SubmittedAt'] },
+  // Aparte de las respuestas: un link enviado y sin responder en el principal no puede
+  // impedir que se tomen las respuestas reales del duplicado.
+  { key: 'stage2link', label: 'Envío del formulario de etapa 2 (fechas)', fields: ['stage2Link'] },
   { key: 'test', label: 'Test situacional', fields: ['testAnswers', 'testResults', 'testSubmittedAt', 'testIntegrity'] },
   { key: 'interview', label: 'Entrevista (scorecard, notas y análisis IA)', fields: ['interviewScorecard', 'interviewObservation', 'interviewAiEvaluation'] },
   { key: 'personality', label: 'Test de personalidad', fields: ['personalityTest'] },

@@ -251,3 +251,28 @@ export async function sendWhatsAppAutomation(
     return { status: 'failed', reason: 'error_de_red', emailed };
   }
 }
+
+/**
+ * A sent message the candidate can't read ("Esperando el mensaje. Esto puede tomar
+ * tiempo"). 'repair' renews the encryption session with the candidate's phone and
+ * re-sends the SAME message — the stuck bubble turns into the real text, and a phone
+ * that already had it ignores the copy. 'resend' queues a NEW copy that starts from a
+ * fresh session (for messages too old to repair). Resolves to an error text, or null.
+ */
+export async function repairWhatsAppMessage(outboxId: string, mode: 'repair' | 'resend'): Promise<string | null> {
+  try {
+    const res = await apiFetch('/api/whatsapp/outbox/repair', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: outboxId, mode }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({} as any));
+      return d?.error || 'No se pudo completar la acción.';
+    }
+    notifyWhatsAppActivityChanged();
+    return null;
+  } catch {
+    return 'No se pudo completar la acción (sin conexión).';
+  }
+}
