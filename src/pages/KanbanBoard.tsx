@@ -24,6 +24,7 @@ import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import StageNotifyToggle from '../components/StageNotifyToggle';
 import { useStageNotifications } from '../lib/useStageNotifications';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
+import { FormTimingChip } from '../components/FormTimingCard';
 import { interviewInviteStamp, isInterviewStage } from '../lib/interviewAttendance';
 import { useParticipantStatuses } from '../lib/participantStatus';
 import { useScrollMemory } from '../lib/useScrollMemory';
@@ -918,6 +919,9 @@ export default function KanbanBoard() {
                                   stage={item.stage}
                                   vacancy={vacancy?.title}
                                 />
+
+                                {/* Formulario de etapa 2: cuánto lleva enviado o cuánto tardó. */}
+                                <FormTimingChip app={item} />
 
                                 {/* ¿Vino a la entrevista? Solo aparece en quien fue convocado.
                                     El clic no abre el perfil ni arrastra la tarjeta. */}

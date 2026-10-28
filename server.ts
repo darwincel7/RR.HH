@@ -49,6 +49,13 @@ import {
   decodeImageDataUrl, firstIssueMessage, EMAIL_RE, isOurStorageUrl,
 } from './serverSchemas';
 import { normalizePhone } from './src/lib/phone';
+import {
+  encodeSentMessage, sentMessageFromOutbox, recipientDeviceJids, repairBlockedReason, isOwnDevice,
+} from './serverWhatsAppRetry';
+import {
+  extractEvalApplicationIds, stage2LinkSendUpdate, stage2LinkReceiptUpdate, stage2LinkOpenUpdate,
+  aggregateStage2Sends, approximateStage2Link, type LinkSend,
+} from './serverFormLinks';
 import { hasInterviewEvidence } from './src/lib/interviewScorecard';
 import { planCandidateMerge } from './src/lib/mergeCandidates';
 import { blocksNewApplication, isSameApplicant, preferredName } from './src/lib/applicantIdentity';
@@ -200,6 +207,9 @@ let connectionGeneration = 0;
 // can't decrypt a message (stale session, key rotation, a past storage failure), it
 // asks the sender to retry; without getMessage the request goes unanswered and the
 // recipient stays on "Esperando el mensaje. Esto puede tomar tiempo" FOREVER.
+// This map is only the fast path: it dies with the process, and on Cloud Run the
+// retry often arrives AFTER a restart (the candidate's phone came online hours later).
+// getMessageForRetry falls back to the durable copy in the outbox.
 const sentMessageStore = new Map<string, any>();
 
 // Inbound message ids already processed. Offline catch-up delivers held messages as
@@ -217,13 +227,54 @@ const rememberSentMessage = (info: any) => {
   }
 };
 
+// The message WhatsApp asks us to re-encrypt (decryption-retry request from the
+// recipient's phone): memory first, then the outbox — the exact content stored at send
+// time, or rebuilt from the text for messages sent before that (serverWhatsAppRetry.ts).
+async function getMessageForRetry(key: any): Promise<proto.IMessage | undefined> {
+  const id = typeof key?.id === 'string' ? key.id : '';
+  if (!id) return undefined;
+  let message: proto.IMessage | undefined = sentMessageStore.get(id);
+  let doc: any = null;
+  if (!message && db?.supportsOutbox) {
+    doc = await db.findOutboxByWaMessageId(id).catch(() => null);
+    message = sentMessageFromOutbox(doc);
+  }
+  // Our own linked phone asking for its copy says nothing about the candidate.
+  if (!isOwnDevice(key?.participant, sock?.user as any)) {
+    noteDecryptRetry(id, !!message, doc).catch(e => console.error('[wa-retry] no se pudo registrar la petición de reenvío:', e));
+  }
+  return message;
+}
+
+// Visibility: the recruiter sees that the candidate's phone couldn't decrypt the message
+// and that it was re-sent on its own — the evidence behind an "Esperando el mensaje".
+async function noteDecryptRetry(waMessageId: string, served: boolean, known: any) {
+  if (!db?.supportsOutbox) return;
+  const doc = known || await db.findOutboxByWaMessageId(waMessageId).catch(() => null);
+  if (!doc?.id) {
+    if (!served) console.warn(`[wa-retry] el destinatario pidió reenviar ${waMessageId}, pero no está en la cola (¿escrito desde el teléfono?).`);
+    return;
+  }
+  const n = (Number(doc.retryRequests) || 0) + 1;
+  const now = new Date();
+  await db.markOutbox(doc.id, { retryRequests: n, lastRetryRequestAt: now, retryServed: served });
+  console.log(`[wa-retry] ${doc.candidateName || doc.phone} no pudo descifrar el mensaje (${waMessageId}); ${served ? 'se reenvió con sesión nueva' : 'NO había con qué reenviarlo'} (petición #${n}).`);
+  if (doc.formApplicationId) {
+    await db.updateDocIf('applications', doc.formApplicationId, cur => cur
+      ? { stage2Link: { retryRequests: (Number(cur.stage2Link?.retryRequests) || 0) + 1, lastRetryRequestAt: now } }
+      : null).catch(() => { /* best effort */ });
+  }
+}
+
 // Delivery receipts for what the queue sent (side panel: "Entregado" / "Leído").
 // WhatsApp message id → outbox id, plus the highest status already recorded, so each
 // receipt costs at most one write and never a lookup. After a restart the map is empty
 // and receipts for older messages fall back to one indexed lookup.
-const outboxReceipts = new Map<string, { outboxId: string; status: number }>();
-const rememberOutboxReceipt = (waMessageId: string, outboxId: string) => {
-  outboxReceipts.set(waMessageId, { outboxId, status: 2 });
+// formApplicationId: the message carried a stage-2 form link — its receipts also date
+// the form's "le llegó" / "lo leyó" (application.stage2Link).
+const outboxReceipts = new Map<string, { outboxId: string; status: number; formApplicationId: string | null }>();
+const rememberOutboxReceipt = (waMessageId: string, outboxId: string, formApplicationId: string | null) => {
+  outboxReceipts.set(waMessageId, { outboxId, status: 2, formApplicationId });
   if (outboxReceipts.size > 2000) {
     const oldest = outboxReceipts.keys().next().value;
     if (oldest !== undefined) outboxReceipts.delete(oldest);
@@ -238,14 +289,88 @@ async function recordOutboxReceipt(waMessageId: string, status: number) {
   if (!entry) {
     // Unknown id: a message from before a restart — or one typed on the phone itself,
     // which isn't in the outbox at all (the lookup then simply finds nothing).
-    const outboxId = await db.findOutboxIdByWaMessageId(waMessageId).catch(() => null);
-    if (!outboxId) return;
-    entry = { outboxId, status: 2 };
+    const doc = await db.findOutboxByWaMessageId(waMessageId).catch(() => null);
+    if (!doc?.id) return;
+    entry = { outboxId: doc.id, status: 2, formApplicationId: typeof doc.formApplicationId === 'string' ? doc.formApplicationId : null };
     outboxReceipts.set(waMessageId, entry);
   }
   entry.status = Math.min(status, 4);
   await db.markOutbox(entry.outboxId, status >= 4 ? { readAt: new Date() } : { deliveredAt: new Date() })
     .catch(e => console.error('[wa-outbox] no se pudo guardar el acuse de recibo:', e));
+  if (entry.formApplicationId) {
+    const now = Date.now();
+    await db.updateDocIf('applications', entry.formApplicationId, cur => {
+      const update = cur ? stage2LinkReceiptUpdate(cur.stage2Link, status, now) : null;
+      return update ? { stage2Link: update } : null;
+    }).catch(e => console.error('[form-link] no se pudo guardar el acuse del formulario:', e));
+  }
+}
+
+// The stage-2 form link went out (WhatsApp or email): the candidate's clock starts now.
+// The link is recognized in the text itself (serverFormLinks.ts). Best effort — it never
+// blocks or fails the send. Returns the application ids it recognized.
+async function recordFormLinkSend(text: unknown, send: LinkSend): Promise<string[]> {
+  const ids = extractEvalApplicationIds(text);
+  for (const id of ids) {
+    try {
+      await db.updateDocIf('applications', id, cur => cur ? { stage2Link: stage2LinkSendUpdate(cur.stage2Link, send) } : null);
+    } catch (e) {
+      console.error(`[form-link] no se pudo registrar el envío del formulario de ${id}:`, e);
+    }
+  }
+  return ids;
+}
+
+// One-time: forms sent BEFORE stage2Link existed get their dates from the queue and the
+// message history (and, with no trace at all, from the move to "Formulario etapa 2
+// enviado", flagged approximate). Never overwrites a live record. Idempotent: a marker
+// doc says it ran; a crash midway just runs it again.
+const STAGE2_BACKFILL_VERSION = 1;
+async function backfillStage2Links() {
+  if (!db?.supportsOutbox) return;
+  const marker = await db.getDocData('whatsapp_runtime', 'stage2_link_backfill').catch(() => null);
+  if (Number(marker?.version) >= STAGE2_BACKFILL_VERSION) return;
+  const STAGE = 'Formulario etapa 2 enviado';
+  const [outbox, history, waiting] = await Promise.all([
+    db.listDocsByField('whatsapp_outbox', 'stage', STAGE, 3000),
+    db.listDocsByField('whatsapp_messages', 'stage', STAGE, 5000),
+    db.listDocsByField('applications', 'stage', STAGE, 3000),
+  ]);
+  const sends = aggregateStage2Sends(outbox, history);
+  const fill = async (appId: string, link: Record<string, any>) => db.updateDocIf('applications', appId, cur =>
+    cur && !tsToMs(cur.stage2Link?.firstSentAt) ? { stage2Link: link } : null).catch(() => false);
+  let updated = 0;
+  let approximated = 0;
+  for (const [appId, link] of sends) {
+    if (await fill(appId, link)) updated++;
+  }
+  for (const app of waiting) {
+    if (sends.has(app.id) || tsToMs(app.stage2Link?.firstSentAt)) continue;
+    const approx = approximateStage2Link(app);
+    if (approx && await fill(app.id, approx)) approximated++;
+  }
+  // Recent sends learn which form they carried, so their late receipts still date it.
+  const recentCutoff = Date.now() - 30 * 86_400_000;
+  for (const m of outbox) {
+    if (m.status !== 'sent' || m.formApplicationId || tsToMs(m.sentAt) < recentCutoff) continue;
+    const appId = extractEvalApplicationIds(m.message)[0];
+    if (appId) await db.markOutbox(m.id, { formApplicationId: appId }).catch(() => { /* best effort */ });
+  }
+  await db.setDocData('whatsapp_runtime', 'stage2_link_backfill', {
+    version: STAGE2_BACKFILL_VERSION, at: new Date(), updated, approximated,
+  });
+  console.log(`[form-link] relleno de envíos de formulario: ${updated} con fecha real, ${approximated} aproximados por el cambio de etapa.`);
+}
+
+// A fresh Signal session with EVERY device of the recipient: the next message (or the
+// re-relay of a stuck one) starts as a pre-key message, which their phone can always
+// decrypt. This is what WhatsApp's own retry does for the one device that asked.
+async function forceFreshSessions(jid: string): Promise<number> {
+  if (!sock) throw new Error('WhatsApp no está conectado');
+  const devices = await sock.getUSyncDevices([jid], false, true).catch(() => []);
+  const jids = recipientDeviceJids(jid, devices as any);
+  if (jids.length) await sock.assertSessions(jids, true);
+  return jids.length;
 }
 
 // Custom Firestore auth state to ensure persistence across container restarts
@@ -432,9 +557,10 @@ async function doConnectToWhatsApp() {
     // We only need messages from now on — syncing years of history on a fresh pairing
     // is a heavy, bot-typical first act for a brand-new session.
     syncFullHistory: false,
-    // Serve decryption-retry requests from the recent-sends store so failed
-    // deliveries heal automatically instead of hanging on "Esperando el mensaje".
-    getMessage: async (key: any) => sentMessageStore.get(key?.id) || undefined,
+    // Serve decryption-retry requests (memory, then the durable copy in the outbox) so
+    // failed deliveries heal automatically instead of hanging on "Esperando el mensaje"
+    // — also when the request arrives after a restart.
+    getMessage: getMessageForRetry,
   });
 
   sock.ev.on('connection.update', async (update) => {
@@ -703,6 +829,10 @@ async function bootstrap() {
   // In admin mode the backend owns CV processing (centralized, no per-browser duplication).
   if (db.canEnforceAuth) {
     console.log('[server CV worker] Admin mode — backend CV processor enabled (browser worker stands down).');
+    // Dates the stage-2 forms sent before their sends were recorded (runs once ever).
+    setTimeout(() => {
+      backfillStage2Links().catch(e => console.error('[form-link] el relleno de envíos falló (se reintenta al reiniciar):', e));
+    }, 20_000);
     processPendingCVs();
     setInterval(() => {
       processPendingCVs()
@@ -1427,6 +1557,9 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
       // ---- Phase 1: everything BEFORE the message reaches the socket. A failure
       // here means the message was NOT delivered, so retrying is always safe.
       let waMessageId: string | null = null;
+      let waMessageProto: string | null = null;
+      // A stage-2 form link in the text: its send, receipts and opens date the form.
+      const formApplicationId = extractEvalApplicationIds(msg.message)[0] || null;
       try {
         const jid = formatWhatsAppNumber(msg.phone);
         const number = jid.split('@')[0];
@@ -1460,10 +1593,22 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
           await sock!.sendPresenceUpdate('paused', targetJid);
         } catch { /* presence is best-effort — never blocks the send */ }
 
+        // "Enviar de nuevo" after an "Esperando el mensaje": start from a brand-new
+        // encryption session so this copy can't fail the way the first one did.
+        if (msg.freshSession) {
+          try {
+            const n = await forceFreshSessions(targetJid);
+            console.log(`[wa-retry] sesión de cifrado renovada con ${n} dispositivo(s) de ${msg.candidateName || number} antes de reenviar.`);
+          } catch (e: any) {
+            console.warn('[wa-retry] no se pudo renovar la sesión antes de reenviar (se envía igual):', e?.message || e);
+          }
+        }
+
         const info = await sock!.sendMessage(targetJid, { text: msg.message });
         rememberSentMessage(info);
         waMessageId = info?.key?.id || null;
-        if (waMessageId) rememberOutboxReceipt(waMessageId, msg.id);
+        waMessageProto = encodeSentMessage(info?.message);
+        if (waMessageId) rememberOutboxReceipt(waMessageId, msg.id, formApplicationId);
       } catch (err: any) {
         const emsg = err?.message || String(err);
         if (emsg === 'phone_invalido') {
@@ -1499,6 +1644,10 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
           await db.markOutbox(msg.id, {
             status: 'sent', sentAt: new Date(), attempts: (msg.attempts || 0) + 1, lastError: null,
             ...(waMessageId ? { waMessageId } : {}),
+            // The exact content, so a decryption-retry request can be answered even
+            // after a restart (getMessageForRetry).
+            ...(waMessageProto ? { waMessageProto } : {}),
+            ...(formApplicationId ? { formApplicationId } : {}),
           });
           marked = true;
         } catch (markErr) {
@@ -1519,6 +1668,15 @@ async function drainWhatsAppOutbox(): Promise<{ sent: number; requeued: number; 
         }
       } catch (histErr) {
         console.error('[wa-outbox] no se pudo guardar el historial del mensaje:', histErr);
+      }
+
+      // The form's clock starts when the link actually leaves — not when the card was
+      // moved (the pace and the send window can hold it for hours).
+      if (formApplicationId) {
+        await recordFormLinkSend(msg.message, {
+          atMs: Date.now(), queuedAtMs: tsToMs(msg.createdAt), channel: 'whatsapp',
+          waMessageId, outboxId: msg.id,
+        });
       }
       return 'sent';
     };
@@ -2308,7 +2466,13 @@ async function startServer() {
       if (!body) return;
       const { to, subject, html } = body;
       if (subject.length > 300 || html.length > 100_000) return res.status(413).json({ error: 'Contenido demasiado largo' });
-      const r = await sendMail(to, subject.slice(0, 300), html);
+      const r: any = await sendMail(to, subject.slice(0, 300), html);
+      // The stage-2 form link went out by email: it dates the form too (a simulated
+      // send — no SMTP configured — reached nobody, so it doesn't count).
+      if (r?.success && !r.simulated) {
+        const now = Date.now();
+        recordFormLinkSend(html, { atMs: now, queuedAtMs: now, channel: 'email' }).catch(() => { /* best effort */ });
+      }
       res.json(r);
     } catch (error) {
       console.error("Error sending email:", error);
@@ -2437,6 +2601,16 @@ async function startServer() {
         : null;
 
       if (kind === 'eval') {
+        // The candidate opened the link — proof the message reached them and could be
+        // read (an "Esperando el mensaje" never gets here). Throttled to one write per
+        // 10 min per form; never delays the page.
+        if (!application.stage2Answers) {
+          const open = stage2LinkOpenUpdate(application.stage2Link, Date.now());
+          if (open) {
+            db.setDocData('applications', applicationId, { stage2Link: open })
+              .catch(e => console.warn('[form-link] no se pudo registrar la apertura:', e?.message || e));
+          }
+        }
         const q = settings.forms?.stage2Questions;
         return res.json({
           valid: true,
@@ -2912,6 +3086,15 @@ async function startServer() {
         readAt: iso(m.readAt),
         failedAt: iso(m.failedAt),
         attempts: m.attempts || 0,
+        // "Esperando el mensaje": the candidate's phone asked for it again (it couldn't
+        // decrypt it) — and whether a recruiter already repaired/re-sent it.
+        retryRequests: Number(m.retryRequests) || 0,
+        lastRetryRequestAt: iso(m.lastRetryRequestAt),
+        repairs: Number(m.repairs) || 0,
+        lastRepairAt: iso(m.lastRepairAt),
+        resentAt: iso(m.resentAt),
+        resendOf: m.resendOf || null,
+        canRepair: m.status === 'sent' && !!m.waMessageId,
       });
 
       const stats = { ...snap.stats };
@@ -2998,6 +3181,77 @@ async function startServer() {
     } catch (err) {
       console.error('[wa-outbox] acción sobre mensaje falló:', err);
       res.status(500).json({ error: 'No se pudo completar la acción.' });
+    }
+  });
+
+  // A SENT message the candidate can't read ("Esperando el mensaje. Esto puede tomar
+  // tiempo"). Two ways out:
+  //  'repair' — renew the encryption session with every device of the candidate and
+  //             re-relay the SAME message (same id): the stuck bubble on their phone
+  //             turns into the real message, and a phone that already had it ignores
+  //             the copy. Not a new message, so it costs no send budget.
+  //  'resend' — a NEW copy through the queue, from a brand-new session (for messages
+  //             too old or without an id to repair). Goes first, like the chat.
+  app.post("/api/whatsapp/outbox/repair", requireRecruiter, globalRateLimit(30), rateLimit(15), async (req, res) => {
+    try {
+      if (!db?.supportsOutbox) return res.status(400).json({ error: 'La cola no está disponible en este modo.' });
+      const id = typeof req.body?.id === 'string' ? req.body.id : '';
+      const mode = req.body?.mode === 'resend' ? 'resend' : 'repair';
+      if (!id || id.length > 200) return res.status(400).json({ error: 'Solicitud inválida.' });
+      const msg = await db.getOutboxMessage(id);
+      if (!msg) return res.status(404).json({ error: 'El mensaje ya no existe.' });
+      if (msg.status !== 'sent') return res.status(409).json({ error: 'Solo se pueden reparar mensajes que ya salieron.' });
+
+      if (mode === 'resend') {
+        if (await isOptedOut(msg.phone)) {
+          return res.status(409).json({ error: 'Este candidato pidió no recibir más mensajes por WhatsApp.' });
+        }
+        // One copy at a time: a second click while the first copy still waits (e.g.
+        // WhatsApp disconnected) must not become two messages.
+        const recent = await db.listOutboxByPhone(msg.phone);
+        if (recent.some((q: any) => q.resendOf === id && (q.status === 'queued' || q.status === 'sending'))
+            || await isDuplicateOutboxMessage(msg.phone, msg.message, 'manual')) {
+          return res.json({ success: true, queued: true, already: true });
+        }
+        await db.enqueueWhatsApp({
+          phone: msg.phone, message: msg.message, origin: 'manual',
+          candidateId: msg.candidateId || null, candidateName: msg.candidateName || null,
+          stage: msg.stage || null, ...(msg.topicKey ? { topicKey: msg.topicKey } : {}),
+          resendOf: id, freshSession: true,
+          status: 'queued', attempts: 0, nextAttemptAt: new Date(),
+        });
+        await db.markOutbox(id, { resentAt: new Date() });
+        waManualWaiting = true;
+        nudgeWhatsAppOutbox('reenvío tras "Esperando el mensaje"');
+        return res.json({ success: true, queued: true });
+      }
+
+      const blocked = repairBlockedReason(msg, Date.now(), tsToMs);
+      if (blocked) return res.status(409).json({ error: blocked });
+      if (!(await ensureWhatsAppOwnership())) {
+        return res.status(409).json({ error: 'Otra instancia del servidor tiene la conexión de WhatsApp. Intenta en un minuto.' });
+      }
+      if (!sock || connectionStatus !== 'connected' || waReconnectSuspended) {
+        return res.status(409).json({ error: 'WhatsApp no está conectado ahora. Reconéctalo en Ajustes y vuelve a intentar.' });
+      }
+      const message = sentMessageStore.get(msg.waMessageId) || sentMessageFromOutbox(msg);
+      if (!message) return res.status(409).json({ error: 'No hay contenido que reenviar; usa "Enviar de nuevo".' });
+
+      const jid = formatWhatsAppNumber(msg.phone);
+      const devices = await forceFreshSessions(jid);
+      await sock.relayMessage(jid, message, { messageId: msg.waMessageId, useUserDevicesCache: false });
+      sentMessageStore.set(msg.waMessageId, message);
+      const now = new Date();
+      await db.markOutbox(id, { repairs: (Number(msg.repairs) || 0) + 1, lastRepairAt: now });
+      if (msg.formApplicationId) {
+        db.updateDocIf('applications', msg.formApplicationId, cur => cur ? { stage2Link: { repairedAt: now } } : null)
+          .catch(() => { /* best effort */ });
+      }
+      console.log(`[wa-retry] reparación manual de ${msg.waMessageId} para ${msg.candidateName || msg.phone}: sesión nueva con ${devices} dispositivo(s) y reenvío del mismo mensaje.`);
+      res.json({ success: true, repaired: true, devices });
+    } catch (err: any) {
+      console.error('[wa-retry] la reparación falló:', err);
+      res.status(500).json({ error: `No se pudo reparar: ${String(err?.message || err).slice(0, 160)}` });
     }
   });
 

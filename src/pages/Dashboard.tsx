@@ -7,6 +7,7 @@ import { Briefcase, Users, UserCheck, Clock, ArrowRight, TrendingUp, Activity, S
 import { Link } from 'react-router-dom';
 import { motion } from 'motion/react';
 import InterviewAttendanceDashboard from '../components/InterviewAttendanceDashboard';
+import FormResponseDashboard from '../components/FormResponseDashboard';
 
 // Vibrant Premium Palette
 // Recharts is the heaviest dependency on this route. Loading it lazily lets the cards,
@@ -209,6 +210,11 @@ export default function Dashboard() {
           los contadores de arriba. */}
       <motion.div variants={itemVariants}>
         <InterviewAttendanceDashboard />
+      </motion.div>
+
+      {/* Formulario de etapa 2: cuánto tardan en completarlo y quién lo hizo a destiempo. */}
+      <motion.div variants={itemVariants}>
+        <FormResponseDashboard />
       </motion.div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">

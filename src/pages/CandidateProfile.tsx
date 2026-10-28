@@ -17,6 +17,7 @@ import CandidateWhatsAppState from '../components/CandidateWhatsAppState';
 import InterviewAttendanceButton from '../components/InterviewAttendanceButton';
 import MergeCandidatesModal from '../components/MergeCandidatesModal';
 import MergedEvidenceCard from '../components/MergedEvidenceCard';
+import FormTimingCard from '../components/FormTimingCard';
 import { APPLICATION_SCORE, cvForApplication, cvToAnalyze } from '../lib/applicationCv';
 import PersonalityTestCard from '../components/PersonalityTestCard';
 import LinkQrModal from '../components/LinkQrModal';
@@ -1397,6 +1398,9 @@ export default function CandidateProfile() {
                     </div>
                   )}
                 </div>
+
+                {/* Cuándo se le envió el link, cuándo lo abrió y cuándo lo completó. */}
+                <FormTimingCard application={application} />
                 
                 {application?.stage2Answers ? (
                   <div className="flex flex-col lg:flex-row gap-6">

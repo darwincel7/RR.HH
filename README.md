@@ -109,6 +109,9 @@ error es silencioso y caro:
 | [`serverDb.test.ts`](serverDb.test.ts) | Las consultas con que se busca a una persona por su contacto: si no devuelven su perfil, la comparación de identidad nunca llega a hacerse y se duplica — la precisa pide teléfono **y** correo a la vez, y las de un solo campo prueban el teléfono como lo escribió (no solo canónico) y el correo en minúsculas. También el rastro de una unificación: hasta el perfil vivo, sin colgarse en un ciclo, y qué pasa si la lectura falla |
 | [`src/lib/personalityTest.test.ts`](src/lib/personalityTest.test.ts) | El test de personalidad: las frases invertidas cuentan al revés, el resultado se calcula solo con las preguntas que la persona vio, todas se exigen, una plantilla rota no se guarda ni se aplica y los avisos de "respondió todo igual" / "perfil demasiado perfecto" |
 | [`serverPersonalityEval.test.ts`](serverPersonalityEval.test.ts) | Qué ve la IA del test de personalidad (resultado ya calculado, frases invertidas, avisos, respuestas abiertas como datos y no como instrucciones) y qué se guarda de su respuesta |
+| [`src/lib/formTiming.test.ts`](src/lib/formTiming.test.ts) | Los tiempos del formulario de etapa 2: la fecha límite es el final (hora de RD) del día que dijo el mensaje, completar ese mismo día es a tiempo, un completado sin envío registrado no inventa una duración, y cuándo un WhatsApp sin confirmar se marca como posible «Esperando el mensaje» |
+| [`serverFormLinks.test.ts`](serverFormLinks.test.ts) | El registro del envío del link: se reconoce `/eval/{id}` en el texto (WhatsApp o correo), el primer envío fija el reloj y la fecha límite y un reenvío no los mueve; acuses y aperturas solo cuentan la primera vez; el relleno histórico no cuenta dos veces un envío que está en la cola y en el historial |
+| [`serverWhatsAppRetry.test.ts`](serverWhatsAppRetry.test.ts) | Que el mensaje que se reenvía cuando el teléfono del candidato no pudo descifrarlo sea **idéntico, byte a byte**, al que Baileys envió (también reconstruido desde el texto, para los mensajes anteriores al cambio), a qué dispositivos se les abre sesión nueva al reparar y los límites de "Reparar entrega" |
 
 El workflow [`ci.yml`](.github/workflows/ci.yml) verifica tipos, pruebas y build en cada
 push y cada PR a `main`. Los tres pasos corren aunque uno falle, para ver todos los
@@ -401,9 +404,32 @@ las respuestas entrantes dejaron de enlazarse con su candidato.
   (visible en *Candidatos*). El botón **Buscar fotos en los CV** sigue disponible para
   acelerar a mano (`/api/photos/backfill`).
 
+- **Formulario de etapa 2: cuánto tardó cada uno y quién lo hizo a destiempo** (Dashboard,
+  perfil y tarjetas del Kanban). Para cada postulación queda en `stage2Link` **cuándo salió
+  el link** (por WhatsApp y/o correo), **cuándo le llegó** y **lo leyó** (acuses de
+  WhatsApp), **cuándo abrió el link** y, con `stage2SubmittedAt`, **cuándo lo completó**.
+  El reloj empieza cuando el link sale **de verdad** —no al mover la tarjeta: con el ritmo
+  anti-bloqueo y el horario de envío puede salir horas después— y la **fecha límite** es la
+  que el mensaje le dio al candidato ("antes del jueves 15": hasta el final de ese día, hora
+  de RD). Estados: *A tiempo*, *Fuera de plazo* (con cuánto se pasó), *Pendiente*, *Vencido
+  sin completar* y *Completado (envío sin registrar)* cuando el link llegó por otra vía.
+  - **Dashboard → "Formulario etapa 2: tiempo de respuesta"** (30/90 días/todo): enviados,
+    % completado, **tiempo típico** (mediana) y el más lento, cuántos fuera de plazo, la
+    distribución (<1 h, 1–6 h, 6–24 h, 1–3 días, >3 días) y la lista filtrable (*A
+    destiempo*, *Sin completar*, *Problema de entrega*), ordenable por quién más tardó.
+  - **Perfil → Formulario Etapa 2**: la línea de tiempo Enviado → Le llegó → Lo leyó →
+    Abrió el link → Completado, cuánto tardó y el plazo.
+  - **Kanban**: en las columnas del formulario, "Formulario enviado hace 2 días",
+    "vencido: +1 día del plazo" o "Completó el formulario en 5 h".
+  El servidor reconoce el link `/eval/{id}` en el texto que sale ([`serverFormLinks.ts`](serverFormLinks.ts)),
+  así que también cuenta si se pega a mano en el chat. Lo enviado antes de este registro se
+  fechó una sola vez desde la cola de WhatsApp y el historial; quien no dejó rastro y sigue en
+  "Formulario etapa 2 enviado" se fecha por el cambio de etapa y se marca **≈ aproximado**.
+  Lógica en [`formTiming.ts`](src/lib/formTiming.ts).
+
 > Las notas necesitan las reglas de Firestore actualizadas (`candidate_notes`), y el test
 > de personalidad también (un postulante no puede crear su postulación con un
-> `personalityTest` ya puesto). Se publican solas al llegar a `main` (workflow *Deploy
+> `personalityTest` —ni un `stage2Link`— ya puesto). Se publican solas al llegar a `main` (workflow *Deploy
 > Firebase Rules*) o con `npm run deploy:rules`.
 
 ## Mensajería de WhatsApp: cola durable y propietario único
@@ -484,6 +510,41 @@ Complementos que eliminan las desconexiones que sufría el envío masivo:
   temporizador de 60 s como red de seguridad.
 - La lógica pura de decisiones (backoff, ritmo, cuándo parar sin quemar reintentos)
   vive en [`serverWhatsAppQueue.ts`](serverWhatsAppQueue.ts), fijada por pruebas.
+
+### «Esperando el mensaje. Esto puede tomar tiempo»
+
+Eso ve un candidato cuando su teléfono recibe un mensaje nuestro que **no puede
+descifrar** (la sesión de cifrado quedó desfasada: un reinicio a mitad de guardar claves,
+un cambio de teléfono, la migración de WhatsApp a identificadores LID…). WhatsApp tiene su
+propio remedio: el teléfono del candidato **pide que se lo reenvíen** y Baileys lo vuelve a
+cifrar con una sesión nueva — pero solo si `getMessage` le devuelve el contenido.
+
+**Por qué se quedaba así para siempre:** ese contenido vivía solo en memoria. En Cloud Run
+la instancia se reinicia o se apaga (deploys, inactividad) y la petición de reenvío suele
+llegar **después** — cuando el candidato enciende los datos horas más tarde, o cuando el
+servidor reconecta y recibe las peticiones que esperaban. Sin el contenido, la petición se
+ignoraba y la burbuja quedaba en "Esperando el mensaje" para siempre.
+
+Lo que cambió ([`serverWhatsAppRetry.ts`](serverWhatsAppRetry.ts)):
+
+- **El contenido exacto de cada envío se guarda en la cola** (`whatsapp_outbox.waMessageProto`)
+  y `getMessage` lo busca ahí cuando no está en memoria. Los mensajes enviados antes del
+  cambio se reconstruyen desde su texto — idénticos byte a byte a lo que salió (fijado por
+  prueba) — así que también se curan los que ya estaban atascados, en cuanto el teléfono del
+  candidato vuelva a pedirlos.
+- **Cada petición de reenvío queda registrada** (`retryRequests`, `lastRetryRequestAt`) y se
+  ve en el panel lateral ("Su teléfono no pudo abrirlo y pidió reenviarlo; se reenvió solo")
+  y en el perfil.
+- **Reparar entrega** (panel lateral, en cualquier mensaje enviado aún no leído, y perfil →
+  Formulario Etapa 2): renueva la sesión de cifrado con **todos** los dispositivos del
+  candidato y reenvía **el mismo mensaje** (mismo id): la burbuja atascada se convierte en el
+  texto y quien ya lo tenía no lo ve duplicado. No es un mensaje nuevo, así que no gasta el
+  cupo diario. Máx. 3 por mensaje, con 2 min entre una y otra.
+- **Enviar de nuevo**: una copia nueva por la cola (sale primero, como el chat), que empieza
+  con una sesión de cifrado nueva — para mensajes viejos o sin id que reparar.
+- Señales de alerta, sin que el candidato tenga que llamar: un WhatsApp sin acuse de entrega
+  pasadas 2 h, o con petición de reenvío y sin leer, se marca en el panel; en el formulario
+  de etapa 2, además, si **no ha abierto el link** (abrirlo prueba que el mensaje se leyó).
 
 En desarrollo (sin Admin SDK) el envío es directo, como siempre.
 

@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { apiFetch } from '../lib/api';
 import { WA_ACTIVITY_CHANGED_EVENT, type ActivityData } from '../lib/whatsappActivity';
+import { repairWhatsAppMessage } from '../lib/whatsapp';
 
 /**
  * One shared view of the WhatsApp queue for the whole staff app: the side panel and
@@ -19,7 +20,10 @@ interface WhatsAppActivityValue {
   retry: (id: string) => Promise<string | null>;
   /** Remove a failed message from the list (it won't be sent). */
   dismiss: (id: string) => Promise<string | null>;
-  /** Ids with a retry/dismiss in flight (to show a spinner on that button). */
+  /** A sent message stuck on "Esperando el mensaje": repair it (same message, fresh
+   * encryption session) or queue a new copy. Resolves to an error text, or null. */
+  repair: (id: string, mode: 'repair' | 'resend') => Promise<string | null>;
+  /** Ids with a retry/dismiss/repair in flight (to show a spinner on that button). */
   busy: Set<string>;
 }
 
@@ -107,13 +111,24 @@ export function WhatsAppActivityProvider({ children }: { children: React.ReactNo
     }
   }, [refresh]);
 
+  const repair = useCallback(async (id: string, mode: 'repair' | 'resend'): Promise<string | null> => {
+    setBusy(prev => new Set(prev).add(id));
+    try {
+      return await repairWhatsAppMessage(id, mode);
+    } finally {
+      await refresh();
+      setBusy(prev => { const next = new Set(prev); next.delete(id); return next; });
+    }
+  }, [refresh]);
+
   const value = useMemo<WhatsAppActivityValue>(() => ({
     data,
     refresh,
     retry: (id) => act(id, 'retry'),
     dismiss: (id) => act(id, 'dismiss'),
+    repair,
     busy,
-  }), [data, refresh, act, busy]);
+  }), [data, refresh, act, repair, busy]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
