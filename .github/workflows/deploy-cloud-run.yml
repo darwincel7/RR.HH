@@ -6,8 +6,8 @@ name: Deploy Cloud Run
 #
 # CONFIGURACIÓN ÚNICA (pasos en CLAUDE.md → "Despliegue"):
 #   Secreto del repositorio GCP_DEPLOY_SA = clave JSON de una cuenta de servicio con
-#   permiso para desplegar en Cloud Run. Opcionales: variables CLOUD_RUN_SERVICE y
-#   CLOUD_RUN_REGION — si el proyecto tiene un solo servicio de Cloud Run, se detecta solo.
+#   permiso para desplegar en Cloud Run. Servicio: darwin-cell-vacantes-de-empleo
+#   (us-west1); las variables CLOUD_RUN_SERVICE y CLOUD_RUN_REGION lo cambian.
 #   Mientras falte el secreto, el despliegue se salta con un aviso (main no se pone en rojo).
 #
 # La configuración del servicio (variables de entorno, secretos, instancias, CPU) NO
@@ -68,8 +68,11 @@ jobs:
         id: target
         if: steps.cfg.outputs.ready == 'true'
         env:
-          SERVICE: ${{ vars.CLOUD_RUN_SERVICE }}
-          REGION: ${{ vars.CLOUD_RUN_REGION }}
+          # La app en producción. El proyecto tiene otro servicio
+          # (my-google-ai-studio-applet) que NO se toca. Las variables del repositorio,
+          # si existen, mandan.
+          SERVICE: ${{ vars.CLOUD_RUN_SERVICE || 'darwin-cell-vacantes-de-empleo' }}
+          REGION: ${{ vars.CLOUD_RUN_REGION || 'us-west1' }}
         run: |
           if [ -z "$SERVICE" ] || [ -z "$REGION" ]; then
             gcloud run services list --project "$PROJECT_ID" --format=json > services.json

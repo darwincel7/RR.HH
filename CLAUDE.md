@@ -36,16 +36,17 @@ responde. Si se puede, lanzarlo a mano con la herramienta de GitHub Actions
 Proyecto: `gen-lang-client-0929279196`.
 
 1. APIs habilitadas: Cloud Run Admin, Cloud Build y Artifact Registry.
-2. Cuenta de servicio `github-deploy` con los roles **Cloud Run Source Developer**
-   (`roles/run.sourceDeveloper`), **Service Usage Consumer**
-   (`roles/serviceusage.serviceUsageConsumer`) y **Service Account User**
-   (`roles/iam.serviceAccountUser`).
+2. Cuenta de servicio `github-deploy` con los roles **Desarrollador de origen de Cloud Run**
+   (`roles/run.sourceDeveloper`), **Consumidor de Service Usage**
+   (`roles/serviceusage.serviceUsageConsumer`) y **Usuario de cuenta de servicio**
+   (`roles/iam.serviceAccountUser`). La consola del usuario está en español.
 3. La cuenta que compila (Compute Engine default service account,
    `<número-del-proyecto>-compute@developer.gserviceaccount.com`) con el rol
    **Cloud Run Builder** (`roles/run.builder`).
 4. La clave JSON de `github-deploy`, guardada como secreto del repositorio **`GCP_DEPLOY_SA`**.
-5. Opcional: variables del repositorio `CLOUD_RUN_SERVICE` y `CLOUD_RUN_REGION` (si el
-   proyecto tiene un solo servicio de Cloud Run, el workflow lo detecta solo).
+5. Servicio de producción: **`darwin-cell-vacantes-de-empleo`** (región `us-west1`), fijado
+   en el workflow. El otro servicio del proyecto, `my-google-ai-studio-applet`, **no se
+   toca**. Las variables del repositorio `CLOUD_RUN_SERVICE` / `CLOUD_RUN_REGION` lo cambian.
 
 Mientras falte `GCP_DEPLOY_SA`, el workflow se salta con un aviso (no pone `main` en
 rojo). Si el despliegue falla por permisos, leer el error del job y decirle al usuario
