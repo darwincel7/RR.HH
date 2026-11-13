@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
-import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, addDoc, serverTimestamp, doc, setDoc, deleteDoc, updateDoc, writeBatch } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, CheckCircle, Star } from 'lucide-react';
+import { Plus, Briefcase, Link as LinkIcon, ExternalLink, Sparkles, Trash2, AlertTriangle, Edit3, ChevronDown, ChevronUp, CheckCircle, Star } from 'lucide-react';
+import { sortVacanciesForDisplay, moveVacancy } from '../lib/vacancyOrder';
 
 export default function Vacancies() {
   const navigate = useNavigate();
@@ -28,7 +29,7 @@ export default function Vacancies() {
     const q = query(collection(db, 'vacancies'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const v = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
-      setVacancies(v);
+      setVacancies(sortVacanciesForDisplay(v));
     }, (error) => {
       console.error("Error fetching vacancies:", error);
     });
@@ -111,6 +112,29 @@ export default function Vacancies() {
     }
   };
 
+  // Move a vacancy one slot up/down. The same order is used by the public careers
+  // portal, so this is how the recruiter decides which opening applicants see first.
+  const [reordering, setReordering] = useState(false);
+  const handleMove = async (id: string, direction: -1 | 1) => {
+    const updates = moveVacancy(vacancies, id, direction);
+    if (!updates || reordering) return;
+    const previous = vacancies;
+    const byId = new Map(updates.map(u => [u.id, u.displayOrder]));
+    setVacancies(sortVacanciesForDisplay(vacancies.map(v => ({ ...v, displayOrder: byId.get(v.id) })))); // instant feedback
+    setReordering(true);
+    try {
+      const batch = writeBatch(db);
+      updates.forEach(u => batch.update(doc(db, 'vacancies', u.id), { displayOrder: u.displayOrder }));
+      await batch.commit();
+    } catch (err) {
+      console.error('No se pudo cambiar el orden de las vacantes:', err);
+      setVacancies(previous);
+      alert('No se pudo cambiar el orden de las vacantes.');
+    } finally {
+      setReordering(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!vacancyToDelete) return;
     try {
@@ -127,7 +151,7 @@ export default function Vacancies() {
       <div className="flex justify-between items-center mb-10">
         <div>
           <h1 className="text-3xl font-display font-bold text-slate-900 tracking-tight">Vacantes</h1>
-          <p className="text-slate-500 mt-1">Gestiona los embudos de contratación y publica nuevas posiciones. Toca la etiqueta Activa/Inactiva para publicarla u ocultarla del portal.</p>
+          <p className="text-slate-500 mt-1">Gestiona los embudos de contratación y publica nuevas posiciones. Toca la etiqueta Activa/Inactiva para publicarla u ocultarla del portal. Usa las flechas para elegir en qué orden aparecen en el portal.</p>
         </div>
         <button
           onClick={() => setIsCreating(true)}
@@ -139,7 +163,7 @@ export default function Vacancies() {
       </div>
 
       <div className="flex flex-col space-y-4">
-        {vacancies.map((vacancy) => (
+        {vacancies.map((vacancy, index) => (
           <div
             key={vacancy.id}
             className="glass-card rounded-2xl p-5 group relative overflow-hidden hover:shadow-xl transition-all duration-300 flex flex-col gap-4"
@@ -148,6 +172,26 @@ export default function Vacancies() {
 
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 cursor-pointer" onClick={() => navigate(`/vacancies/${vacancy.id}/kanban`)}>
             <div className="flex items-center gap-4 relative z-10 flex-1">
+              <div className="flex flex-col shrink-0 -my-1" onClick={e => e.stopPropagation()}>
+                <button
+                  onClick={() => handleMove(vacancy.id, -1)}
+                  disabled={index === 0 || reordering}
+                  className="p-1 text-slate-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400 disabled:cursor-not-allowed"
+                  title="Subir (se muestra antes en el portal)"
+                  aria-label={`Subir ${vacancy.title}`}
+                >
+                  <ChevronUp className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => handleMove(vacancy.id, 1)}
+                  disabled={index === vacancies.length - 1 || reordering}
+                  className="p-1 text-slate-400 hover:text-violet-600 hover:bg-violet-50 rounded-lg transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400 disabled:cursor-not-allowed"
+                  title="Bajar (se muestra después en el portal)"
+                  aria-label={`Bajar ${vacancy.title}`}
+                >
+                  <ChevronDown className="w-5 h-5" />
+                </button>
+              </div>
               <div className="relative p-3 bg-violet-50 text-violet-600 rounded-2xl shrink-0">
                 <Briefcase className="w-6 h-6" />
                 {newCounts[vacancy.id] > 0 && (
