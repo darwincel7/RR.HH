@@ -3,6 +3,7 @@ import { collection, query, where, getDocs, doc, getDoc } from 'firebase/firesto
 import { db } from '../lib/firebase';
 import { Link } from 'react-router-dom';
 import { Briefcase, MapPin, Clock, ArrowRight, Sparkles, Building2, Users, Star, TrendingUp } from 'lucide-react';
+import { sortVacanciesForDisplay } from '../lib/vacancyOrder';
 
 export default function Careers() {
   const [vacancies, setVacancies] = useState<any[]>([]);
@@ -37,7 +38,7 @@ export default function Careers() {
       if (!res.ok) throw new Error(`careers-data ${res.status}`);
       const data = await res.json();
       applyCompany(data.company);
-      setVacancies(Array.isArray(data.vacancies) ? data.vacancies : []);
+      setVacancies(sortVacanciesForDisplay(Array.isArray(data.vacancies) ? data.vacancies : []));
       setLoading(false);
       return;
     } catch (err) {
@@ -50,7 +51,7 @@ export default function Careers() {
         getDocs(query(collection(db, 'vacancies'), where('active', '==', true))),
       ]);
       if (companySnap.exists()) applyCompany(companySnap.data());
-      setVacancies(vacSnap.docs.map(d => ({ id: d.id, ...d.data() })));
+      setVacancies(sortVacanciesForDisplay(vacSnap.docs.map(d => ({ id: d.id, ...d.data() }))));
     } catch (error) {
       // Both paths failed (e.g. Firestore quota exhausted). This is an ERROR state,
       // not "there are no vacancies" — show retry instead of a misleading empty state.
